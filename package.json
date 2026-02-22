@@ -1,0 +1,9 @@
+{
+  "devDependencies": {
+    "@citizenfx/client": "^2.0.25988-1",
+    "@citizenfx/server": "^2.0.25988-1"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}

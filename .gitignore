@@ -1,0 +1,28 @@
+node_modules/
+**/node_modules/
+
+# Frontend build output
+dist/
+**/dist/
+
+# JS/TS caches and logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.pnpm-store/
+.yarn/
+.cache/
+coverage/
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db

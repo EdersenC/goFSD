@@ -1,0 +1,24 @@
+{
+  "name": "fsd",
+  "version": "1.0.0",
+  "description": "FiveM Dev Tools",
+  "scripts": {
+    "build": "esbuild src/client.ts --bundle --platform=browser --format=iife --target=es2017 --outfile=dist/client.js && esbuild src/server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/server.js",
+    "build:wsl": "esbuild src/client.ts --bundle --platform=browser --format=iife --target=es2017 --outfile=/home/eddy/Fivem/data/cfx-server-data/resources/FSD/dist/client.js && esbuild src/server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=/home/eddy/Fivem/data/cfx-server-data/resources/FSD/dist/server.js",
+    "watch": "sh -c 'esbuild src/client.ts --bundle --platform=browser --format=iife --target=es2017 --outfile=dist/client.js --watch=forever & esbuild src/server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/server.js --watch=forever & wait'",
+    "watch:wsl": "sh -c 'esbuild src/client.ts --bundle --platform=browser --format=iife --target=es2017 --outfile=/home/eddy/Fivem/data/cfx-server-data/resources/FSD/dist/client.js --watch=forever & esbuild src/server.ts --bundle --platform=node --format=cjs --target=node18 --outfile=/home/eddy/Fivem/data/cfx-server-data/resources/FSD/dist/server.js --watch=forever & wait'",
+    "clean": "rm -rf dist",
+    "clean:wsl": "rm -rf /home/eddy/Fivem/data/cfx-server-data/resources/FSD/dist"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@citizenfx/client": "^2.0.25963-1",
+    "@citizenfx/server": "^2.0.25963-1",
+    "@types/node-fetch": "^2.6.13",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
