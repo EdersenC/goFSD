@@ -1,4 +1,5 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
+import {configurePopulation} from "./environment";
 
 
 export enum DrivingFlag {
@@ -162,7 +163,15 @@ export interface Ego {
     waypoints?: Route[]
 }
 
-
+export interface VehicleData {
+    time: number
+    currentSpeed: number
+    drivingStyle: DrivingStyle
+    acceleration: number
+    isStopped: boolean | number
+    Steering: number
+    yaw: number
+}
 
 export class EgoService {
 
@@ -186,24 +195,24 @@ export class EgoService {
 
 
 
-    private watchDog(evaluator:()=>Evaluator, timeoutMs = 60000): AbortSignal {
+    private async watchDog(evaluator: () => Promise<{ success: boolean; message: string }>, timeoutMs = 60000): Promise<AbortSignal> {
         const abortController = new (AbortControllerCompat as any)();
         const startTime = Date.now();
 
-        const interval = setInterval(() => {
+        const interval = setInterval(async () => {
             if (Date.now() - startTime > timeoutMs) {
                 console.log("Watchdog timeout reached, aborting.");
                 abortController.abort();
                 return;
             }
 
-            const evalResult = evaluator();
+            const evalResult = await evaluator();
             if (evalResult.success) {
                 console.log(evalResult.message);
                 abortController.abort();
                 return;
             }
-        }, 1000);
+        }, 50);
 
         abortController.signal.addEventListener("abort", () => clearInterval(interval), { once: true });
         return abortController.signal;
@@ -221,7 +230,7 @@ export class EgoService {
             await wait(1000)
             const blip = GetFirstBlipInfoId(8)
             this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
-            const signal = this.watchDog( this.drivingLoop(ego,[x,y,z]), 10*60_000);
+            const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
             // Wait for the watchdog to abort before continuing
             await new Promise<void>((resolve) => {
                 signal.addEventListener("abort", () => resolve());
@@ -231,11 +240,15 @@ export class EgoService {
     }
 
 
-    private drivingLoop(ego:Ego, cords:[number,number,number]): () => Evaluator {
+
+    private async drivingLoop(ego:Ego, cords:[number,number,number]): Promise<() => Promise<{
+        success: boolean;
+        message: string
+    }>> {
         let lastTargetSpeed = ego.vehicle.maxSpeed;
         const highwaySpeed = 65;
         const [x, y, z] = cords;
-        return () => {
+        return async () => {
             const targetSpeed = GetIsPlayerDrivingOnHighway(PlayerId()) ? highwaySpeed : ego.vehicle.maxSpeed;
             if (targetSpeed !== lastTargetSpeed) {
                 if (targetSpeed === highwaySpeed) {
@@ -244,13 +257,38 @@ export class EgoService {
                 SetDriveTaskCruiseSpeed(PlayerPedId(), targetSpeed);
                 lastTargetSpeed = targetSpeed;
             }
+
+            await this.collectEgoData(ego);
+
             const isWaypointActive = IsWaypointActive();
-            console.log(' way point is  ',isWaypointActive)
             return {
                 success: !isWaypointActive,
                 message: `Waypoint reached at (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}).`
             }
         }
+    }
+
+
+    public async collectEgoData(ego: Ego): Promise<VehicleData> {
+        const id = ego.vehicle.id;
+        const currentSpeed = GetEntitySpeed(ego.vehicle.id);
+        const isStopped :boolean | number = IsVehicleStopped(id)
+        const acceleration = GetVehicleCurrentAcceleration(id);
+        const Steering = GetVehicleWheelSteeringAngle(id, 0);
+        const yaw = GetEntityHeading(id)
+        const time = GetGameTimer();
+
+        const data: VehicleData = {
+            time,
+            currentSpeed,
+            drivingStyle: ego.vehicle.drivingStyle,
+            acceleration,
+            isStopped,
+            Steering,
+            yaw,
+        };
+        console.log('Collected ego data:', data);
+        return data;
     }
 
 

@@ -2,29 +2,27 @@
 
 import fetch from "node-fetch";
 import {log} from "./helper";
-import {newScene} from "./sceneManger";
-import {EgoService} from "./egoService";
+import {newScene, normalizeScenePayload, SceneType} from "./sceneManger";
 
-async function callAPI() {
-    const res = await fetch("https://api.github.com/repos/citizenfx/fivem");
-    const data = await res.json();
-    return data;
+console.log("[server] loaded");
+
+async function getDataSetScenes(id:string): Promise<SceneType> {
+    const response = await fetch(`http://localhost:8080/datasets/${id}/scene`);
+    console.log(`[server] fetched scene data for dataset ${id} with status ${response.status}`, response);
+    const data = await response.json();
+    // @ts-ignore
+    const scene = normalizeScenePayload(data?.scene);
+    console.log(scene);
+    return scene
 }
 
 
 onNet("demo:requestScenes", async () => {
     const src = global.source as number;
     console.log("[server] received request for scenes from", src);
-    const sceneData = newScene;
-    log("Sending Scene: " + sceneData);
+    const sceneData = await getDataSetScenes('patrol-default');
+    console.log("Sending Scene: " + sceneData);
+    console.log(`customScene: ${JSON.stringify(newScene)}`);
     emitNet("demo:responseScenes", src, sceneData);
 });
 
-
-console.log("[server] loaded");
-onNet("demo:ping", async (msg: string) => {
-    const src = global.source as number; // snapshot who called
-    console.log("[server] from", src, msg);
-    const data = await callAPI();
-    emitNet("demo:pong", src, data);
-});

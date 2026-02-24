@@ -1,5 +1,6 @@
 //src/environment.ts
 import {log} from "./helper"
+import {Ego} from "./egoService";
 
 export enum WeatherType {
     CLEAR = "CLEAR",
@@ -45,8 +46,10 @@ export class EnvironmentService {
     public execute(environment: Environment) {
         this.SetWeather(environment.weatherType);
         this.setTime(environment.Time);
+        configurePopulation(undefined)
         log("Environment executed with weather: " + environment.weatherType.type + " and time: " + environment.Time.hour + ":" + environment.Time.minute + ":" + environment.Time.second);
     }
+
 
      public SetWeather(weather:Weather){
         if (weather.persistent) {
@@ -72,5 +75,15 @@ export class EnvironmentService {
 
 }
 
+
+export function configurePopulation(environment: Environment|undefined) {
+    SetPedPopulationBudget(3);
+    SetPedDensityMultiplierThisFrame(1.0)
+    SetVehiclePopulationBudget(0);
+    const [x, y, z] = GetEntityCoords(PlayerPedId(), true) as [number, number, number];
+    ClearAreaOfVehicles(x, y, z, 1000.0, false, false, false, false, false);
+    SetRandomVehicleDensityMultiplierThisFrame(0.0);
+    SetParkedVehicleDensityMultiplierThisFrame(3);
+}
 
 

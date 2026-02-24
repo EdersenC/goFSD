@@ -1,7 +1,7 @@
 package main
 
 import (
-	"awesomeProject/backend/api"
+	"awesomeProject/api"
 	"log"
 	"os"
 
@@ -13,9 +13,16 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	datasetsFile := os.Getenv("DATASETS_FILE")
+	if datasetsFile == "" {
+		datasetsFile = "data/datasets.json"
+	}
 
 	r := gin.Default()
-	h := api.NewHandler()
+	h, err := api.NewHandler(datasetsFile)
+	if err != nil {
+		log.Fatalf("failed to initialize dataset storage: %v", err)
+	}
 	h.RegisterRoutes(r)
 
 	if err := r.Run(":" + port); err != nil {

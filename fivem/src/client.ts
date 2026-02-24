@@ -15,7 +15,8 @@ RegisterCommand("startScene", async () => {
 
 onNet("demo:responseScenes", async (scene: SceneType) => {
     sceneManager.addScene("SunnyDay", scene);
-    sceneManager.shuffleWaypoints("SunnyDay");
+    console.log(scene)
+    // sceneManager.shuffleWaypoints("SunnyDay");
     await sceneManager.executeAllScenes()
 });
 
