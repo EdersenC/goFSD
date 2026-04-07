@@ -154,7 +154,6 @@ interface Vehicle {
     maxSpeed: number
     drivingStyle: DrivingStyle
     VehicleData?: VehicleData[]
-    isStopped?: boolean | number
 }
 
 export interface Route {
@@ -321,7 +320,6 @@ export class EgoService {
                 maxSpeed: ego.vehicle.maxSpeed,
                 drivingStyle: ego.vehicle.drivingStyle,
                 VehicleData: undefined,
-                isStopped: ego.vehicle.isStopped,
             },
             vehicleData: vehicleDataChunk,
         };
@@ -332,7 +330,6 @@ export class EgoService {
 
         emitNet("ego:vehicleData", payload);
         ego.vehicle.VehicleData = [];
-        ego.vehicle.isStopped = false;
         this.tripChunkIndex += 1;
         this.activeTripContext.chunkStartTime = endTime;
     }
