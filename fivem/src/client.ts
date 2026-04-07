@@ -1,24 +1,59 @@
 // src/client.ts
 import {SceneManager, SceneType} from "./sceneManger";
-import {WeatherType} from "./environment";
-import {DrivingStyle, Route, VehicleColor, VehicleModel} from "./egoService";
 import {log} from "./helper";
+import {
+    innerCityDrivingScenes,
+    type InnerCityDrivingSceneVariant
+} from "./datasets/inner-city-driving";
 
 log("[client] loaded");
 
 
 
 const sceneManager = new SceneManager();
-RegisterCommand("startScene", async () => {
-    emitNet('demo:requestScenes');
+const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDrivingSceneVariant[];
+
+function registerInnerCityScenes() {
+    for (const variant of innerCitySceneNames) {
+        sceneManager.addScene(`inner-city-driving:${variant}`, innerCityDrivingScenes[variant]);
+    }
+}
+
+registerInnerCityScenes();
+
+RegisterCommand("startScene", async (_source: number, args: string[]) => {
+    const requestedVariant = args[0] as InnerCityDrivingSceneVariant | undefined;
+    const variant = requestedVariant && requestedVariant in innerCityDrivingScenes
+        ? requestedVariant
+        : "default";
+    const sceneName = `inner-city-driving:${variant}`;
+
+    await sceneManager.executeScene(sceneName);
+}, false);
+
+RegisterCommand("listSceneVariants", () => {
+    const variants = innerCitySceneNames.join(", ");
+    emit("chat:addMessage", {
+        args: ["Scenes", variants],
+    });
 }, false);
 
 onNet("demo:responseScenes", async (scene: SceneType) => {
-    sceneManager.addScene("SunnyDay", scene);
+    sceneManager.addScene("remote-scene", scene);
     console.log(scene)
-    // sceneManager.shuffleWaypoints("SunnyDay");
+    // sceneManager.shuffleWaypoints("remote-scene");
     await sceneManager.executeAllScenes()
 });
+
+RegisterCommand("coords", () => {
+    const [x, y, z] = GetEntityCoords(PlayerPedId(), true) as [number, number, number];
+    const formatted = `${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)}`;
+
+    console.log(`[coords] ${formatted}`);
+    emit("chat:addMessage", {
+        args: ["Coords", formatted],
+    });
+}, false);
 
 
 

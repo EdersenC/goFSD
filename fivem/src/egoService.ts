@@ -1,5 +1,6 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
 import {configurePopulation} from "./environment";
+import {syncFlash} from "./sceneManger";
 
 
 export enum DrivingFlag {
@@ -152,6 +153,8 @@ interface Vehicle {
     color: VehicleColor
     maxSpeed: number
     drivingStyle: DrivingStyle
+    VehicleData?: VehicleData[]
+    isStopped?: boolean | number
 }
 
 export interface Route {
@@ -173,12 +176,45 @@ export interface VehicleData {
     yaw: number
 }
 
+export interface WaypointCompleted {
+    runId: string
+    sceneId: string
+    sceneVariant: string
+    tripIndex: number
+    chunkIndex: number
+    chunkDurationMs: number
+    isTripComplete: boolean
+    syncTime: number
+    endTime: number
+    fromDestination: [number, number, number]
+    toDestination: [number, number, number]
+    vehicle: Omit<Vehicle, "id">
+    vehicleData: VehicleData[]
+}
+
 export class EgoService {
+    private static readonly MAX_TRIP_VEHICLE_DATA_POINTS = 1000;
 
     public oldEgo: Ego | null = null;
+    public SceneName: string =''
+    public RunId: string = ''
+    private tripChunkIndex = 0;
+    private activeTripContext: {
+        sceneId: string
+        sceneVariant: string
+        tripIndex: number
+        syncTime: number
+        chunkStartTime: number
+        fromDestination: [number, number, number]
+        toDestination: [number, number, number]
+    } | null = null;
 
-
-    public async execute(ego: Ego){
+    public async execute(ego: Ego, sceneName: string) {
+        ego.vehicle.VehicleData = []
+        this.SceneName = sceneName
+        this.RunId = this.createRunId()
+        this.tripChunkIndex = 0;
+        this.activeTripContext = null;
         if (this.oldEgo) {
             this.cleanUp(this.oldEgo);
         }
@@ -223,8 +259,21 @@ export class EgoService {
             console.log('No waypoints defined for ego, skipping routing.');
             return
         }
-        for (const waypoint of ego.waypoints) {
+        const sceneInfo = this.parseSceneName(this.SceneName);
+        let previousDestination = GetEntityCoords(ego.vehicle.id, false) as [number, number, number];
+        for (const [tripIndex, waypoint] of ego.waypoints.entries()) {
+            this.tripChunkIndex = 0;
+            const syncTime = await syncFlash();
             console.log('Routing to waypoint:', waypoint.destination);
+            this.activeTripContext = {
+                sceneId: sceneInfo.sceneId,
+                sceneVariant: sceneInfo.sceneVariant,
+                tripIndex,
+                syncTime,
+                chunkStartTime: syncTime,
+                fromDestination: previousDestination,
+                toDestination: waypoint.destination
+            };
             const [x, y, z] = this.configureRoute(waypoint, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle).destination;
             SetNewWaypoint(x,y);
             await wait(1000)
@@ -235,8 +284,71 @@ export class EgoService {
             await new Promise<void>((resolve) => {
                 signal.addEventListener("abort", () => resolve());
             });
+
+            this.emitTripChunk(
+                ego,
+                GetGameTimer(),
+                true
+            );
+            previousDestination = waypoint.destination
+            this.activeTripContext = null;
         }
         TaskVehicleDriveWander(PlayerPedId(), ego.vehicle.id, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
+    }
+
+    private emitTripChunk( ego: Ego, endTime: number, isTripComplete: boolean )
+    {
+        if (!this.activeTripContext){
+         return;
+        }
+
+        const vehicleDataChunk = ego.vehicle.VehicleData ?? [];
+        const payload: WaypointCompleted = {
+            runId: this.RunId,
+            sceneId: this.activeTripContext.sceneId,
+            sceneVariant: this.activeTripContext.sceneVariant,
+            tripIndex: this.activeTripContext.tripIndex,
+            chunkIndex: this.tripChunkIndex,
+            chunkDurationMs: Math.max(0, endTime - this.activeTripContext.chunkStartTime),
+            isTripComplete,
+            syncTime: this.activeTripContext.syncTime,
+            endTime,
+            fromDestination: this.activeTripContext.fromDestination,
+            toDestination: this.activeTripContext.toDestination,
+            vehicle: {
+                model: ego.vehicle.model,
+                color: ego.vehicle.color,
+                maxSpeed: ego.vehicle.maxSpeed,
+                drivingStyle: ego.vehicle.drivingStyle,
+                VehicleData: undefined,
+                isStopped: ego.vehicle.isStopped,
+            },
+            vehicleData: vehicleDataChunk,
+        };
+
+        console.log(
+            `[ego] emitting chunk ${payload.chunkIndex} for trip ${payload.tripIndex} run ${this.RunId} with ${payload.vehicleData.length} data points complete=${isTripComplete}`
+        );
+
+        emitNet("ego:vehicleData", payload);
+        ego.vehicle.VehicleData = [];
+        ego.vehicle.isStopped = false;
+        this.tripChunkIndex += 1;
+        this.activeTripContext.chunkStartTime = endTime;
+    }
+
+    private parseSceneName(sceneName: string): { sceneId: string; sceneVariant: string } {
+        const [sceneId, sceneVariant] = sceneName.split(":");
+        return {
+            sceneId: sceneId || "unknown-scene",
+            sceneVariant: sceneVariant || "default"
+        };
+    }
+
+    private createRunId(): string {
+        const iso = new Date().toISOString().replace(/[:.]/g, "-");
+        const suffix = Math.random().toString(36).slice(2, 8);
+        return `${iso}_${suffix}`;
     }
 
 
@@ -258,8 +370,8 @@ export class EgoService {
                 lastTargetSpeed = targetSpeed;
             }
 
-            await this.collectEgoData(ego);
 
+            this.collectEgoData(ego);
             const isWaypointActive = IsWaypointActive();
             return {
                 success: !isWaypointActive,
@@ -269,7 +381,8 @@ export class EgoService {
     }
 
 
-    public async collectEgoData(ego: Ego): Promise<VehicleData> {
+
+    public collectEgoData(ego: Ego) {
         const id = ego.vehicle.id;
         const currentSpeed = GetEntitySpeed(ego.vehicle.id);
         const isStopped :boolean | number = IsVehicleStopped(id)
@@ -277,6 +390,15 @@ export class EgoService {
         const Steering = GetVehicleWheelSteeringAngle(id, 0);
         const yaw = GetEntityHeading(id)
         const time = GetGameTimer();
+
+        if (ego.vehicle.VehicleData) {
+            const lastData = ego.vehicle.VehicleData[ego.vehicle.VehicleData.length - 1];
+            if (lastData?.isStopped && isStopped) {
+                return
+            }
+        }
+
+
 
         const data: VehicleData = {
             time,
@@ -287,8 +409,18 @@ export class EgoService {
             Steering,
             yaw,
         };
+
+
+        if (!ego.vehicle.VehicleData) {
+            ego.vehicle.VehicleData = [];
+        }
+        ego.vehicle.VehicleData.push(data)
+
+        if (ego.vehicle.VehicleData.length >= EgoService.MAX_TRIP_VEHICLE_DATA_POINTS) {
+            this.emitTripChunk(ego, GetGameTimer(), false);
+        }
+
         console.log('Collected ego data:', data);
-        return data;
     }
 
 
@@ -356,6 +488,8 @@ export class EgoService {
         SetVehicleOnGroundProperly(newVehicle);
         this.addPedToVehicle(PlayerPedId(), newVehicle);
         ego.vehicle.id = newVehicle;
+        ego.vehicle.model = resolvedModel;
+        ego.vehicle.color = resolvedColor;
     }
 
     public makeVehicleGodMode(veh: number) {
@@ -411,13 +545,6 @@ export class EgoService {
         return {destination: [rx, ry, rz]};
     }
 
-
-    public incrementSpeed(vehicle: number, increment: number = 5.0): void {
-        const currentSpeed = GetEntitySpeed(vehicle);
-        const newSpeed = currentSpeed + increment;
-        SetVehicleForwardSpeed(vehicle, newSpeed);
-    }
-
     private cleanUp(ego: Ego) {
         if (!isValidEntity(ego.vehicle.id)) {
             console.log('No valid vehicle to clean up for ego:', ego);
@@ -427,13 +554,6 @@ export class EgoService {
         wait(1000)
         DeleteVehicle(ego.vehicle.id);
         console.log('Cleaned up old vehicle with ID:', ego.vehicle.id);
-    }
-
-
-     public updateVehicle(vehicle: Vehicle){
-    }
-
-     public removeVehicle(){
     }
 
     private resolveVehicleColor(color: VehicleColor): VehicleColor {
