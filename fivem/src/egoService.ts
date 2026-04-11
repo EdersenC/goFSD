@@ -191,6 +191,8 @@ export interface WaypointCompleted {
     vehicleData: VehicleData[]
 }
 
+export const SceneStoppedErrorCode = "SCENE_STOPPED";
+
 export class EgoService {
     private static readonly MAX_TRIP_VEHICLE_DATA_POINTS = 1000;
 
@@ -207,11 +209,16 @@ export class EgoService {
         fromDestination: [number, number, number]
         toDestination: [number, number, number]
     } | null = null;
+    private stopRequested = false;
+    private stopReason = "";
+    private activeAbortController: AbortControllerCompat | null = null;
 
-    public async execute(ego: Ego, sceneName: string) {
+    public async execute(ego: Ego, sceneName: string, runId?: string) {
         ego.vehicle.VehicleData = []
         this.SceneName = sceneName
-        this.RunId = this.createRunId()
+        this.RunId = runId && runId.trim() !== "" ? runId : this.createRunId()
+        this.stopRequested = false;
+        this.stopReason = "";
         this.tripChunkIndex = 0;
         this.activeTripContext = null;
         if (this.oldEgo) {
@@ -228,13 +235,28 @@ export class EgoService {
         return
     }
 
+    public requestStop(reason = "scene stop requested") {
+        this.stopRequested = true;
+        this.stopReason = reason;
+
+        if (this.activeAbortController && !(this.activeAbortController as any).signal?.aborted) {
+            this.activeAbortController.abort();
+        }
+    }
 
 
     private async watchDog(evaluator: () => Promise<{ success: boolean; message: string }>, timeoutMs = 60000): Promise<AbortSignal> {
         const abortController = new (AbortControllerCompat as any)();
+        this.activeAbortController = abortController;
         const startTime = Date.now();
 
         const interval = setInterval(async () => {
+            if (this.stopRequested) {
+                console.log(`Watchdog stopping due to request: ${this.stopReason}`);
+                abortController.abort();
+                return;
+            }
+
             if (Date.now() - startTime > timeoutMs) {
                 console.log("Watchdog timeout reached, aborting.");
                 abortController.abort();
@@ -249,7 +271,12 @@ export class EgoService {
             }
         }, 50);
 
-        abortController.signal.addEventListener("abort", () => clearInterval(interval), { once: true });
+        abortController.signal.addEventListener("abort", () => {
+            clearInterval(interval);
+            if (this.activeAbortController === abortController) {
+                this.activeAbortController = null;
+            }
+        }, { once: true });
         return abortController.signal;
     }
 
@@ -261,6 +288,10 @@ export class EgoService {
         const sceneInfo = this.parseSceneName(this.SceneName);
         let previousDestination = GetEntityCoords(ego.vehicle.id, false) as [number, number, number];
         for (const [tripIndex, waypoint] of ego.waypoints.entries()) {
+            if (this.stopRequested) {
+                throw new Error(SceneStoppedErrorCode);
+            }
+
             this.tripChunkIndex = 0;
             const syncTime = await syncFlash();
             console.log('Routing to waypoint:', waypoint.destination);
@@ -284,6 +315,16 @@ export class EgoService {
                 signal.addEventListener("abort", () => resolve());
             });
 
+            if (this.stopRequested) {
+                this.emitTripChunk(
+                    ego,
+                    GetGameTimer(),
+                    true
+                );
+                this.activeTripContext = null;
+                throw new Error(SceneStoppedErrorCode);
+            }
+
             this.emitTripChunk(
                 ego,
                 GetGameTimer(),
@@ -291,6 +332,10 @@ export class EgoService {
             );
             previousDestination = waypoint.destination
             this.activeTripContext = null;
+        }
+
+        if (this.stopRequested) {
+            throw new Error(SceneStoppedErrorCode);
         }
         TaskVehicleDriveWander(PlayerPedId(), ego.vehicle.id, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
     }
@@ -343,9 +388,21 @@ export class EgoService {
     }
 
     private createRunId(): string {
-        const iso = new Date().toISOString().replace(/[:.]/g, "-");
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = this.pad2(now.getMonth() + 1);
+        const day = this.pad2(now.getDate());
+        const hours24 = now.getHours();
+        const meridiem = hours24 >= 12 ? "PM" : "AM";
+        const hours12 = hours24 % 12 || 12;
+        const minutes = this.pad2(now.getMinutes());
+        const seconds = this.pad2(now.getSeconds());
         const suffix = Math.random().toString(36).slice(2, 8);
-        return `${iso}_${suffix}`;
+        return `${year}-${month}-${day}_${this.pad2(hours12)}-${minutes}-${seconds}${meridiem}_${suffix}`;
+    }
+
+    private pad2(value: number): string {
+        return String(value).padStart(2, "0");
     }
 
 

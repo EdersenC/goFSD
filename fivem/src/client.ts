@@ -31,6 +31,14 @@ RegisterCommand("startScene", async (_source: number, args: string[]) => {
     await sceneManager.executeScene(sceneName);
 }, false);
 
+RegisterCommand("endScene", () => {
+    sceneManager.endScene();
+}, false);
+
+RegisterCommand("endAllScenes", () => {
+    sceneManager.endAllScenes();
+}, false);
+
 RegisterCommand("listSceneVariants", () => {
     const variants = innerCitySceneNames.join(", ");
     emit("chat:addMessage", {

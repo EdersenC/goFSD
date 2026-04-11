@@ -10,5 +10,4 @@ client_script {
     'dist/client.js',
     'dist/traffic.js'
     }
--- server_script 'server.js' -- optional, only if you need server-side logic
-
+server_script 'dist/server.js'
