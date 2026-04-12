@@ -322,6 +322,7 @@ export class EgoService {
                     true
                 );
                 this.activeTripContext = null;
+                ClearGpsPlayerWaypoint()
                 throw new Error(SceneStoppedErrorCode);
             }
 
@@ -335,6 +336,7 @@ export class EgoService {
         }
 
         if (this.stopRequested) {
+            ClearGpsPlayerWaypoint()
             throw new Error(SceneStoppedErrorCode);
         }
         TaskVehicleDriveWander(PlayerPedId(), ego.vehicle.id, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);

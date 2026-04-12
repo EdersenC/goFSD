@@ -41,11 +41,38 @@ type RunStoragePaths = {
     runTiming: RunIdParts
 }
 
+type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
+
+type ControlCommand = {
+    id: string
+    type: ControlCommandType
+    sceneName?: string
+    createdAt?: string
+}
+
+type ControlStatusUpdate = {
+    status: "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error"
+    activeSceneName?: string
+    lastError?: string
+}
+
+type AvailableScene = {
+    name: string
+    label: string
+}
+
 const activeTripByRun = new Map<string, string>();
 const pendingTrips = new Map<string, AggregatedTrip>();
+let controlPollInFlight = false;
+let lastSeenControlCommandId = "";
+let availableScenesSyncInFlight = false;
+let sceneListRequestInFlight = false;
+let activeControlPlayerSource: number | null = null;
+let controlConnectInFlight = false;
 
 onNet("capture:startRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
+    rememberControlPlayerSource(playerSource);
     const response: CaptureResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -62,6 +89,8 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
         );
 
         const result = await captureApiRequest("/capture/start", {
+            sourceId: "monitor-2",
+            cropToWindow: false,
             outputFile: runStorage.captureOutputFile
         });
 
@@ -77,6 +106,7 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
 
 onNet("capture:stopRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
+    rememberControlPlayerSource(playerSource);
     const response: CaptureResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -93,6 +123,37 @@ onNet("capture:stopRequest", async (request: CaptureRequest) => {
     }
 
     emitNet("capture:stopResponse", playerSource, response);
+});
+
+onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
+    rememberControlPlayerSource((global as any).source);
+    try {
+        await apiRequest("/control/status", "POST", {
+            status: update?.status ?? "idle",
+            activeSceneName: update?.activeSceneName ?? "",
+            lastError: update?.lastError ?? ""
+        });
+    } catch (err: any) {
+        console.error(`[control] failed to push status update: ${err?.message ?? err}`);
+    }
+});
+
+onNet("control:availableScenesResponse", async (scenes: AvailableScene[]) => {
+    rememberControlPlayerSource((global as any).source);
+    try {
+        sceneListRequestInFlight = false;
+        await syncAvailableScenes(Array.isArray(scenes) ? scenes : []);
+    } catch (err: any) {
+        console.error(`[control] failed to handle available scenes response: ${err?.message ?? err}`);
+    }
+});
+
+onNet("control:registerClient", async () => {
+    rememberControlPlayerSource((global as any).source);
+    lastSeenControlCommandId = "";
+    await stopCaptureOnReconnect();
+    await connectControlSession();
+    requestAvailableScenesFromClient();
 });
 
 onNet("ego:vehicleData", async (data: WaypointCompleted) => {
@@ -172,6 +233,13 @@ function sanitizePathSegment(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function rememberControlPlayerSource(value: unknown) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        activeControlPlayerSource = parsed;
+    }
+}
+
 function resolveProjectRoot(): string {
     return process.env.AWESOME_PROJECT_ROOT
         ?? (process.platform === "win32"
@@ -225,7 +293,7 @@ function buildRunStoragePaths(dataRoot: string, sceneId: string, sceneVariant: s
 
     const runFile = path.join(runsDir, `${runTiming.safeRunId}.jsonl`);
     const captureOutputFile =
-        `runs/${scopedRunFolder}/${runTiming.safeRunId}.mp4`;
+        `runs/${scopedRunFolder}/${runTiming.safeRunId}.mkv`;
 
     return {
         runsDir,
@@ -276,15 +344,23 @@ function parseSceneName(sceneName?: string): { sceneId: string; sceneVariant: st
 }
 
 async function captureApiRequest(endpoint: string, body: any): Promise<any> {
+    return apiRequest(endpoint, "POST", body);
+}
+
+async function apiRequest(endpoint: string, method: "GET" | "POST", body?: any): Promise<any> {
     const baseUrl = (process.env.CAPTURE_API_URL || "http://127.0.0.1:8080").replace(/\/+$/, "");
     const url = `${baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify(body ?? {})
-    });
+    const response = await fetch(url, method === "GET"
+        ? {
+            method
+        }
+        : {
+            method,
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body ?? {})
+        });
 
     const text = await response.text();
     let parsed: any = {};
@@ -303,6 +379,113 @@ async function captureApiRequest(endpoint: string, body: any): Promise<any> {
 
     return parsed;
 }
+
+async function syncAvailableScenes(scenes: AvailableScene[]) {
+    if (availableScenesSyncInFlight) {
+        return;
+    }
+
+    availableScenesSyncInFlight = true;
+    try {
+        await apiRequest("/control/scenes", "POST", {
+            scenes
+        });
+    } catch (err: any) {
+        console.error(`[control] failed to sync available scenes: ${err?.message ?? err}`);
+    } finally {
+        availableScenesSyncInFlight = false;
+    }
+}
+
+async function connectControlSession() {
+    if (controlConnectInFlight) {
+        return;
+    }
+
+    controlConnectInFlight = true;
+    try {
+        const result = await apiRequest("/control/connect", "POST", {});
+        lastSeenControlCommandId = "";
+        console.log(`[control] reset session ${result?.sessionId ?? "unknown"}`);
+    } catch (err: any) {
+        console.error(`[control] failed to reset control session: ${err?.message ?? err}`);
+    } finally {
+        controlConnectInFlight = false;
+    }
+}
+
+async function stopCaptureOnReconnect() {
+    try {
+        await captureApiRequest("/capture/stop", {});
+        console.log("[control] stopped active capture during reconnect");
+    } catch (err: any) {
+        const message = String(err?.message ?? err ?? "");
+        if (message.toLowerCase().includes("capture is not running")) {
+            return;
+        }
+        console.error(`[control] failed to stop capture during reconnect: ${message}`);
+    }
+}
+
+function requestAvailableScenesFromClient() {
+    if (sceneListRequestInFlight) {
+        return;
+    }
+
+    const playerSource = activeControlPlayerSource;
+    if (playerSource === null) {
+        return;
+    }
+
+    sceneListRequestInFlight = true;
+    emitNet("control:requestAvailableScenes", playerSource);
+    setTimeout(() => {
+        sceneListRequestInFlight = false;
+    }, 3000);
+}
+
+async function pollControlCommands() {
+    if (controlPollInFlight) {
+        return;
+    }
+
+    controlPollInFlight = true;
+    try {
+        const query = lastSeenControlCommandId
+            ? `?lastSeenCommandId=${encodeURIComponent(lastSeenControlCommandId)}`
+            : "";
+        const result = await apiRequest(`/control/poll${query}`, "GET");
+        const command = result?.command as ControlCommand | undefined;
+        if (!command?.id) {
+            return;
+        }
+
+        const playerSource = activeControlPlayerSource;
+        if (playerSource === null) {
+            return;
+        }
+
+        emitNet("control:executeCommand", playerSource, command);
+        lastSeenControlCommandId = command.id;
+    } catch (err: any) {
+        console.error(`[control] poll failed: ${err?.message ?? err}`);
+    } finally {
+        controlPollInFlight = false;
+    }
+}
+
+setImmediate(() => {
+    requestAvailableScenesFromClient();
+    void pollControlCommands();
+});
+
+setInterval(() => {
+    void pollControlCommands();
+}, 2000);
+
+setInterval(() => {
+    requestAvailableScenesFromClient();
+}, 10000);
 
 function flushTrip(tripKey: string, runFile: string, manifestFile: string, fs: any) {
     const trip = pendingTrips.get(tripKey);

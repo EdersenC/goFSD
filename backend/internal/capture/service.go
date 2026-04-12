@@ -33,6 +33,7 @@ var (
 	ErrNotRunning          = errors.New("capture is not running")
 	ErrStartFailed         = errors.New("failed to start capture")
 	ErrStopFailed          = errors.New("failed to stop capture")
+	ErrUnsupportedFFmpeg   = errors.New("ffmpeg build does not support required capture features")
 )
 
 type Source struct {
@@ -47,19 +48,26 @@ type Source struct {
 	Width        int    `json:"width,omitempty"`
 	Height       int    `json:"height,omitempty"`
 	IsFallback   bool   `json:"isFallback"`
+	OutputIndex  int    `json:"-"`
 }
 
 type StartRequest struct {
-	SourceID   string `json:"sourceId"`
-	OutputFile string `json:"outputFile,omitempty"`
+	SourceID           string `json:"sourceId"`
+	OutputFile         string `json:"outputFile,omitempty"`
+	PreferredMonitorID string `json:"preferredMonitorId,omitempty"`
+	CropToWindow       *bool  `json:"cropToWindow,omitempty"`
 }
 
 type StartResult struct {
-	Status     string `json:"status"`
-	SessionID  string `json:"sessionId"`
-	PID        int    `json:"pid"`
-	OutputFile string `json:"outputFile"`
-	LogFile    string `json:"logFile"`
+	Status            string        `json:"status"`
+	SessionID         string        `json:"sessionId"`
+	PID               int           `json:"pid"`
+	OutputFile        string        `json:"outputFile"`
+	LogFile           string        `json:"logFile"`
+	CaptureBackend    string        `json:"captureBackend,omitempty"`
+	SelectedMonitorID string        `json:"selectedMonitorId,omitempty"`
+	CropApplied       bool          `json:"cropApplied,omitempty"`
+	DetectedWindow    *WindowBounds `json:"detectedWindowBounds,omitempty"`
 }
 
 type StopResult struct {
@@ -71,6 +79,7 @@ type StopResult struct {
 
 type CommandFactory func(name string, args ...string) *exec.Cmd
 type SourceDiscovery func(ctx context.Context) ([]Source, error)
+type CapabilityProbe func(ctx context.Context, ffmpegBin string, capability string) (bool, error)
 
 type Option func(*Service)
 
@@ -86,6 +95,7 @@ type Service struct {
 
 	newCommand CommandFactory
 	discover   SourceDiscovery
+	probe      CapabilityProbe
 
 	active *session
 }
@@ -111,6 +121,27 @@ type monitorInfo struct {
 type windowInfo struct {
 	Handle string
 	Title  string
+	X      int
+	Y      int
+	Width  int
+	Height int
+}
+
+type WindowBounds struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type captureSpec struct {
+	backend           string
+	inputFormat       string
+	input             string
+	videoFilter       string
+	selectedMonitorID string
+	cropApplied       bool
+	detectedWindow    *WindowBounds
 }
 
 func NewService(opts ...Option) *Service {
@@ -126,6 +157,7 @@ func NewService(opts ...Option) *Service {
 		nowFunc:       time.Now,
 		newCommand:    exec.Command,
 		discover:      discoverSources,
+		probe:         probeFFmpegCapability,
 	}
 
 	for _, opt := range opts {
@@ -147,6 +179,14 @@ func WithSourceDiscovery(discovery SourceDiscovery) Option {
 	return func(s *Service) {
 		if discovery != nil {
 			s.discover = discovery
+		}
+	}
+}
+
+func WithCapabilityProbe(probe CapabilityProbe) Option {
+	return func(s *Service) {
+		if probe != nil {
+			s.probe = probe
 		}
 	}
 }
@@ -194,13 +234,14 @@ func (s *Service) DiscoverSources(ctx context.Context) ([]Source, error) {
 
 func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, error) {
 	sourceID := strings.TrimSpace(req.SourceID)
+	preferredMonitorID := strings.TrimSpace(req.PreferredMonitorID)
 
 	sources, err := s.discover(ctx)
 	if err != nil {
 		return StartResult{}, err
 	}
 
-	selected, err := selectSource(sources, sourceID)
+	spec, err := s.resolveCaptureSpec(ctx, sources, sourceID, preferredMonitorID, shouldCropToWindow(req))
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -230,7 +271,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 		return StartResult{}, fmt.Errorf("%w: %v", ErrStartFailed, err)
 	}
 
-	args := buildFFmpegArgs(selected, outputFile)
+	args := buildFFmpegArgs(spec, outputFile)
 	cmd := s.newCommand(s.ffmpegBin, args...)
 	cmd.Stdout = logHandle
 	cmd.Stderr = logHandle
@@ -263,11 +304,15 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 	go s.waitForSession(active, logHandle)
 
 	return StartResult{
-		Status:     "started",
-		SessionID:  sessionID,
-		PID:        cmd.Process.Pid,
-		OutputFile: outputFile,
-		LogFile:    logFile,
+		Status:            "started",
+		SessionID:         sessionID,
+		PID:               cmd.Process.Pid,
+		OutputFile:        outputFile,
+		LogFile:           logFile,
+		CaptureBackend:    spec.backend,
+		SelectedMonitorID: spec.selectedMonitorID,
+		CropApplied:       spec.cropApplied,
+		DetectedWindow:    spec.detectedWindow,
 	}, nil
 }
 
@@ -338,7 +383,7 @@ func (s *Service) waitForSession(active *session, logHandle *os.File) {
 func (s *Service) resolveOutputFile(sessionID, requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
-		name := sanitizeFileName(sessionID + ".mp4")
+		name := sanitizeFileName(sessionID + ".mkv")
 		if name == "" {
 			return "", ErrInvalidRequest
 		}
@@ -366,7 +411,7 @@ func (s *Service) resolveOutputFile(sessionID, requested string) (string, error)
 
 	last := safeParts[len(safeParts)-1]
 	if ext := strings.ToLower(filepath.Ext(last)); ext == "" {
-		last += ".mp4"
+		last += ".mkv"
 	}
 	safeParts[len(safeParts)-1] = last
 
@@ -423,13 +468,14 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 		sources = append(sources, Source{
 			ID:          id,
 			Name:        name,
-			InputFormat: "gdigrab",
+			InputFormat: "ddagrab",
 			Input:       "desktop",
 			CaptureType: "monitor",
 			OffsetX:     mon.X,
 			OffsetY:     mon.Y,
 			Width:       mon.Width,
 			Height:      mon.Height,
+			OutputIndex: i,
 		})
 	}
 
@@ -464,10 +510,14 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 		windowSources = append(windowSources, Source{
 			ID:           id,
 			Name:         title,
-			InputFormat:  "gdigrab",
-			Input:        "hwnd=" + handle,
+			InputFormat:  "ddagrab",
+			Input:        "desktop",
 			CaptureType:  "window",
 			WindowHandle: handle,
+			OffsetX:      w.X,
+			OffsetY:      w.Y,
+			Width:        w.Width,
+			Height:       w.Height,
 		})
 	}
 
@@ -510,10 +560,18 @@ using System.Text;
 
 public class Win32 {
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 }
 "@
 
@@ -527,8 +585,13 @@ $windows = New-Object System.Collections.Generic.List[string]
   [void][Win32]::GetWindowText($hWnd, $sb, $sb.Capacity)
   $title = $sb.ToString().Trim()
   if (-not [string]::IsNullOrWhiteSpace($title)) {
+    $rect = New-Object Win32+RECT
+    if (-not [Win32]::GetWindowRect($hWnd, [ref]$rect)) { return $true }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($width -le 0 -or $height -le 0) { return $true }
     $handle = ('0x{0:X}' -f [Int64]$hWnd)
-    $windows.Add("$handle|$title")
+    $windows.Add("$handle|$title|$($rect.Left)|$($rect.Top)|$width|$height")
   }
   return $true
 }, [IntPtr]::Zero) | Out-Null
@@ -551,19 +614,27 @@ func parseWindows(raw string) []windowInfo {
 			continue
 		}
 
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(line, "|", 6)
+		if len(parts) != 6 {
 			continue
 		}
 		handle := strings.TrimSpace(parts[0])
 		title := strings.TrimSpace(parts[1])
-		if handle == "" || title == "" {
+		x, errX := strconv.Atoi(strings.TrimSpace(parts[2]))
+		y, errY := strconv.Atoi(strings.TrimSpace(parts[3]))
+		width, errW := strconv.Atoi(strings.TrimSpace(parts[4]))
+		height, errH := strconv.Atoi(strings.TrimSpace(parts[5]))
+		if handle == "" || title == "" || errX != nil || errY != nil || errW != nil || errH != nil || width <= 0 || height <= 0 {
 			continue
 		}
 
 		windows = append(windows, windowInfo{
 			Handle: handle,
 			Title:  title,
+			X:      x,
+			Y:      y,
+			Width:  width,
+			Height: height,
 		})
 	}
 	return windows
@@ -620,27 +691,29 @@ func parseMonitorInfo(raw string) []monitorInfo {
 	return monitors
 }
 
-func buildFFmpegArgs(selected Source, outputFile string) []string {
-	args := []string{
-		"-y",
-		"-f", selected.InputFormat,
-		"-framerate", "30",
-	}
+func buildFFmpegArgs(spec captureSpec, outputFile string) []string {
+	args := []string{"-y"}
 
-	if selected.InputFormat == "gdigrab" {
-		args = append(args, "-draw_mouse", "1")
-		if strings.EqualFold(selected.Input, "desktop") && selected.Width > 0 && selected.Height > 0 {
-			args = append(args,
-				"-offset_x", strconv.Itoa(selected.OffsetX),
-				"-offset_y", strconv.Itoa(selected.OffsetY),
-				"-video_size", fmt.Sprintf("%dx%d", selected.Width, selected.Height),
-			)
-		}
+	switch spec.backend {
+	case "ddagrab":
+		args = append(args,
+			"-f", spec.inputFormat,
+			"-i", spec.input,
+			"-vf", spec.videoFilter,
+		)
+	case "gdigrab":
+		args = append(args,
+			"-f", spec.inputFormat,
+			"-framerate", "30",
+			"-draw_mouse", "0",
+			"-i", spec.input,
+			"-vf", spec.videoFilter,
+		)
+	default:
+		return nil
 	}
 
 	args = append(args,
-		"-i", selected.Input,
-		"-vf", "scale=1280:720:flags=lanczos,fps=30",
 		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p",
 		"-profile:v", "main",
@@ -699,6 +772,266 @@ func selectSource(sources []Source, sourceID string) (Source, error) {
 	}
 
 	return sources[0], nil
+}
+
+func (s *Service) resolveCaptureSpec(ctx context.Context, sources []Source, sourceID string, preferredMonitorID string, cropToWindow bool) (captureSpec, error) {
+	if sourceID == "desktop" {
+		return captureSpec{
+			backend:     "gdigrab",
+			inputFormat: "gdigrab",
+			input:       "desktop",
+			videoFilter: "scale=1280:720:flags=lanczos,fps=30",
+		}, nil
+	}
+
+	supportsDDAGrab, err := s.probe(ctx, s.ffmpegBin, "ddagrab")
+	if err != nil {
+		return captureSpec{}, fmt.Errorf("%w: %v", ErrStartFailed, err)
+	}
+	if !supportsDDAGrab {
+		return captureSpec{}, ErrUnsupportedFFmpeg
+	}
+
+	var (
+		selected  Source
+		selectErr error
+	)
+	if sourceID == "" {
+		if window, ok := preferredWindowSource(sources); ok {
+			selected = window
+		} else if window, ok := anyWindowSource(sources); ok {
+			selected = window
+		} else if monitor, ok := preferredMonitorSource(sources, preferredMonitorID); ok {
+			selected = monitor
+		} else if monitor, ok := fallbackMonitorSource(sources); ok {
+			selected = monitor
+		} else if desktop, ok := sourceByID(sources, "desktop"); ok {
+			selected = desktop
+		} else {
+			return captureSpec{}, ErrSourceNotFound
+		}
+	} else {
+		selected, selectErr = selectSource(sources, sourceID)
+		if selectErr != nil {
+			return captureSpec{}, selectErr
+		}
+	}
+
+	if selected.CaptureType == "monitor" {
+		return monitorCaptureSpec(selected), nil
+	}
+
+	if selected.CaptureType == "window" {
+		monitor, ok := bestMonitorForWindow(sources, selected)
+		if !ok {
+			monitor, ok = preferredMonitorSource(sources, preferredMonitorID)
+		}
+		if !ok {
+			monitor, ok = fallbackMonitorSource(sources)
+		}
+		if !ok {
+			return captureSpec{}, ErrSourceNotFound
+		}
+		return windowCaptureSpec(monitor, selected, cropToWindow), nil
+	}
+
+	if monitor, ok := preferredMonitorSource(sources, preferredMonitorID); ok {
+		return monitorCaptureSpec(monitor), nil
+	}
+	if monitor, ok := fallbackMonitorSource(sources); ok {
+		return monitorCaptureSpec(monitor), nil
+	}
+
+	if selected.ID == "desktop" {
+		return captureSpec{
+			backend:     "gdigrab",
+			inputFormat: "gdigrab",
+			input:       "desktop",
+			videoFilter: "scale=1280:720:flags=lanczos,fps=30",
+		}, nil
+	}
+
+	return captureSpec{}, ErrSourceNotFound
+}
+
+func monitorCaptureSpec(monitor Source) captureSpec {
+	return captureSpec{
+		backend:           "ddagrab",
+		inputFormat:       "lavfi",
+		input:             fmt.Sprintf("ddagrab=output_idx=%d:framerate=30:video_size=%dx%d:offset_x=0:offset_y=0", monitor.OutputIndex, monitor.Width, monitor.Height),
+		videoFilter:       "hwdownload,format=bgra,scale=1280:720:flags=lanczos,fps=30",
+		selectedMonitorID: monitor.ID,
+	}
+}
+
+func windowCaptureSpec(monitor Source, window Source, cropToWindow bool) captureSpec {
+	captureX := 0
+	captureY := 0
+	captureWidth := monitor.Width
+	captureHeight := monitor.Height
+	cropApplied := false
+
+	if cropToWindow {
+		if clipped, ok := clipWindowToMonitor(monitor, window); ok {
+			captureX = clipped.X
+			captureY = clipped.Y
+			captureWidth = clipped.Width
+			captureHeight = clipped.Height
+			cropApplied = captureX != 0 || captureY != 0 || captureWidth != monitor.Width || captureHeight != monitor.Height
+		}
+	}
+
+	return captureSpec{
+		backend:           "ddagrab",
+		inputFormat:       "lavfi",
+		input:             fmt.Sprintf("ddagrab=output_idx=%d:framerate=30:video_size=%dx%d:offset_x=%d:offset_y=%d", monitor.OutputIndex, captureWidth, captureHeight, captureX, captureY),
+		videoFilter:       "hwdownload,format=bgra,scale=1280:720:flags=lanczos,fps=30",
+		selectedMonitorID: monitor.ID,
+		cropApplied:       cropApplied,
+		detectedWindow: &WindowBounds{
+			X:      window.OffsetX,
+			Y:      window.OffsetY,
+			Width:  window.Width,
+			Height: window.Height,
+		},
+	}
+}
+
+func clipWindowToMonitor(monitor Source, window Source) (WindowBounds, bool) {
+	left := maxInt(window.OffsetX, monitor.OffsetX)
+	top := maxInt(window.OffsetY, monitor.OffsetY)
+	right := minInt(window.OffsetX+window.Width, monitor.OffsetX+monitor.Width)
+	bottom := minInt(window.OffsetY+window.Height, monitor.OffsetY+monitor.Height)
+	if right <= left || bottom <= top {
+		return WindowBounds{}, false
+	}
+
+	return WindowBounds{
+		X:      left - monitor.OffsetX,
+		Y:      top - monitor.OffsetY,
+		Width:  right - left,
+		Height: bottom - top,
+	}, true
+}
+
+func bestMonitorForWindow(sources []Source, window Source) (Source, bool) {
+	var best Source
+	bestArea := 0
+	found := false
+	for _, source := range sources {
+		if source.CaptureType != "monitor" {
+			continue
+		}
+		area := overlapArea(source, window)
+		if area > bestArea {
+			bestArea = area
+			best = source
+			found = true
+		}
+	}
+	return best, found && bestArea > 0
+}
+
+func preferredWindowSource(sources []Source) (Source, bool) {
+	for _, source := range sources {
+		if source.CaptureType == "window" && isPreferredGameWindow(source.Name) {
+			return source, true
+		}
+	}
+	return Source{}, false
+}
+
+func anyWindowSource(sources []Source) (Source, bool) {
+	for _, source := range sources {
+		if source.CaptureType == "window" {
+			return source, true
+		}
+	}
+	return Source{}, false
+}
+
+func preferredMonitorSource(sources []Source, preferredMonitorID string) (Source, bool) {
+	preferredMonitorID = strings.TrimSpace(preferredMonitorID)
+	if preferredMonitorID == "" {
+		return Source{}, false
+	}
+	return monitorByID(sources, preferredMonitorID)
+}
+
+func fallbackMonitorSource(sources []Source) (Source, bool) {
+	if source, ok := monitorByID(sources, "monitor-2"); ok {
+		return source, true
+	}
+	for _, source := range sources {
+		if source.CaptureType == "monitor" {
+			return source, true
+		}
+	}
+	return Source{}, false
+}
+
+func monitorByID(sources []Source, id string) (Source, bool) {
+	for _, source := range sources {
+		if source.CaptureType == "monitor" && source.ID == id {
+			return source, true
+		}
+	}
+	return Source{}, false
+}
+
+func sourceByID(sources []Source, id string) (Source, bool) {
+	for _, source := range sources {
+		if source.ID == id {
+			return source, true
+		}
+	}
+	return Source{}, false
+}
+
+func overlapArea(a Source, b Source) int {
+	left := maxInt(a.OffsetX, b.OffsetX)
+	top := maxInt(a.OffsetY, b.OffsetY)
+	right := minInt(a.OffsetX+a.Width, b.OffsetX+b.Width)
+	bottom := minInt(a.OffsetY+a.Height, b.OffsetY+b.Height)
+	if right <= left || bottom <= top {
+		return 0
+	}
+	return (right - left) * (bottom - top)
+}
+
+func probeFFmpegCapability(ctx context.Context, ffmpegBin string, capability string) (bool, error) {
+	switch capability {
+	case "ddagrab":
+		cmd := exec.CommandContext(ctx, ffmpegBin, "-hide_banner", "-filters")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, err
+		}
+		return strings.Contains(strings.ToLower(string(out)), "ddagrab"), nil
+	default:
+		return false, nil
+	}
+}
+
+func shouldCropToWindow(req StartRequest) bool {
+	if req.CropToWindow == nil {
+		return true
+	}
+	return *req.CropToWindow
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func isPreferredGameWindow(name string) bool {

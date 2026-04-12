@@ -13,13 +13,89 @@ log("[client] loaded");
 const sceneManager = new SceneManager();
 const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDrivingSceneVariant[];
 
+type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
+type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
+
+type ControlCommand = {
+    id: string
+    type: ControlCommandType
+    sceneName?: string
+}
+
+type AvailableScene = {
+    name: string
+    label: string
+}
+
 function registerInnerCityScenes() {
     for (const variant of innerCitySceneNames) {
         sceneManager.addScene(`inner-city-driving:${variant}`, innerCityDrivingScenes[variant]);
     }
 }
 
+function humanizeSceneVariant(variant: string): string {
+    return variant
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/^\w/, (match) => match.toUpperCase());
+}
+
+function buildAvailableScenes(): AvailableScene[] {
+    return innerCitySceneNames.map((variant) => ({
+        name: `inner-city-driving:${variant}`,
+        label: `Inner City Driving - ${humanizeSceneVariant(variant)}`
+    }));
+}
+
+function publishAvailableScenes() {
+    emitNet("control:availableScenesResponse", buildAvailableScenes());
+}
+
+function reportControlStatus(status: ControlRuntimeStatus, activeSceneName = "", lastError = "") {
+    emitNet("control:statusUpdate", {
+        status,
+        activeSceneName,
+        lastError
+    });
+}
+
+async function executeSceneByName(sceneName: string) {
+    reportControlStatus("runningScene", sceneName);
+    try {
+        await sceneManager.executeScene(sceneName);
+        reportControlStatus("idle");
+    } catch (error: any) {
+        const message = error?.message ?? `Failed to execute scene "${sceneName}"`;
+        reportControlStatus("error", sceneName, message);
+        throw error;
+    }
+}
+
+async function executeAllScenesControlled() {
+    reportControlStatus("runningAllScenes");
+    try {
+        await sceneManager.executeAllScenes();
+        reportControlStatus("idle");
+    } catch (error: any) {
+        const message = error?.message ?? "Failed to execute all scenes";
+        reportControlStatus("error", "", message);
+        throw error;
+    }
+}
+
+function requestEndScene() {
+    reportControlStatus("stopping");
+    sceneManager.endScene();
+}
+
+function requestEndAllScenes() {
+    reportControlStatus("stopping");
+    sceneManager.endAllScenes();
+}
+
 registerInnerCityScenes();
+emitNet("control:registerClient");
+reportControlStatus("idle");
+publishAvailableScenes();
 
 RegisterCommand("startScene", async (_source: number, args: string[]) => {
     const requestedVariant = args[0] as InnerCityDrivingSceneVariant | undefined;
@@ -28,15 +104,19 @@ RegisterCommand("startScene", async (_source: number, args: string[]) => {
         : "default";
     const sceneName = `inner-city-driving:${variant}`;
 
-    await sceneManager.executeScene(sceneName);
+    await executeSceneByName(sceneName);
+}, false);
+
+RegisterCommand("runAllScenes", async () => {
+    await executeAllScenesControlled();
 }, false);
 
 RegisterCommand("endScene", () => {
-    sceneManager.endScene();
+    requestEndScene();
 }, false);
 
 RegisterCommand("endAllScenes", () => {
-    sceneManager.endAllScenes();
+    requestEndAllScenes();
 }, false);
 
 RegisterCommand("listSceneVariants", () => {
@@ -50,7 +130,39 @@ onNet("demo:responseScenes", async (scene: SceneType) => {
     sceneManager.addScene("remote-scene", scene);
     console.log(scene)
     // sceneManager.shuffleWaypoints("remote-scene");
-    await sceneManager.executeAllScenes()
+    await executeAllScenesControlled()
+});
+
+onNet("control:executeCommand", async (command: ControlCommand) => {
+    try {
+        switch (command?.type) {
+            case "startScene":
+                if (!command.sceneName) {
+                    throw new Error("startScene command missing sceneName");
+                }
+                await executeSceneByName(command.sceneName);
+                break;
+            case "runAllScenes":
+                await executeAllScenesControlled();
+                break;
+            case "endScene":
+                requestEndScene();
+                break;
+            case "endAllScenes":
+                requestEndAllScenes();
+                break;
+            default:
+                throw new Error(`Unsupported control command: ${command?.type ?? "unknown"}`);
+        }
+    } catch (error: any) {
+        const message = error?.message ?? "Failed to execute control command";
+        reportControlStatus("error", command?.sceneName ?? "", message);
+        log(message);
+    }
+});
+
+onNet("control:requestAvailableScenes", () => {
+    publishAvailableScenes();
 });
 
 RegisterCommand("coords", () => {

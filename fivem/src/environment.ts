@@ -33,6 +33,7 @@ export interface Time{
     hour: number
     minute: number
     second: number
+    persistent: boolean
 }
 
 export interface Environment {
@@ -63,6 +64,7 @@ export class EnvironmentService {
     public setTime(time: Time) {
         const { hour, minute, second } = time;
         NetworkOverrideClockTime(hour, minute, second);
+        PauseClock(time.persistent)
         log(`Time set to ${hour}:${minute}:${second}`);
     }
 

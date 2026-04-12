@@ -32,9 +32,9 @@ func TestBuildSourcesFiltersAndIncludesDesktop(t *testing.T) {
 	windows := []windowInfo{
 		{Handle: "0x100", Title: ""},
 		{Handle: "0x101", Title: "Notepad"},
-		{Handle: "0x102", Title: "FiveM - Client"},
-		{Handle: "0x103", Title: "fiveM - client"},
-		{Handle: "0x104", Title: "CitizenFX - Route"},
+		{Handle: "0x102", Title: "FiveM - Client", X: 10, Y: 20, Width: 1600, Height: 900},
+		{Handle: "0x103", Title: "fiveM - client", X: 10, Y: 20, Width: 1600, Height: 900},
+		{Handle: "0x104", Title: "CitizenFX - Route", X: 100, Y: 50, Width: 1280, Height: 720},
 	}
 
 	got := buildSources(windows, nil)
@@ -52,6 +52,11 @@ func TestBuildSourcesFiltersAndIncludesDesktop(t *testing.T) {
 	}
 	if !contains(names, "CitizenFX - Route") {
 		t.Fatalf("missing CitizenFX source: %+v", got)
+	}
+	for _, source := range got[:3] {
+		if source.CaptureType == "window" && source.Input != "desktop" {
+			t.Fatalf("expected FiveM windows to use desktop-region capture, got: %+v", source)
+		}
 	}
 }
 
@@ -102,6 +107,9 @@ func TestStartStopAndDuplicateStart(t *testing.T) {
 				{ID: "desktop", Name: "Desktop", InputFormat: "gdigrab", Input: "desktop", IsFallback: true},
 			}, nil
 		}),
+		WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+			return true, nil
+		}),
 		WithCommandFactory(testCommandFactory(t)),
 		WithStopTimeout(2*time.Second),
 	)
@@ -144,6 +152,9 @@ func TestStartFailsForUnknownSource(t *testing.T) {
 				{ID: "desktop", Name: "Desktop", InputFormat: "gdigrab", Input: "desktop", IsFallback: true},
 			}, nil
 		}),
+		WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+			return true, nil
+		}),
 	)
 
 	_, err := svc.Start(context.Background(), StartRequest{SourceID: "missing"})
@@ -156,24 +167,40 @@ func TestBuildFFmpegArgsForMonitorAddsRegion(t *testing.T) {
 	src := Source{
 		ID:          "monitor-1",
 		Name:        "Monitor 1",
-		InputFormat: "gdigrab",
+		InputFormat: "ddagrab",
 		Input:       "desktop",
 		CaptureType: "monitor",
 		OffsetX:     1920,
 		OffsetY:     0,
 		Width:       1920,
 		Height:      1080,
+		OutputIndex: 1,
 	}
 
-	args := buildFFmpegArgs(src, "out.mp4")
-	if !contains(args, "-offset_x") || !contains(args, "1920") {
-		t.Fatalf("expected monitor x offset args, got: %v", args)
+	args := buildFFmpegArgs(monitorCaptureSpec(src), "out.mkv")
+	if !contains(args, "-f") || !contains(args, "lavfi") {
+		t.Fatalf("expected lavfi input, got: %v", args)
 	}
-	if !contains(args, "-video_size") || !contains(args, "1920x1080") {
-		t.Fatalf("expected monitor video_size args, got: %v", args)
+	if !contains(args, "ddagrab=output_idx=1:framerate=30:video_size=1920x1080:offset_x=0:offset_y=0") {
+		t.Fatalf("expected ddagrab input string, got: %v", args)
 	}
-	if !contains(args, "scale=1280:720:flags=lanczos,fps=30") {
-		t.Fatalf("expected 720p scale filter, got: %v", args)
+	if !contains(args, "hwdownload,format=bgra,scale=1280:720:flags=lanczos,fps=30") {
+		t.Fatalf("expected hwdownload scale filter, got: %v", args)
+	}
+}
+
+func TestParseWindowsIncludesBounds(t *testing.T) {
+	raw := "0x100|FiveM - Client|100|200|1600|900\n0x101|CitizenFX - Route|-1920|0|1920|1080\n"
+
+	got := parseWindows(raw)
+	if len(got) != 2 {
+		t.Fatalf("unexpected window count: got=%d want=2", len(got))
+	}
+	if got[0].X != 100 || got[0].Y != 200 || got[0].Width != 1600 || got[0].Height != 900 {
+		t.Fatalf("unexpected first window bounds: %+v", got[0])
+	}
+	if got[1].X != -1920 || got[1].Width != 1920 {
+		t.Fatalf("unexpected second window bounds: %+v", got[1])
 	}
 }
 
@@ -182,12 +209,12 @@ func TestResolveOutputFileAllowsRunRelativePath(t *testing.T) {
 	capturesDir := filepath.Join(root, "captures")
 	svc := NewService(WithOutputDir(capturesDir))
 
-	out, err := svc.resolveOutputFile("session-1", "runs/inner-city-driving/default/run-abc123.mp4")
+	out, err := svc.resolveOutputFile("session-1", "runs/inner-city-driving/default/run-abc123.mkv")
 	if err != nil {
 		t.Fatalf("expected nested output path to be accepted, got: %v", err)
 	}
 
-	want := filepath.Join(root, "runs", "inner-city-driving", "default", "run-abc123.mp4")
+	want := filepath.Join(root, "runs", "inner-city-driving", "default", "run-abc123.mkv")
 	if out != want {
 		t.Fatalf("unexpected output file: got=%q want=%q", out, want)
 	}
@@ -198,12 +225,12 @@ func TestResolveOutputFileRejectsTraversal(t *testing.T) {
 	capturesDir := filepath.Join(root, "captures")
 	svc := NewService(WithOutputDir(capturesDir))
 
-	_, err := svc.resolveOutputFile("session-1", "../outside.mp4")
+	_, err := svc.resolveOutputFile("session-1", "../outside.mkv")
 	if !errorsIs(err, ErrInvalidRequest) {
 		t.Fatalf("expected ErrInvalidRequest for traversal, got: %v", err)
 	}
 
-	_, err = svc.resolveOutputFile("session-1", "runs/../../outside.mp4")
+	_, err = svc.resolveOutputFile("session-1", "runs/../../outside.mkv")
 	if !errorsIs(err, ErrInvalidRequest) {
 		t.Fatalf("expected ErrInvalidRequest for nested traversal, got: %v", err)
 	}
@@ -267,10 +294,14 @@ func TestStartWithoutSourceIDAutoSelectsPreferredWindow(t *testing.T) {
 		WithOutputDir(tmp),
 		WithSourceDiscovery(func(context.Context) ([]Source, error) {
 			return []Source{
-				{ID: "monitor-1", Name: "Monitor 1", InputFormat: "gdigrab", Input: "desktop", CaptureType: "monitor"},
-				{ID: "fxserver", Name: "FiveMr by Cfx.re - FXServer", InputFormat: "gdigrab", Input: "hwnd=0x11", CaptureType: "window"},
-				{ID: "game", Name: "FiveM GTA Window", InputFormat: "gdigrab", Input: "hwnd=0x22", CaptureType: "window"},
+				{ID: "monitor-1", Name: "Monitor 1", InputFormat: "ddagrab", Input: "desktop", CaptureType: "monitor", Width: 1920, Height: 1080, OutputIndex: 0},
+				{ID: "monitor-2", Name: "Monitor 2", InputFormat: "ddagrab", Input: "desktop", CaptureType: "monitor", OffsetX: 1920, Width: 1920, Height: 1080, OutputIndex: 1},
+				{ID: "fxserver", Name: "FiveMr by Cfx.re - FXServer", InputFormat: "ddagrab", Input: "desktop", CaptureType: "window", OffsetX: 100, OffsetY: 100, Width: 900, Height: 700},
+				{ID: "game", Name: "FiveM GTA Window", InputFormat: "ddagrab", Input: "desktop", CaptureType: "window", OffsetX: 2100, OffsetY: 50, Width: 1280, Height: 720},
 			}, nil
+		}),
+		WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+			return true, nil
 		}),
 		WithCommandFactory(func(_ string, args ...string) *exec.Cmd {
 			capturedArgs = append([]string{}, args...)
@@ -288,8 +319,40 @@ func TestStartWithoutSourceIDAutoSelectsPreferredWindow(t *testing.T) {
 		_, _ = svc.Stop(context.Background())
 	})
 
-	if !contains(capturedArgs, "hwnd=0x22") {
-		t.Fatalf("expected auto-selected gameplay window input, args=%v", capturedArgs)
+	if !contains(capturedArgs, "ddagrab=output_idx=1:framerate=30:video_size=1280x720:offset_x=180:offset_y=50") {
+		t.Fatalf("expected cropped monitor capture for gameplay window, args=%v", capturedArgs)
+	}
+}
+
+func TestResolveCaptureSpecFallsBackToMonitorTwo(t *testing.T) {
+	svc := NewService(WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+		return true, nil
+	}))
+
+	sources := []Source{
+		{ID: "monitor-1", CaptureType: "monitor", Width: 1920, Height: 1080, OutputIndex: 0},
+		{ID: "monitor-2", CaptureType: "monitor", OffsetX: 1920, Width: 1920, Height: 1080, OutputIndex: 1},
+	}
+
+	spec, err := svc.resolveCaptureSpec(context.Background(), sources, "", "", true)
+	if err != nil {
+		t.Fatalf("resolveCaptureSpec: %v", err)
+	}
+	if spec.selectedMonitorID != "monitor-2" {
+		t.Fatalf("expected monitor-2 fallback, got %+v", spec)
+	}
+}
+
+func TestResolveCaptureSpecRejectsMissingDDAGrab(t *testing.T) {
+	svc := NewService(WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+		return false, nil
+	}))
+
+	_, err := svc.resolveCaptureSpec(context.Background(), []Source{
+		{ID: "monitor-2", CaptureType: "monitor", Width: 1920, Height: 1080, OutputIndex: 1},
+	}, "", "", true)
+	if !errors.Is(err, ErrUnsupportedFFmpeg) {
+		t.Fatalf("expected ErrUnsupportedFFmpeg, got %v", err)
 	}
 }
 

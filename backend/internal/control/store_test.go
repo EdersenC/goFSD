@@ -1,0 +1,121 @@
+package control
+
+import (
+	"testing"
+	"time"
+)
+
+func TestEnqueueValidatesStartSceneRequiresName(t *testing.T) {
+	store := NewStore()
+
+	if _, err := store.Enqueue(CommandRequest{Type: CommandStartScene}); err == nil {
+		t.Fatal("expected validation error for empty sceneName")
+	}
+}
+
+func TestPollReturnsCommandsInOrder(t *testing.T) {
+	now := time.Date(2026, 4, 11, 2, 0, 0, 0, time.UTC)
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+
+	first, err := store.Enqueue(CommandRequest{Type: CommandStartScene, SceneName: "inner-city-driving:default"})
+	if err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	second, err := store.Enqueue(CommandRequest{Type: CommandEndScene})
+	if err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	gotFirst := store.Poll("")
+	if gotFirst == nil || gotFirst.ID != first.ID {
+		t.Fatalf("expected first command, got %#v", gotFirst)
+	}
+
+	gotSecond := store.Poll(first.ID)
+	if gotSecond == nil || gotSecond.ID != second.ID {
+		t.Fatalf("expected second command, got %#v", gotSecond)
+	}
+
+	gotNone := store.Poll(second.ID)
+	if gotNone != nil {
+		t.Fatalf("expected no command, got %#v", gotNone)
+	}
+}
+
+func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
+	now := time.Date(2026, 4, 11, 2, 0, 0, 0, time.UTC)
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+
+	first, err := store.Enqueue(CommandRequest{Type: CommandStartScene, SceneName: "inner-city-driving:default"})
+	if err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	_, err = store.Enqueue(CommandRequest{Type: CommandEndAllScenes})
+	if err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	store.Poll(first.ID)
+	store.UpdateStatus(StatusUpdate{
+		Status:          StatusRunningScene,
+		ActiveSceneName: "inner-city-driving:default",
+	})
+
+	state := store.State()
+	if !state.Runtime.FiveMConnected {
+		t.Fatal("expected FiveMConnected to be true")
+	}
+	if state.Runtime.Status != StatusRunningScene {
+		t.Fatalf("expected runningScene status, got %s", state.Runtime.Status)
+	}
+	if len(state.PendingCommands) != 1 {
+		t.Fatalf("expected 1 pending command, got %d", len(state.PendingCommands))
+	}
+	if state.PendingCommands[0].Type != CommandEndAllScenes {
+		t.Fatalf("expected pending endAllScenes, got %s", state.PendingCommands[0].Type)
+	}
+
+	now = now.Add(11 * time.Second)
+	state = store.State()
+	if state.Runtime.FiveMConnected {
+		t.Fatal("expected FiveMConnected to become false after poll timeout")
+	}
+}
+
+func TestResetConsumerSessionClearsQueuedCommands(t *testing.T) {
+	now := time.Date(2026, 4, 12, 1, 0, 0, 0, time.UTC)
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+
+	if _, err := store.Enqueue(CommandRequest{Type: CommandStartScene, SceneName: "inner-city-driving:default"}); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if _, err := store.Enqueue(CommandRequest{Type: CommandEndScene}); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	sessionID := store.ResetConsumerSession()
+	if sessionID == "" {
+		t.Fatal("expected reset to return a session id")
+	}
+
+	state := store.State()
+	if len(state.PendingCommands) != 0 {
+		t.Fatalf("expected pending commands to be cleared, got %d", len(state.PendingCommands))
+	}
+	if state.Runtime.Status != StatusIdle {
+		t.Fatalf("expected runtime status reset to idle, got %s", state.Runtime.Status)
+	}
+
+	if cmd := store.Poll(""); cmd != nil {
+		t.Fatalf("expected no command after reset, got %#v", cmd)
+	}
+
+	next, err := store.Enqueue(CommandRequest{Type: CommandEndAllScenes})
+	if err != nil {
+		t.Fatalf("enqueue after reset: %v", err)
+	}
+	got := store.Poll("")
+	if got == nil || got.ID != next.ID {
+		t.Fatalf("expected new command after reset, got %#v", got)
+	}
+}

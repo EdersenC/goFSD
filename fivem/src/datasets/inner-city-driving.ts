@@ -33,6 +33,7 @@ type InnerCityDrivingSceneOptions = {
         hour?: number;
         minute?: number;
         second?: number;
+        persistent?: boolean;
     };
     vehicle?: Partial<Ego["vehicle"]>;
 };
@@ -41,19 +42,20 @@ type InnerCityDrivingTime = SceneType["environment"]["Time"];
 type InnerCityDrivingVehicle = Ego["vehicle"];
 type InnerCityDrivingSceneVariant = "default" | "duskRush" | "rainyCommute" | "lateNightCruise";
 
-const defaultInnerCityDrivingWeatherType: WeatherType = WeatherType.CLEARING;
+const defaultInnerCityDrivingWeatherType: WeatherType = WeatherType.EXTRA_SUNNY;
 const defaultInnerCityDrivingPersistentWeather = true;
 
 const defaultInnerCityDrivingTime: InnerCityDrivingTime = {
-    hour: 16,
+    hour: 12,
     minute: 30,
-    second: 0
+    second: 0,
+    persistent: true
 };
 
 const defaultInnerCityDrivingVehicle: InnerCityDrivingVehicle = {
     id: 0,
     model: VehicleModel.Random,
-    color: VehicleColor.Gray,
+    color: VehicleColor.Random,
     maxSpeed: 14,
     drivingStyle: DrivingStyle.Cautious
 };
@@ -62,7 +64,8 @@ export function createInnerCityDrivingScene(options: InnerCityDrivingSceneOption
     const time: InnerCityDrivingTime = {
         hour: options.time?.hour ?? defaultInnerCityDrivingTime.hour,
         minute: options.time?.minute ?? defaultInnerCityDrivingTime.minute,
-        second: options.time?.second ?? defaultInnerCityDrivingTime.second
+        second: options.time?.second ?? defaultInnerCityDrivingTime.second,
+        persistent: options.time?.persistent ?? defaultInnerCityDrivingTime.persistent
     };
     const vehicle: InnerCityDrivingVehicle = {
         id: options.vehicle?.id ?? defaultInnerCityDrivingVehicle.id,
@@ -93,12 +96,14 @@ export const innerCityDrivingScene: SceneType = createInnerCityDrivingScene();
 export const innerCityDrivingScenes = {
     default: innerCityDrivingScene,
     duskRush: createInnerCityDrivingScene({
-        weatherType: WeatherType.CLOUDS,
+        weatherType: WeatherType.EXTRA_SUNNY,
         time: {
             hour: 18,
             minute: 15
         },
         vehicle: {
+            model: VehicleModel.Random,
+            color: VehicleColor.Random,
             maxSpeed: 16,
             drivingStyle: DrivingStyle.Normal
         }
