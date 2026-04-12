@@ -15,6 +15,7 @@ type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "is
 type CaptureRequest = {
     requestId: string
     runId: string
+    tripIndex?: number
     sceneId?: string
     sceneVariant?: string
     sceneName?: string
@@ -36,9 +37,20 @@ type RunIdParts = {
 
 type RunStoragePaths = {
     runsDir: string
+    sceneDir: string
+    sceneDirRelative: string
     runFile: string
-    captureOutputFile: string
     runTiming: RunIdParts
+}
+
+type TripStoragePaths = {
+    tripDir: string
+    tripDirRelative: string
+    videoFile: string
+    videoFileRelative: string
+    logFile: string
+    logFileRelative: string
+    metadataFile: string
 }
 
 type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
@@ -87,11 +99,12 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
             sceneInfo.sceneVariant,
             validated.runId
         );
+        const tripStorage = buildTripStoragePaths(resolveDataRoot(), runStorage, validated.tripIndex);
 
         const result = await captureApiRequest("/capture/start", {
             sourceId: "monitor-2",
             cropToWindow: false,
-            outputFile: runStorage.captureOutputFile
+            outputFile: tripStorage.videoFileRelative
         });
 
         response.success = true;
@@ -170,6 +183,7 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     const runFile = runStorage.runFile;
     const manifestFile = resolveManifestFile(dataRoot);
     const manifestDir = path.dirname(manifestFile);
+    const tripStorage = buildTripStoragePaths(dataRoot, runStorage, data.tripIndex);
     const tripKey = `${data.runId}:${data.tripIndex}`;
     const runKey = data.runId;
 
@@ -178,6 +192,16 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     if (!fs.existsSync(runsDir)) {
         fs.mkdirSync(runsDir, { recursive: true });
         console.log("Directory created:", runsDir);
+    }
+
+    if (!fs.existsSync(runStorage.sceneDir)) {
+        fs.mkdirSync(runStorage.sceneDir, { recursive: true });
+        console.log("Directory created:", runStorage.sceneDir);
+    }
+
+    if (!fs.existsSync(tripStorage.tripDir)) {
+        fs.mkdirSync(tripStorage.tripDir, { recursive: true });
+        console.log("Directory created:", tripStorage.tripDir);
     }
 
     if (!fs.existsSync(manifestDir)) {
@@ -197,7 +221,7 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
 
     const previousTripKey = activeTripByRun.get(runKey);
     if (previousTripKey && previousTripKey !== tripKey) {
-        flushTrip(previousTripKey, runFile, manifestFile, fs);
+        flushTrip(previousTripKey, runStorage, manifestFile, fs, dataRoot);
     }
 
     activeTripByRun.set(runKey, tripKey);
@@ -224,7 +248,7 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     }
 
     if (data.isTripComplete) {
-        flushTrip(tripKey, runFile, manifestFile, fs);
+        flushTrip(tripKey, runStorage, manifestFile, fs, dataRoot);
         activeTripByRun.delete(runKey);
     }
 });
@@ -265,14 +289,14 @@ function parseRunIdParts(runId: string): RunIdParts {
     if (!match) {
         return {
             safeRunId,
-            runFolder: "legacy",
+            runFolder: safeRunId || "legacy",
             humanTime: safeRunId
         };
     }
 
     const [, date, hour, minute, second, meridiem] = match;
     const amPm = meridiem.toUpperCase();
-    const runFolder = `${date}_${hour}-${minute}-${second}${amPm}`;
+    const runFolder = safeRunId;
     return {
         safeRunId,
         runFolder,
@@ -283,29 +307,49 @@ function parseRunIdParts(runId: string): RunIdParts {
 function buildRunStoragePaths(dataRoot: string, sceneId: string, sceneVariant: string, runId: string): RunStoragePaths {
     const path = require("path");
     const runTiming = parseRunIdParts(runId);
-    const scopedRunFolder = runTiming.runFolder;
+    const sceneFolder = sanitizePathSegment(`${sceneId}_${sceneVariant}`);
 
     const runsDir = path.join(
         dataRoot,
         "runs",
-        scopedRunFolder
+        runTiming.runFolder
     );
+    const sceneDir = path.join(runsDir, sceneFolder);
+    const sceneDirRelative = `runs/${runTiming.runFolder}/${sceneFolder}`;
 
-    const runFile = path.join(runsDir, `${runTiming.safeRunId}.jsonl`);
-    const captureOutputFile =
-        `runs/${scopedRunFolder}/${runTiming.safeRunId}.mkv`;
+    const runFile = path.join(sceneDir, "run.jsonl");
 
     return {
         runsDir,
+        sceneDir,
+        sceneDirRelative,
         runFile,
-        captureOutputFile,
         runTiming
+    };
+}
+
+function buildTripStoragePaths(dataRoot: string, runStorage: RunStoragePaths, tripIndex: number): TripStoragePaths {
+    const path = require("path");
+    const tripSuffix = String(tripIndex).padStart(3, "0");
+    const tripDirRelative = `${runStorage.sceneDirRelative}/trip-${tripSuffix}`;
+    const videoFileRelative = `${tripDirRelative}/video.mkv`;
+    return {
+        tripDir: path.join(runStorage.sceneDir, `trip-${tripSuffix}`),
+        tripDirRelative,
+        videoFile: path.join(runStorage.sceneDir, `trip-${tripSuffix}`, "video.mkv"),
+        videoFileRelative,
+        logFile: path.join(runStorage.sceneDir, `trip-${tripSuffix}`, "video.log"),
+        logFileRelative: `${tripDirRelative}/video.log`,
+        metadataFile: path.join(runStorage.sceneDir, `trip-${tripSuffix}`, "metadata.json")
     };
 }
 
 function validateCaptureRequest(request: CaptureRequest): CaptureRequest {
     const requestId = String(request?.requestId ?? "").trim();
     const runId = String(request?.runId ?? "").trim();
+    const tripIndex = typeof request?.tripIndex === "number"
+        ? request.tripIndex
+        : Number(request?.tripIndex);
 
     if (!requestId) {
         throw new Error("missing requestId");
@@ -313,10 +357,14 @@ function validateCaptureRequest(request: CaptureRequest): CaptureRequest {
     if (!runId) {
         throw new Error("missing runId");
     }
+    if (!Number.isInteger(tripIndex) || tripIndex < 0) {
+        throw new Error("missing tripIndex");
+    }
 
     return {
         requestId,
         runId,
+        tripIndex,
         sceneId: request?.sceneId,
         sceneVariant: request?.sceneVariant,
         sceneName: request?.sceneName
@@ -487,19 +535,23 @@ setInterval(() => {
     requestAvailableScenesFromClient();
 }, 10000);
 
-function flushTrip(tripKey: string, runFile: string, manifestFile: string, fs: any) {
+function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: string, fs: any, dataRoot: string) {
     const trip = pendingTrips.get(tripKey);
     if (!trip) {
         return;
     }
 
-    fs.appendFileSync(runFile, JSON.stringify(trip) + "\n");
+    const tripStorage = buildTripStoragePaths(dataRoot, runStorage, trip.tripIndex);
 
-    const runTiming = parseRunIdParts(trip.runId);
-    const manifestLine = JSON.stringify({
+    if (!fs.existsSync(tripStorage.tripDir)) {
+        fs.mkdirSync(tripStorage.tripDir, { recursive: true });
+    }
+
+    const tripMetadata = {
         runId: trip.runId,
-        runFolder: runTiming.runFolder,
-        runLocalTime: runTiming.humanTime,
+        runFolder: runStorage.runTiming.runFolder,
+        sceneFolder: pathBasename(runStorage.sceneDir),
+        runLocalTime: runStorage.runTiming.humanTime,
         sceneId: trip.sceneId,
         sceneVariant: trip.sceneVariant,
         tripIndex: trip.tripIndex,
@@ -509,10 +561,42 @@ function flushTrip(tripKey: string, runFile: string, manifestFile: string, fs: a
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        file: runFile
+        videoFile: tripStorage.videoFile,
+        logFile: tripStorage.logFile
+    };
+
+    fs.writeFileSync(tripStorage.metadataFile, JSON.stringify(tripMetadata, null, 2) + "\n");
+
+    const runFile = runStorage.runFile;
+    fs.appendFileSync(runFile, JSON.stringify(trip) + "\n");
+
+    const manifestLine = JSON.stringify({
+        runId: trip.runId,
+        runFolder: runStorage.runTiming.runFolder,
+        sceneFolder: pathBasename(runStorage.sceneDir),
+        runLocalTime: runStorage.runTiming.humanTime,
+        sceneId: trip.sceneId,
+        sceneVariant: trip.sceneVariant,
+        tripIndex: trip.tripIndex,
+        chunkDurationMs: trip.chunkDurationMs,
+        syncTime: trip.syncTime,
+        endTime: trip.endTime,
+        fromDestination: trip.fromDestination,
+        toDestination: trip.toDestination,
+        vehicleDataPoints: trip.vehicleData.length,
+        file: runFile,
+        tripDir: tripStorage.tripDir,
+        videoFile: tripStorage.videoFile,
+        logFile: tripStorage.logFile,
+        metadataFile: tripStorage.metadataFile
     }) + "\n";
 
     fs.appendFileSync(manifestFile, manifestLine);
     pendingTrips.delete(tripKey);
     console.log(`Stored trip ${trip.tripIndex} for run ${trip.runId} with ${trip.vehicleData.length} data points`);
+}
+
+function pathBasename(targetPath: string): string {
+    const path = require("path");
+    return path.basename(targetPath);
 }

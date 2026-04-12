@@ -1,6 +1,7 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
 import {configurePopulation} from "./environment";
 import {syncFlash} from "./sceneManger";
+import {requestCapture} from "./captureControl";
 
 
 export enum DrivingFlag {
@@ -211,6 +212,7 @@ export class EgoService {
     } | null = null;
     private stopRequested = false;
     private stopReason = "";
+    // @ts-ignore
     private activeAbortController: AbortControllerCompat | null = null;
 
     public async execute(ego: Ego, sceneName: string, runId?: string) {
@@ -293,7 +295,23 @@ export class EgoService {
             }
 
             this.tripChunkIndex = 0;
-            const syncTime = await syncFlash();
+            let captureStarted = false;
+            try {
+                await requestCapture("start", {
+                    runId: this.RunId,
+                    tripIndex,
+                    sceneId: sceneInfo.sceneId,
+                    sceneVariant: sceneInfo.sceneVariant,
+                    sceneName: this.SceneName
+                });
+                captureStarted = true;
+            } catch (error) {
+                console.error(`[ego] failed to start capture for trip ${tripIndex} run ${this.RunId}: ${error}`);
+                throw error;
+            }
+
+            wait(1000)
+            const syncTime = await syncFlash(1000);
             console.log('Routing to waypoint:', waypoint.destination);
             this.activeTripContext = {
                 sceneId: sceneInfo.sceneId,
@@ -306,33 +324,49 @@ export class EgoService {
             };
             const [x, y, z] = this.configureRoute(waypoint, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle).destination;
             SetNewWaypoint(x,y);
-            await wait(1000)
-            const blip = GetFirstBlipInfoId(8)
-            this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
-            const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
-            // Wait for the watchdog to abort before continuing
-            await new Promise<void>((resolve) => {
-                signal.addEventListener("abort", () => resolve());
-            });
+            try {
+                await wait(1000)
+                const blip = GetFirstBlipInfoId(8)
+                this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
+                const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
+                // Wait for the watchdog to abort before continuing
+                await new Promise<void>((resolve) => {
+                    signal.addEventListener("abort", () => resolve());
+                });
 
-            if (this.stopRequested) {
+                if (this.stopRequested) {
+                    this.emitTripChunk(
+                        ego,
+                        GetGameTimer(),
+                        true
+                    );
+                    this.activeTripContext = null;
+                    ClearGpsPlayerWaypoint()
+                    throw new Error(SceneStoppedErrorCode);
+                }
+
                 this.emitTripChunk(
                     ego,
                     GetGameTimer(),
                     true
                 );
+                previousDestination = waypoint.destination
                 this.activeTripContext = null;
-                ClearGpsPlayerWaypoint()
-                throw new Error(SceneStoppedErrorCode);
+            } finally {
+                if (captureStarted) {
+                    try {
+                        await requestCapture("stop", {
+                            runId: this.RunId,
+                            tripIndex,
+                            sceneId: sceneInfo.sceneId,
+                            sceneVariant: sceneInfo.sceneVariant,
+                            sceneName: this.SceneName
+                        });
+                    } catch (error) {
+                        console.error(`[ego] failed to stop capture for trip ${tripIndex} run ${this.RunId}: ${error}`);
+                    }
+                }
             }
-
-            this.emitTripChunk(
-                ego,
-                GetGameTimer(),
-                true
-            );
-            previousDestination = waypoint.destination
-            this.activeTripContext = null;
         }
 
         if (this.stopRequested) {

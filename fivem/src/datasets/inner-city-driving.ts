@@ -40,7 +40,7 @@ type InnerCityDrivingSceneOptions = {
 
 type InnerCityDrivingTime = SceneType["environment"]["Time"];
 type InnerCityDrivingVehicle = Ego["vehicle"];
-type InnerCityDrivingSceneVariant = "default" | "duskRush" | "rainyCommute" | "lateNightCruise";
+type InnerCityDrivingSceneVariant = "default" | "duskRush" | "rainyCommute" | "lateNightCruise" | "blizzardDrift";
 
 const defaultInnerCityDrivingWeatherType: WeatherType = WeatherType.EXTRA_SUNNY;
 const defaultInnerCityDrivingPersistentWeather = true;
@@ -130,6 +130,19 @@ export const innerCityDrivingScenes = {
             color: VehicleColor.Black,
             maxSpeed: 18,
             drivingStyle: DrivingStyle.Normal
+        }
+    }),
+    blizzardDrift: createInnerCityDrivingScene({
+        weatherType: WeatherType.BLIZZARD,
+        time: {
+            hour: 10,
+            minute: 0
+        },
+        vehicle: {
+            model: VehicleModel.Random,
+            color: VehicleColor.Random,
+            maxSpeed: 10,
+            drivingStyle: DrivingStyle.Cautious
         }
     })
 };
