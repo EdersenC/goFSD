@@ -236,6 +236,44 @@ func TestResolveOutputFileRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestNormalizeDataRootFixesWindowsDriveRelativePaths(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "already absolute windows path",
+			input: `S:\fsd_fivem_data`,
+			want:  `S:\fsd_fivem_data`,
+		},
+		{
+			name:  "drive relative path becomes absolute",
+			input: `S:fsd_fivem_data`,
+			want:  `S:\fsd_fivem_data`,
+		},
+		{
+			name:  "quoted path is unwrapped",
+			input: `"S:fsd_fivem_data"`,
+			want:  `S:\fsd_fivem_data`,
+		},
+		{
+			name:  "bare drive gets slash",
+			input: `S:`,
+			want:  `S:\`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeDataRoot(tc.input)
+			if got != tc.want {
+				t.Fatalf("unexpected normalized path: got=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHelperProcessFFmpeg(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return

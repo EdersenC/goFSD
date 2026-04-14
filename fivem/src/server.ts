@@ -264,17 +264,29 @@ function rememberControlPlayerSource(value: unknown) {
     }
 }
 
-function resolveProjectRoot(): string {
-    return process.env.AWESOME_PROJECT_ROOT
+function resolveDataRoot(): string {
+    return normalizeDataRoot(process.env.VEHICLE_DATA_DIR)
+        ?? normalizeDataRoot(process.env.FSD_DATA_ROOT)
         ?? (process.platform === "win32"
-            ? "C:\\Users\\theki\\GolandProjects\\awesomeProject"
-            : "/mnt/c/Users/theki/GolandProjects/awesomeProject");
+            ? "S:\\fsd_fivem_data"
+            : "/mnt/s/fsd_fivem_data");
 }
 
-function resolveDataRoot(): string {
-    const path = require("path");
-    return process.env.VEHICLE_DATA_DIR
-        ?? path.join(resolveProjectRoot(), "backend", "data");
+function normalizeDataRoot(value?: string): string | undefined {
+    if (!value) {
+        return undefined;
+    }
+
+    const trimmed = value.trim().replace(/^["']|["']$/g, "");
+    if (!trimmed) {
+        return undefined;
+    }
+
+    if (/^[a-zA-Z]:[^\\/]/.test(trimmed)) {
+        return `${trimmed.slice(0, 2)}\\${trimmed.slice(2)}`;
+    }
+
+    return trimmed;
 }
 
 function resolveManifestFile(dataRoot: string): string {

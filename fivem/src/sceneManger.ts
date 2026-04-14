@@ -301,5 +301,5 @@ export async function syncFlash(durationMs = 250) :Promise<number> {
             );
         }
     });
-    return flashUntilGameMs
+    return  startTime
 }

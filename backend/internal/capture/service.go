@@ -20,7 +20,6 @@ import (
 
 const (
 	defaultFFmpegBin      = "ffmpeg"
-	defaultOutputDir      = "data/captures"
 	defaultStopTimeout    = 10 * time.Second
 	defaultForcedKillWait = 3 * time.Second
 )
@@ -145,8 +144,9 @@ type captureSpec struct {
 }
 
 func NewService(opts ...Option) *Service {
-	outputDir := envOrDefault("CAPTURE_OUTPUT_DIR", defaultOutputDir)
-	outputRootDir := envOrDefault("CAPTURE_OUTPUT_ROOT", defaultOutputRootDir(outputDir))
+	defaultOutputDir := filepath.Join(defaultDataRoot(), "captures")
+	outputDir := NormalizeDataRoot(envOrDefault("CAPTURE_OUTPUT_DIR", defaultOutputDir))
+	outputRootDir := NormalizeDataRoot(envOrDefault("CAPTURE_OUTPUT_ROOT", defaultOutputRootDir(outputDir)))
 
 	s := &Service{
 		ffmpegBin:     envOrDefault("FFMPEG_BIN", defaultFFmpegBin),
@@ -194,8 +194,8 @@ func WithCapabilityProbe(probe CapabilityProbe) Option {
 func WithOutputDir(dir string) Option {
 	return func(s *Service) {
 		if strings.TrimSpace(dir) != "" {
-			s.outputDir = dir
-			s.outputRootDir = defaultOutputRootDir(dir)
+			s.outputDir = NormalizeDataRoot(dir)
+			s.outputRootDir = NormalizeDataRoot(defaultOutputRootDir(dir))
 		}
 	}
 }
@@ -203,7 +203,7 @@ func WithOutputDir(dir string) Option {
 func WithOutputRootDir(dir string) Option {
 	return func(s *Service) {
 		if strings.TrimSpace(dir) != "" {
-			s.outputRootDir = dir
+			s.outputRootDir = NormalizeDataRoot(dir)
 		}
 	}
 }
@@ -1140,6 +1140,33 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func defaultDataRoot() string {
+	if value := NormalizeDataRoot(os.Getenv("FSD_DATA_ROOT")); value != "" {
+		return value
+	}
+	if runtime.GOOS == "windows" {
+		return `S:\fsd_fivem_data`
+	}
+	return "/mnt/s/fsd_fivem_data"
+}
+
+func NormalizeDataRoot(value string) string {
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	if value == "" {
+		return ""
+	}
+
+	if len(value) >= 2 && value[1] == ':' {
+		if len(value) == 2 {
+			value += `\`
+		} else if value[2] != '\\' && value[2] != '/' {
+			value = value[:2] + `\` + value[2:]
+		}
+	}
+
+	return filepath.Clean(value)
 }
 
 func defaultOutputRootDir(outputDir string) string {

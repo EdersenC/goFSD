@@ -1,22 +1,36 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"awesomeProject/internal/capture"
 	"awesomeProject/internal/control"
+	datasetproc "awesomeProject/internal/dataset"
 )
 
 //go:embed web/index.html web/app.ts
 var webAssets embed.FS
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "process-runs" {
+		if err := runProcessRuns(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	svc := capture.NewService()
+	processor := datasetproc.NewProcessor()
 	controlStore := control.NewStore()
 	mux := http.NewServeMux()
 
@@ -213,7 +227,30 @@ func main() {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, res)
+		tripDir := filepath.Dir(res.OutputFile)
+		processingPath := filepath.Join(tripDir, "processing.json")
+		postProcessStatus := "queued"
+		postProcessError := ""
+		if _, err := processor.Queue(tripDir); err != nil {
+			postProcessStatus = "failed"
+			postProcessError = err.Error()
+		} else {
+			go func(targetTripDir string) {
+				if err := processor.ProcessTrip(context.Background(), targetTripDir); err != nil {
+					log.Printf("post-processing failed for %s: %v", targetTripDir, err)
+				}
+			}(tripDir)
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":            res.Status,
+			"sessionId":         res.SessionID,
+			"outputFile":        res.OutputFile,
+			"logFile":           res.LogFile,
+			"postProcessStatus": postProcessStatus,
+			"processingFile":    processingPath,
+			"postProcessError":  postProcessError,
+		})
 	})
 
 	port := os.Getenv("PORT")
@@ -257,4 +294,70 @@ func writeEmbeddedFile(w http.ResponseWriter, name string, contentType string) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func runProcessRuns(args []string) error {
+	fs := flag.NewFlagSet("process-runs", flag.ContinueOnError)
+	root := fs.String("root", filepath.Join(defaultBackendDataRoot(), "runs"), "root directory to scan for trip folders")
+	workers := fs.Int("workers", 4, "number of parallel workers")
+	force := fs.Bool("force", false, "reprocess trips even if frames/ or dataset.jsonl already exist")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	tripDirs, err := datasetproc.CollectTripDirs(*root, fs.Args())
+	if err != nil {
+		return err
+	}
+	if len(tripDirs) == 0 {
+		fmt.Println("No trip folders found.")
+		return nil
+	}
+
+	results := datasetproc.ProcessTripDirs(
+		context.Background(),
+		tripDirs,
+		*workers,
+		datasetproc.WithForce(*force),
+	)
+
+	var completed int
+	var skipped int
+	var failed int
+	for _, result := range results {
+		switch result.State {
+		case "completed":
+			completed++
+		case "skipped":
+			skipped++
+		default:
+			if result.Error != nil {
+				failed++
+			} else {
+				completed++
+			}
+		}
+
+		if result.Error != nil {
+			fmt.Printf("FAIL %s :: %v\n", result.TripDir, result.Error)
+			continue
+		}
+		fmt.Printf("%s %s\n", strings.ToUpper(result.State), result.TripDir)
+	}
+
+	fmt.Printf("Summary: completed=%d skipped=%d failed=%d total=%d\n", completed, skipped, failed, len(results))
+	if failed > 0 {
+		return fmt.Errorf("processing failed for %d trip(s)", failed)
+	}
+	return nil
+}
+
+func defaultBackendDataRoot() string {
+	if value := capture.NormalizeDataRoot(os.Getenv("FSD_DATA_ROOT")); value != "" {
+		return value
+	}
+	if os.PathSeparator == '\\' {
+		return `S:\fsd_fivem_data`
+	}
+	return "/mnt/s/fsd_fivem_data"
 }
