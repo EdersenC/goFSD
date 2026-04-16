@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import torch
+from PIL import Image
+from torch import Tensor
+from torch.utils.data import Dataset
+from torchvision import transforms
 
 
 class Trip:
@@ -60,14 +65,18 @@ class Trip:
         return samples
 
 
-class FsdDataset:
-    def __init__(self, run_id: str, data_root: str | Path):
-        self.data_root = Path(data_root)
-        self.run_id = run_id
-        self.run_dir = self.data_root / "runs" / run_id
-        self.scene_dir = self._resolve_scene_dir()
-        self.trips = self._load_trips()
-        self.samples = self._load_samples()
+class FsdDataset(Dataset[tuple[Tensor, Tensor]]):
+    def __init__(self, run_id: str, data_root: str | Path, image_size: tuple[int, int] = (224, 224)):
+        self.data_root: Path = Path(data_root)
+        self.run_id: str = run_id
+        self.run_dir: Path = self.data_root / "runs" / run_id
+        self.scene_dir: Path = self._resolve_scene_dir()
+        self.trips: list[Trip] = self._load_trips()
+        self.samples: list[dict[str, Any]] = self._load_samples()
+        self.transform: Callable[[Image.Image], Tensor] = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.ToTensor(),
+        ])
 
     def _resolve_scene_dir(self) -> Path:
         if not self.run_dir.is_dir():
@@ -105,29 +114,27 @@ class FsdDataset:
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        return self.samples[index]
+    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
+        sample = self.samples[index]
+        frame_paths = sample.get("frame_paths", [])
+        if not frame_paths:
+            raise ValueError(f"No frame paths found for sample at index {index}")
+        if len(frame_paths) != 3:
+            raise ValueError(f"Expected 3 frame paths for sample at index {index}, found {len(frame_paths)}")
+
+        frame_tensors: list[Tensor] = []
+        for frame_path in frame_paths:
+            if not frame_path.is_file():
+                raise FileNotFoundError(f"Frame image not found: {frame_path}")
+            image = Image.open(frame_path).convert("RGB")
+            image_tensor = self.transform(image)
+            frame_tensors.append(image_tensor)
+
+        label = sample["label"]
+        steering = float(label["Steering"])
+        acceleration = float(label["acceleration"])
+        x = torch.cat(frame_tensors, dim=0)
+        y = torch.tensor([steering, acceleration], dtype=torch.float32)
+        return x, y
 
 
-def main():
-    default_data_root = r"S:\fsd_fivem_data" if os.name == "nt" else "/mnt/s/fsd_fivem_data"
-    configured_root = os.environ.get("FSD_DATA_ROOT", default_data_root).strip().strip("\"'")
-    if os.name == "nt" and len(configured_root) >= 2 and configured_root[1] == ":":
-        if len(configured_root) == 2:
-            configured_root += "\\"
-        elif configured_root[2] not in ("\\", "/"):
-            configured_root = f"{configured_root[:2]}\\{configured_root[2:]}"
-    data_root = Path(configured_root)
-
-    dataset = FsdDataset(run_id="2026-04-12_09-13-44PM_7zspe7", data_root=data_root)
-    print(f"Found {len(dataset.trips)} trips in the run.")
-    print(f"Found {len(dataset)} processed samples in the dataset.")
-
-    for i, trip in enumerate(dataset.trips):
-        trip_data = dataset.load_trip_data(i)
-        print(f"Trip {i} dataset path: {trip_data['dataset_path']}")
-        print(f"Trip {i} sample count: {len(trip_data['samples'])}")
-
-
-if __name__ == "__main__":
-    main()

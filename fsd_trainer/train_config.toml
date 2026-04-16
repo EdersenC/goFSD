@@ -1,0 +1,32 @@
+[dataset]
+data_root = "S:\\fsd_fivem_data"
+run_id = "2026-04-14_08-17-23AM_ym5rls"
+val_id = "2026-04-13_07-52-20AM_mrsdzs"
+
+[output]
+base_dir = "fsd_trainer/training_runs"
+
+[training]
+device = "auto"
+epochs = 10
+learning_rate = 0.001
+early_stopping_metric = "overall_mae"
+early_stopping_patience = 3
+early_stopping_min_delta = 0.0
+
+[loader]
+batch_size = 712
+num_workers = 3
+pin_memory = true
+prefetch_factor = 6
+persistent_workers = true
+val_split = 0.20
+cpu_batch_size = 32
+
+[inference]
+checkpoint = "fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260415-210617/epoch-006.pt"
+device = "auto"
+data_root = "S:\\fsd_fivem_data"
+run_id = "2026-04-14_08-17-23AM_ym5rls"
+sample_index = 400
+output_json = false
