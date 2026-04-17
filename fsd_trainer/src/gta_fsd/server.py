@@ -5,7 +5,9 @@ import base64
 import io
 import json
 import threading
+import tomllib
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +17,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
+from control_client import build_control_command, load_actuator_config, post_control_command
 from inference import (
     DEFAULT_CONFIG_PATH,
     build_model,
@@ -24,6 +27,98 @@ from inference import (
     resolve_existing_path,
     select_device,
 )
+
+
+
+@dataclass(frozen=True)
+class ModelOption:
+    label: str
+    path: str
+    run_id: str
+    epoch: int
+    is_best: bool
+    updated_at: str
+
+
+def load_training_runs_dir(config_path: Path) -> Path:
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    output_raw = raw.get("output", {})
+    base_dir_raw = str(output_raw.get("base_dir", "")).strip()
+    if not base_dir_raw:
+        raise ValueError(f"Missing output.base_dir in {config_path}")
+
+    candidate = Path(base_dir_raw)
+    config_dir = config_path.resolve().parent
+    project_root = config_dir.parent
+    script_dir = Path(__file__).resolve().parent
+
+    candidates = []
+    if candidate.is_absolute():
+        candidates.append(candidate)
+    else:
+        candidates.extend([
+            Path.cwd() / candidate,
+            config_dir / candidate,
+            project_root / candidate,
+            script_dir / candidate,
+        ])
+
+    for resolved in candidates:
+        if resolved.is_dir():
+            return resolved.resolve()
+
+    tried = "\n".join(f"- {path}" for path in candidates)
+    raise FileNotFoundError(f"Training runs directory does not exist: {base_dir_raw}\nTried:\n{tried}")
+
+
+def discover_models(config_path: Path) -> list[dict[str, Any]]:
+    runs_dir = load_training_runs_dir(config_path)
+    models: list[ModelOption] = []
+
+    for run_dir in sorted((path for path in runs_dir.iterdir() if path.is_dir()), reverse=True):
+        best_epoch = 0
+        metrics_path = run_dir / "run_metrics.json"
+        if metrics_path.is_file():
+            try:
+                metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+                best_epoch = int(metrics_payload.get("best_epoch", 0) or 0)
+            except Exception:
+                best_epoch = 0
+
+        checkpoints = sorted(run_dir.glob("epoch-*.pt"), reverse=True)
+        for checkpoint_path in checkpoints:
+            stem = checkpoint_path.stem
+            try:
+                epoch = int(stem.split("-", 1)[1])
+            except Exception:
+                continue
+
+            is_best = best_epoch > 0 and epoch == best_epoch
+            label = f"{run_dir.name} - epoch {epoch:03d}"
+            if is_best:
+                label += " (best)"
+
+            models.append(ModelOption(
+                label=label,
+                path=str(checkpoint_path.resolve()),
+                run_id=run_dir.name,
+                epoch=epoch,
+                is_best=is_best,
+                updated_at=datetime.fromtimestamp(checkpoint_path.stat().st_mtime, tz=UTC).isoformat().replace("+00:00", "Z"),
+            ))
+
+    models.sort(key=lambda item: (item.run_id, item.is_best, item.epoch, item.path), reverse=True)
+    return [
+        {
+            "label": item.label,
+            "path": item.path,
+            "runId": item.run_id,
+            "epoch": item.epoch,
+            "isBest": item.is_best,
+            "updatedAt": item.updated_at,
+        }
+        for item in models
+    ]
 
 
 @dataclass(frozen=True)
@@ -39,8 +134,12 @@ class ModelRuntime:
         self._model: Any = None
         self._device: torch.device | None = None
         self._checkpoint_path: Path | None = None
-        self._transform = transforms.Compose([
-            transforms.Resize((224, 224)),
+        self._image_size = (224, 224)
+        self._transform = self._build_transform(self._image_size)
+
+    def _build_transform(self, image_size: tuple[int, int]) -> transforms.Compose:
+        return transforms.Compose([
+            transforms.Resize((image_size[1], image_size[0])),
             transforms.ToTensor(),
         ])
 
@@ -51,9 +150,13 @@ class ModelRuntime:
                 "loaded": loaded,
                 "device": None if self._device is None else str(self._device),
                 "checkpoint": None if self._checkpoint_path is None else str(self._checkpoint_path),
+                "image_size": {
+                    "width": self._image_size[0],
+                    "height": self._image_size[1],
+                },
             }
 
-    def load_model(self, checkpoint_path: Path, device_name: str) -> dict[str, Any]:
+    def load_model(self, checkpoint_path: Path, device_name: str, image_size: tuple[int, int]) -> dict[str, Any]:
         device = select_device(device_name)
         checkpoint = load_checkpoint(checkpoint_path, device)
         model = build_model(checkpoint, device)
@@ -62,11 +165,17 @@ class ModelRuntime:
             self._model = model
             self._device = device
             self._checkpoint_path = checkpoint_path
+            self._image_size = image_size
+            self._transform = self._build_transform(image_size)
 
         return {
             "status": "loaded",
             "checkpoint": str(checkpoint_path),
             "device": str(device),
+            "image_size": {
+                "width": image_size[0],
+                "height": image_size[1],
+            },
             "epoch": int(checkpoint.get("epoch", 0)),
             "train_metrics": checkpoint.get("train_metrics"),
             "val_metrics": checkpoint.get("val_metrics"),
@@ -144,6 +253,7 @@ class ModelServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_cls)
         self.runtime = ModelRuntime()
         self.config_path = config_path
+        self.actuator = load_actuator_config(config_path)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -155,6 +265,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/model":
             self._write_json(HTTPStatus.OK, self.server.runtime.status())
+            return
+        if self.path == "/models":
+            self._write_json(HTTPStatus.OK, {"models": discover_models(self.server.config_path)})
             return
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -169,6 +282,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/predict":
                 result = self.server.runtime.predict(payload)
+                prediction = result.get("prediction", {})
+                steer = float(prediction.get("Steering", 0.0))
+                acceleration = float(prediction.get("acceleration", 0.0))
+                sequence = self._read_int(payload.get("sequence"))
+                timestamp_ms = self._read_int(payload.get("timestamp_ms"))
+                command = build_control_command(
+                    steering=steer,
+                    acceleration=acceleration,
+                    sequence=sequence,
+                    timestamp_ms=timestamp_ms,
+                )
+                post_control_command(self.server.actuator, command)
                 self._write_json(HTTPStatus.OK, result)
                 return
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -194,7 +319,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         file_config = load_config(config_path)
         raw_checkpoint = payload.get("checkpoint", file_config.checkpoint)
-        raw_device = payload.get("device", file_config.device)
+        raw_device = payload.get("device") or file_config.device or "cuda"
 
         if not isinstance(raw_checkpoint, str) or not raw_checkpoint.strip():
             raise ValueError("checkpoint must be a non-empty string")
@@ -202,7 +327,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             raise ValueError("device must be a non-empty string")
 
         checkpoint_path = resolve_existing_path(raw_checkpoint, config_path)
-        result = self.server.runtime.load_model(checkpoint_path, raw_device.strip().lower())
+        image_size = (file_config.image_width, file_config.image_height)
+        result = self.server.runtime.load_model(checkpoint_path, raw_device.strip().lower(), image_size)
         self._write_json(HTTPStatus.OK, result)
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -222,6 +348,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_int(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError("sequence and timestamp_ms must be integers when provided")
 
 
 def parse_args() -> ServerArgs:

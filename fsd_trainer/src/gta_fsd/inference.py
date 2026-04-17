@@ -26,6 +26,8 @@ class InferenceConfig:
     run_id: str | None
     sample_index: int
     output_json: bool
+    image_width: int
+    image_height: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +99,8 @@ def load_config(path: Path) -> InferenceConfig:
     data_root = None if data_root_raw is None else normalize_windows_drive_path(str(data_root_raw))
     run_id_raw = inference_raw.get("run_id")
     run_id = None if run_id_raw is None else str(run_id_raw).strip()
+    image_width = int(inference_raw.get("image_width", dataset_raw.get("image_width", 224)))
+    image_height = int(inference_raw.get("image_height", dataset_raw.get("image_height", 224)))
 
     return InferenceConfig(
         checkpoint=checkpoint,
@@ -105,6 +109,8 @@ def load_config(path: Path) -> InferenceConfig:
         run_id=run_id,
         sample_index=int(inference_raw.get("sample_index", 0)),
         output_json=bool(inference_raw.get("output_json", False)),
+        image_width=image_width,
+        image_height=image_height,
     )
 
 
@@ -127,6 +133,8 @@ def resolve_config(args: argparse.Namespace) -> InferenceConfig:
         run_id=run_id,
         sample_index=sample_index,
         output_json=output_json,
+        image_width=file_config.image_width,
+        image_height=file_config.image_height,
     )
 
 
@@ -193,8 +201,9 @@ def run_sample_inference(
     data_root: str,
     run_id: str,
     sample_index: int,
+    image_size: tuple[int, int],
 ) -> dict[str, Any]:
-    dataset = FsdDataset(run_id=run_id, data_root=data_root)
+    dataset = FsdDataset(run_id=run_id, data_root=data_root, image_size=image_size)
     if sample_index < 0 or sample_index >= len(dataset):
         raise IndexError(f"sample_index out of range: {sample_index}, dataset size={len(dataset)}")
 
@@ -284,6 +293,7 @@ def main() -> None:
             data_root=config.data_root,
             run_id=config.run_id,
             sample_index=config.sample_index,
+            image_size=(config.image_width, config.image_height),
         )
 
     output = build_output(checkpoint_path, checkpoint, device, sample_result)

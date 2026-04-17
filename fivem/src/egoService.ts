@@ -212,10 +212,17 @@ export class EgoService {
     } | null = null;
     private stopRequested = false;
     private stopReason = "";
+    private cameraTickId: number | null = null;
     // @ts-ignore
     private activeAbortController: AbortControllerCompat | null = null;
 
     public async execute(ego: Ego, sceneName: string, runId?: string) {
+        await this.executeEgo(ego, sceneName, runId);
+        await this.routeEgo(ego)
+        return
+    }
+
+    public async executeEgo(ego: Ego, sceneName: string, runId?: string) {
         ego.vehicle.VehicleData = []
         this.SceneName = sceneName
         this.RunId = runId && runId.trim() !== "" ? runId : this.createRunId()
@@ -223,19 +230,56 @@ export class EgoService {
         this.stopReason = "";
         this.tripChunkIndex = 0;
         this.activeTripContext = null;
+        this.stopManagedLoops();
         if (this.oldEgo) {
             this.cleanUp(this.oldEgo);
         }
         this.oldEgo = ego;
+        ClearPedTasksImmediately(PlayerPedId());
         await this.setVehicle(ego);
+        if (!isValidEntity(ego.vehicle.id)) {
+            throw new Error("failed to initialize ego vehicle");
+        }
         SetPlayerInvincible(PlayerId(), true);
         SetVehRadioStation(ego.vehicle.id, "OFF");
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        FreezeEntityPosition(ego.vehicle.id, false);
         this.makeVehicleGodMode(ego.vehicle.id)
-        this.setCaptureCamera(ego);
+        this.startCaptureCamera(ego);
         this.makePlayerUnaware(PlayerPedId(),true)
-        await this.routeEgo(ego)
+        console.log("[ego-control] FiveM ego setup ready; vehicle actuation now comes from the Go virtual controller.");
         return
     }
+
+    private resetEgoControlRuntime() {
+        this.stopManagedLoops();
+    }
+
+    private stopManagedLoops() {
+        this.stopCaptureCamera();
+    }
+
+    public disposeCurrentEgo() {
+        this.stopRequested = true;
+        this.stopReason = "ego disposed";
+        if (this.activeAbortController && !(this.activeAbortController as any).signal?.aborted) {
+            this.activeAbortController.abort();
+        }
+        this.resetEgoControlRuntime();
+
+        if (this.oldEgo) {
+            this.cleanUp(this.oldEgo);
+        }
+        this.oldEgo = null;
+        this.activeTripContext = null;
+        this.tripChunkIndex = 0;
+        SetPlayerInvincible(PlayerId(), false);
+        this.makePlayerUnaware(PlayerPedId(), false);
+    }
+
+
+
 
     public requestStop(reason = "scene stop requested") {
         this.stopRequested = true;
@@ -443,6 +487,9 @@ export class EgoService {
 
 
 
+
+
+
     private async drivingLoop(ego:Ego, cords:[number,number,number]): Promise<() => Promise<{
         success: boolean;
         message: string
@@ -526,8 +573,11 @@ export class EgoService {
         SetBlockingOfNonTemporaryEvents(egoId, toggle);
     }
 
-    public setCaptureCamera(ego: Ego) {
-        setInterval(() => {
+    public startCaptureCamera(ego: Ego) {
+        if (this.cameraTickId !== null) {
+            clearTick(this.cameraTickId);
+        }
+        this.cameraTickId = setTick(() => {
             if (!isValidEntity(ego.vehicle.id)) return;
 
             if (!IsPedInVehicle(PlayerPedId(), ego.vehicle.id, false)) return;
@@ -551,8 +601,15 @@ export class EgoService {
             DisableControlAction(0, 81, true);
             DisableControlAction(0, 95, true);
             DisableControlAction(0, 99, true);
-        }, 0);
+        });
+    }
 
+    private stopCaptureCamera() {
+        if (this.cameraTickId === null) {
+            return;
+        }
+        clearTick(this.cameraTickId);
+        this.cameraTickId = null;
     }
 
     public async setVehicle(ego: Ego){
@@ -576,7 +633,10 @@ export class EgoService {
         console.log(`Requested control of vehicle ${newVehicle}, in control: ${incontrol}`);
         SetVehicleNumberPlateText(newVehicle, "EGO");
         SetVehicleOnGroundProperly(newVehicle);
-        this.addPedToVehicle(PlayerPedId(), newVehicle);
+        await this.addPedToVehicle(PlayerPedId(), newVehicle);
+        SetVehicleEngineOn(newVehicle, true, true, false);
+        SetVehicleUndriveable(newVehicle, false);
+        FreezeEntityPosition(newVehicle, false);
         ego.vehicle.id = newVehicle;
         ego.vehicle.model = resolvedModel;
         ego.vehicle.color = resolvedColor;
@@ -607,9 +667,21 @@ export class EgoService {
         return vehicle;
     }
 
-    public addPedToVehicle(egoId:number, vehicle: number, ) {
-        SetPedIntoVehicle(egoId, vehicle, -1)
-        console.log('Adding player ped to vehicle:', vehicle);
+    public async addPedToVehicle(egoId:number, vehicle: number) {
+        TaskWarpPedIntoVehicle(egoId, vehicle, -1);
+        SetPedIntoVehicle(egoId, vehicle, -1);
+
+        const startedAt = GetGameTimer();
+        while (GetGameTimer() - startedAt < 1000) {
+            if (IsPedInVehicle(egoId, vehicle, false) && GetPedInVehicleSeat(vehicle, -1) === egoId) {
+                console.log(`Player ped seated in vehicle ${vehicle} as driver.`);
+                return;
+            }
+            await wait(50);
+            SetPedIntoVehicle(egoId, vehicle, -1);
+        }
+
+        console.log(`Failed to confirm player ped seated in vehicle ${vehicle} as driver.`);
     }
 
     public driveToWaypoint(driver: number, vehicle: number, waypoint:number ,drivingStyle:DrivingStyle, speed: number = 20.0): void {
@@ -638,10 +710,10 @@ export class EgoService {
     private cleanUp(ego: Ego) {
         if (!isValidEntity(ego.vehicle.id)) {
             console.log('No valid vehicle to clean up for ego:', ego);
+            return;
         }
 
         SetEntityAsMissionEntity(ego.vehicle.id, true, true);
-        wait(1000)
         DeleteVehicle(ego.vehicle.id);
         console.log('Cleaned up old vehicle with ID:', ego.vehicle.id);
     }

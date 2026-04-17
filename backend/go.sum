@@ -1,3 +1,5 @@
+github.com/CB2Moon/vgamepad-go v0.1.1 h1:om1fzRIoGpEY2Zp8q6JP7DiAdX3HszAfYH3K+Db3wI4=
+github.com/CB2Moon/vgamepad-go v0.1.1/go.mod h1:Sru/f7Q+BgguBwuR9xA+wkpb4wTSBwW6z/l+nH+FxCE=
 github.com/bytedance/sonic v1.14.0 h1:/OfKt8HFw0kh2rj8N0F6C/qPGRESq0BbaNZgcNXXzQQ=
 github.com/bytedance/sonic v1.14.0/go.mod h1:WoEbx8WTcFJfzCe0hbmyTGrfjt8PzNEBdxlNUO24NhA=
 github.com/bytedance/sonic/loader v0.3.0 h1:dskwH8edlzNMctoruo8FPTJDF3vLtDT0sXZwvZJyqeA=

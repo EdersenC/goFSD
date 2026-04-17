@@ -1085,6 +1085,9 @@ func sourceIDFromName(name string) string {
 	_, _ = h.Write([]byte(name))
 	hash := strconv.FormatUint(uint64(h.Sum32()), 16)
 
+	if len(hash) < 8 {
+		hash = strings.Repeat("0", 8-len(hash)) + hash
+	}
 	return base + "-" + hash[:8]
 }
 

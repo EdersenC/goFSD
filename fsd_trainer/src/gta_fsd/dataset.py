@@ -66,7 +66,7 @@ class Trip:
 
 
 class FsdDataset(Dataset[tuple[Tensor, Tensor]]):
-    def __init__(self, run_id: str, data_root: str | Path, image_size: tuple[int, int] = (224, 224)):
+    def __init__(self, run_id: str, data_root: str | Path, image_size: tuple[int, int] = (480, 480)):
         self.data_root: Path = Path(data_root)
         self.run_id: str = run_id
         self.run_dir: Path = self.data_root / "runs" / run_id

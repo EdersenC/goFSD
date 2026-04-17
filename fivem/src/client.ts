@@ -13,7 +13,7 @@ log("[client] loaded");
 const sceneManager = new SceneManager();
 const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDrivingSceneVariant[];
 
-type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
+type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes" | "startEgo" | "stopEgo";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
 
 type ControlCommand = {
@@ -82,6 +82,22 @@ async function executeAllScenesControlled() {
     }
 }
 
+async function executeEgoControl() {
+    reportControlStatus("runningScene", "ego-control");
+    try {
+        await sceneManager.startEgoControl();
+    } catch (error: any) {
+        const message = error?.message ?? "Failed to start ego control";
+        reportControlStatus("error", "ego-control", message);
+        throw error;
+    }
+}
+
+function stopEgoControl() {
+    sceneManager.stopEgoControl();
+    reportControlStatus("idle");
+}
+
 function requestEndScene() {
     reportControlStatus("stopping");
     sceneManager.endScene();
@@ -119,6 +135,14 @@ RegisterCommand("endAllScenes", () => {
     requestEndAllScenes();
 }, false);
 
+RegisterCommand("startEgo", async (_source: number, args: string[]) => {
+    await executeEgoControl();
+}, false);
+
+RegisterCommand("stopEgo", () => {
+    stopEgoControl();
+}, false);
+
 RegisterCommand("listSceneVariants", () => {
     const variants = innerCitySceneNames.join(", ");
     emit("chat:addMessage", {
@@ -151,6 +175,12 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
             case "endAllScenes":
                 requestEndAllScenes();
                 break;
+            case "startEgo":
+                await executeEgoControl();
+                break;
+            case "stopEgo":
+                stopEgoControl();
+                break;
             default:
                 throw new Error(`Unsupported control command: ${command?.type ?? "unknown"}`);
         }
@@ -160,6 +190,12 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
         log(message);
     }
 });
+
+
+
+
+
+
 
 onNet("control:requestAvailableScenes", () => {
     publishAvailableScenes();

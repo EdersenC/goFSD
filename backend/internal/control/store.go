@@ -17,6 +17,8 @@ const (
 	CommandRunAllScenes CommandType = "runAllScenes"
 	CommandEndScene     CommandType = "endScene"
 	CommandEndAllScenes CommandType = "endAllScenes"
+	CommandStartEgo     CommandType = "startEgo"
+	CommandStopEgo      CommandType = "stopEgo"
 )
 
 type RuntimeStatus string
@@ -277,9 +279,9 @@ func validateCommand(commandType CommandType, sceneName string) error {
 	switch commandType {
 	case CommandStartScene:
 		if sceneName == "" {
-			return fmt.Errorf("%w: sceneName is required for startScene", ErrInvalidCommand)
+			return fmt.Errorf("%w: sceneName is required for %s", ErrInvalidCommand, commandType)
 		}
-	case CommandRunAllScenes, CommandEndScene, CommandEndAllScenes:
+	case CommandStartEgo, CommandRunAllScenes, CommandEndScene, CommandEndAllScenes, CommandStopEgo:
 	default:
 		return fmt.Errorf("%w: unsupported command type %q", ErrInvalidCommand, commandType)
 	}

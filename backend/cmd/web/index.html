@@ -141,6 +141,12 @@
             gap: 12px;
         }
 
+        .inference-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+
         .status-item {
             padding: 14px;
             border-radius: 12px;
@@ -206,18 +212,47 @@
             color: var(--muted);
         }
 
-        select, button {
+        select, input, button {
             width: 100%;
             border-radius: 14px;
             border: 1px solid var(--line);
             font: inherit;
         }
 
-        select {
+        select, input {
             padding: 14px 16px;
             background: #0b1220;
             color: var(--text);
+        }
+
+        select {
             appearance: none;
+        }
+
+        input[type="number"] {
+            appearance: textfield;
+        }
+
+        .tuning-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .field-note {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .tuning-meta {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            margin-top: 10px;
+            color: var(--muted);
+            font-size: 13px;
         }
 
         .button-grid {
@@ -318,8 +353,15 @@
             }
 
             .status-grid,
-            .button-grid {
+            .inference-grid,
+            .button-grid,
+            .tuning-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .tuning-meta {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
     </style>
@@ -377,6 +419,128 @@
                 </div>
             </div>
         </article>
+    </section>
+
+    <section class="layout">
+        <article class="card">
+            <h2>Inference Test</h2>
+            <div class="controls">
+                <div class="controls-row">
+                    <label class="field" for="model-select">
+                        <span class="status-label">Model Checkpoint</span>
+                        <select id="model-select">
+                            <option value="">Loading models...</option>
+                        </select>
+                    </label>
+                    <button id="load-model" class="secondary">Load Selected Model</button>
+                </div>
+                <div class="button-grid">
+                    <button id="start-inference" class="primary">Start Backend Inference</button>
+                    <button id="stop-inference" class="danger">Stop Backend Inference</button>
+                    <button id="start-ego" class="secondary">Start Ego Control</button>
+                    <button id="stop-ego" class="danger">Stop Ego Control</button>
+                </div>
+                <p class="muted">Loads a checkpoint from your training runs, starts the Go inferencer, and feeds the latest control output into a virtual Xbox 360 controller. FiveM still handles ego setup/start, but not final actuation.</p>
+            </div>
+        </article>
+
+        <article class="card">
+            <h2>Latest Prediction</h2>
+            <div class="inference-grid">
+                <div class="status-item">
+                    <span class="status-label">Inference State</span>
+                    <div id="inference-state" class="status-value">idle</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Steering</span>
+                    <div id="inference-steering" class="status-value">0.0000</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Acceleration</span>
+                    <div id="inference-acceleration" class="status-value">0.0000</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Prediction Seq</span>
+                    <div id="inference-sequence" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Predicted At</span>
+                    <div id="inference-predicted-at" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Inference Error</span>
+                    <div id="inference-error" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Actuator</span>
+                    <div id="actuator-ready" class="status-value">unknown</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Applied Input</span>
+                    <div id="actuator-applied" class="status-value">steer=0.000 throttle=0.000 brake=0.000</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Actuator Error</span>
+                    <div id="actuator-last-error" class="status-value">None</div>
+                </div>
+            </div>
+        </article>
+    </section>
+
+    <section class="card">
+        <h2>Actuator Tuning</h2>
+        <p class="muted">Edit the live driving gains and response rates, apply them immediately to the running controller loop, then save the ones that feel right.</p>
+        <div class="tuning-grid">
+            <label class="field" for="tuning-steer-input-gain">
+                <span class="status-label">Steer Gain</span>
+                <input id="tuning-steer-input-gain" type="number" step="0.001">
+                <span id="saved-steer-input-gain" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-steer-deadzone">
+                <span class="status-label">Steer Deadzone</span>
+                <input id="tuning-steer-deadzone" type="number" step="0.001" min="0">
+                <span id="saved-steer-deadzone" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-max-steer-scale">
+                <span class="status-label">Max Steer Scale</span>
+                <input id="tuning-max-steer-scale" type="number" step="0.001" min="0">
+                <span id="saved-max-steer-scale" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-steer-rate">
+                <span class="status-label">Steer Rate</span>
+                <input id="tuning-steer-rate" type="number" step="0.001" min="0">
+                <span id="saved-steer-rate" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-throttle-input-gain">
+                <span class="status-label">Throttle Gain</span>
+                <input id="tuning-throttle-input-gain" type="number" step="0.001" min="0">
+                <span id="saved-throttle-input-gain" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-throttle-rate">
+                <span class="status-label">Throttle Rate</span>
+                <input id="tuning-throttle-rate" type="number" step="0.001" min="0">
+                <span id="saved-throttle-rate" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-brake-input-gain">
+                <span class="status-label">Brake Gain</span>
+                <input id="tuning-brake-input-gain" type="number" step="0.001" min="0">
+                <span id="saved-brake-input-gain" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-brake-rate">
+                <span class="status-label">Brake Rate</span>
+                <input id="tuning-brake-rate" type="number" step="0.001" min="0">
+                <span id="saved-brake-rate" class="field-note">Saved: --</span>
+            </label>
+        </div>
+        <div class="button-grid">
+            <button id="actuator-apply" class="primary">Apply Live</button>
+            <button id="actuator-reset" class="secondary">Reset to Saved</button>
+            <button id="actuator-save" class="secondary">Save to Config</button>
+        </div>
+        <div class="tuning-meta">
+            <span id="actuator-config-path">Config file: unavailable</span>
+            <span class="muted">Live changes take effect on the next actuator tick.</span>
+        </div>
     </section>
 
     <section class="card">

@@ -3,6 +3,7 @@ module awesomeProject
 go 1.25
 
 require (
+	github.com/CB2Moon/vgamepad-go v0.1.1 // indirect
 	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect

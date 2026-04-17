@@ -2,6 +2,8 @@
 data_root = "S:\\fsd_fivem_data"
 run_id = "2026-04-14_08-17-23AM_ym5rls"
 val_id = "2026-04-13_07-52-20AM_mrsdzs"
+image_width = 480
+image_height = 480
 
 [output]
 base_dir = "fsd_trainer/training_runs"
@@ -15,7 +17,7 @@ early_stopping_patience = 3
 early_stopping_min_delta = 0.0
 
 [loader]
-batch_size = 712
+batch_size = 164
 num_workers = 3
 pin_memory = true
 prefetch_factor = 6
@@ -24,9 +26,36 @@ val_split = 0.20
 cpu_batch_size = 32
 
 [inference]
-checkpoint = "fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260415-210617/epoch-006.pt"
-device = "auto"
+checkpoint = "fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260416-080606/epoch-006.pt"
+device = "cuda"
 data_root = "S:\\fsd_fivem_data"
 run_id = "2026-04-14_08-17-23AM_ym5rls"
 sample_index = 400
 output_json = false
+
+[backend.inference]
+model_server_url = "http://127.0.0.1:8090"
+model_device = "cuda"
+source_id = "monitor-2"
+auto_load = true
+fps = 30
+window_size = 3
+window_stride = 2
+frame_width = 480
+frame_height = 480
+request_timeout = "5s"
+jpeg_quality = 90
+
+[backend.actuator]
+url = "http://127.0.0.1:8080"
+request_timeout = "500ms"
+tick_hz = 15
+stale_timeout = "250ms"
+steer_deadzone = 0.02
+max_steer_scale = 1.0
+steer_input_gain = 3.0
+throttle_input_gain = 2.0
+brake_input_gain = 2.0
+steer_rate_per_second = 2.5
+throttle_rate_per_second = 1.3
+brake_rate_per_second = 3.0

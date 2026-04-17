@@ -24,6 +24,8 @@ class DatasetConfig:
     data_root: str
     run_id: str
     val_id: str
+    image_width: int
+    image_height: int
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,8 @@ class TrainingContext:
     criterion: Module
     optimizer: Optimizer
     scaler: torch.amp.GradScaler
+    train_sample_shape: tuple[int, ...]
+    train_target_shape: tuple[int, ...]
 
 
 @dataclass
@@ -124,6 +128,8 @@ def load_config(path: Path) -> TrainConfig:
             data_root=normalize_windows_drive_path(str(dataset_raw["data_root"])),
             run_id=str(dataset_raw["run_id"]),
             val_id=str(dataset_raw["val_id"]),
+            image_width=int(dataset_raw.get("image_width", 224)),
+            image_height=int(dataset_raw.get("image_height", 224)),
         ),
         output=OutputConfig(
             base_dir=str(output_raw["base_dir"]),
@@ -215,11 +221,12 @@ def select_device(requested: str) -> torch.device:
     return torch.device("cpu")
 
 
-def probe_device(model: Module, device: torch.device) -> bool:
+def probe_device(model: Module, device: torch.device, image_size: tuple[int, int]) -> bool:
     if device.type != "cuda":
         return True
     try:
-        probe_batch = torch.zeros((1, 9, 224, 224), device=device)
+        image_width, image_height = image_size
+        probe_batch = torch.zeros((1, 9, image_height, image_width), device=device)
         with torch.no_grad():
             _ = model(probe_batch)
         return True
@@ -379,6 +386,13 @@ def train_epoch(
     total_sq_error = torch.zeros(2, dtype=torch.float64)
 
     for batch_index, (x_batch, y_batch) in enumerate(loader, start=1):
+        if batch_index == 1:
+            print(
+                "first_train_batch "
+                f"x_shape={tuple(x_batch.shape)} "
+                f"y_shape={tuple(y_batch.shape)} "
+                f"dtype={x_batch.dtype}"
+            )
         batch_loss, batch_time, batch_abs_error, batch_sq_error, batch_samples = train_batch(
             x_batch, y_batch, model, criterion, optimizer, scaler, device
         )
@@ -443,9 +457,15 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
         "dataset_root": str(context.data_root),
         "run_id": context.config.dataset.run_id,
         "val_id": context.config.dataset.val_id,
+        "image_size": {
+            "width": context.config.dataset.image_width,
+            "height": context.config.dataset.image_height,
+        },
         "device": str(context.device),
         "dataset_samples": len(context.train_dataset),
         "validation_dataset_samples": len(context.val_dataset),
+        "train_sample_shape": list(context.train_sample_shape),
+        "train_target_shape": list(context.train_target_shape),
         "train_loader_samples": len(context.train_loader.dataset),
         "validation_loader_samples": len(context.val_loader.dataset),
         "epochs_total": context.config.training.epochs,
@@ -458,9 +478,9 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
     }
 
 
-def prepare_model(device: torch.device) -> tuple[Module, torch.device]:
+def prepare_model(device: torch.device, image_size: tuple[int, int]) -> tuple[Module, torch.device]:
     model = DrivingCNN().to(device)
-    if probe_device(model, device):
+    if probe_device(model, device, image_size):
         return model, device
 
     print(
@@ -474,9 +494,11 @@ def prepare_model(device: torch.device) -> tuple[Module, torch.device]:
 def build_training_context(config: TrainConfig, config_path: Path) -> TrainingContext:
     data_root = Path(config.dataset.data_root)
     requested_device = select_device(config.training.device)
-    train_dataset = FsdDataset(run_id=config.dataset.run_id, data_root=data_root)
-    val_dataset = FsdDataset(run_id=config.dataset.val_id, data_root=data_root)
-    model, device = prepare_model(requested_device)
+    image_size = (config.dataset.image_width, config.dataset.image_height)
+    train_dataset = FsdDataset(run_id=config.dataset.run_id, data_root=data_root, image_size=image_size)
+    val_dataset = FsdDataset(run_id=config.dataset.val_id, data_root=data_root, image_size=image_size)
+    train_sample_x, train_sample_y = train_dataset[0]
+    model, device = prepare_model(requested_device, image_size)
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
@@ -501,6 +523,8 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         criterion=criterion,
         optimizer=optimizer,
         scaler=scaler,
+        train_sample_shape=tuple(train_sample_x.shape),
+        train_target_shape=tuple(train_sample_y.shape),
     )
 
 
@@ -637,12 +661,21 @@ def print_epoch_summary(
 def execute_training(context: TrainingContext) -> dict[str, object]:
     run_summary = build_run_summary(context)
     early_stopping_state = create_early_stopping(context.config.training)
+    image_width = context.config.dataset.image_width
+    image_height = context.config.dataset.image_height
 
     print(
         f"Using device: {context.device} with train_samples={len(context.train_dataset)} "
         f"val_samples={len(context.val_dataset)} "
         f"(train={len(context.train_loader.dataset)}, val={len(context.val_loader.dataset)}) "
         f"run_dir={context.run_dir}"
+    )
+    print(
+        "Input config: "
+        f"image_size=({image_width}, {image_height}) "
+        f"stacked_frames=3 "
+        f"sample_x_shape={context.train_sample_shape} "
+        f"sample_y_shape={context.train_target_shape}"
     )
     print(f"Starting training for {context.config.training.epochs} epochs...")
 

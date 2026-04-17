@@ -54,10 +54,11 @@ type TripStoragePaths = {
 }
 
 type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
+type InferenceCommandType = "startEgo" | "stopEgo";
 
 type ControlCommand = {
     id: string
-    type: ControlCommandType
+    type: ControlCommandType | InferenceCommandType
     sceneName?: string
     createdAt?: string
 }

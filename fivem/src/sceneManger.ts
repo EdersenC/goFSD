@@ -1,7 +1,15 @@
 
 import {Environment, EnvironmentService, WeatherType} from "./environment";
 import {log, shuffleArray, wait} from "./helper";
-import {DrivingStyle, Ego, EgoService, Route, SceneStoppedErrorCode, VehicleColor, VehicleModel} from "./egoService";
+import {
+    DrivingStyle,
+    Ego,
+    EgoService,
+    Route,
+    SceneStoppedErrorCode,
+    VehicleColor,
+    VehicleModel
+} from "./egoService";
 import {defaultScene} from "./datasets";
 
 const egoService = new EgoService();
@@ -167,6 +175,7 @@ export class SceneManager {
     private stopCurrentSceneRequested = false;
     private stopAllScenesRequested = false;
     private runningAllScenes = false;
+    private egoControlActive = false;
 
     public async executeScene(name: string) {
         const scene = this.Scenes.get(name);
@@ -253,6 +262,40 @@ export class SceneManager {
         log("No active scenes to end.");
     }
 
+    public async startEgoControl() {
+        if (this.activeSceneName) {
+            throw new Error(`Scene "${this.activeSceneName}" is already running`);
+        }
+
+        const runId = createRunId();
+        const clonedScene = cloneScene(defaultScene);
+        this.activeSceneName = "ego-control";
+        this.egoControlActive = true;
+        this.stopCurrentSceneRequested = false;
+
+        try {
+            envService.execute(clonedScene.environment);
+            await egoService.executeEgo(clonedScene.ego, "ego-control", runId);
+        } catch (error) {
+            this.egoControlActive = false;
+            this.activeSceneName = null;
+            throw error;
+        }
+    }
+
+    public stopEgoControl() {
+        if (!this.egoControlActive) {
+            log("No active ego control to stop.");
+            return;
+        }
+
+        egoService.disposeCurrentEgo();
+        this.egoControlActive = false;
+        this.activeSceneName = null;
+        this.stopCurrentSceneRequested = false;
+        log("Stopped ego control.");
+    }
+
     public addScene(name: string, scene: SceneType) {
         this.Scenes.set(name, scene);
     }
@@ -287,6 +330,11 @@ export class SceneManager {
     }
 
 }
+
+function cloneScene(scene: SceneType): SceneType {
+    return JSON.parse(JSON.stringify(scene)) as SceneType;
+}
+
 export async function syncFlash(durationMs = 250) :Promise<number> {
     const startTime = GetGameTimer();
     const flashUntilGameMs = startTime + durationMs;

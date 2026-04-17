@@ -10,9 +10,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/capture"
 	"awesomeProject/internal/control"
 	datasetproc "awesomeProject/internal/dataset"
@@ -29,7 +33,33 @@ func main() {
 		return
 	}
 
+	configPath, err := capture.ResolveInferenceConfigPath("")
+	if err != nil {
+		log.Printf("backend config path not resolved, using defaults: %v", err)
+	}
+	inferenceConfig, err := capture.LoadInferenceConfig(configPath)
+	if err != nil {
+		log.Fatalf("failed to load backend inference config: %v", err)
+	}
+	if inferenceConfig.ConfigPath != "" {
+		log.Printf("loaded backend inference config from %s", inferenceConfig.ConfigPath)
+	}
+	actuatorConfig, err := actuator.LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("failed to load backend actuator config: %v", err)
+	}
+
 	svc := capture.NewService()
+	inferencer := capture.NewInferencer(inferenceConfig)
+	actuatorService := actuator.NewService(actuatorConfig, configPath)
+	if err := actuatorService.Start(); err != nil {
+		log.Fatalf("failed to start virtual controller actuator: %v", err)
+	}
+	defer func() {
+		if err := actuatorService.Close(); err != nil {
+			log.Printf("failed to close virtual controller actuator: %v", err)
+		}
+	}()
 	processor := datasetproc.NewProcessor()
 	controlStore := control.NewStore()
 	mux := http.NewServeMux()
@@ -82,6 +112,204 @@ func main() {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
+	})
+
+	mux.HandleFunc("/inference/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, inferencer.Status())
+	})
+
+	mux.HandleFunc("/inference/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		models, err := inferencer.Models(r.Context(), r.URL.Query().Get("modelServerUrl"))
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	})
+
+	mux.HandleFunc("/inference/model/load", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req capture.InferenceModelLoadRequest
+		if r.ContentLength > 0 {
+			if err := decodeJSONBody(r, &req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		res, err := inferencer.LoadModel(r.Context(), req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("/inference/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var req capture.InferenceStartRequest
+		if r.ContentLength > 0 {
+			if err := decodeJSONBody(r, &req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+
+		res, err := inferencer.Start(r.Context(), req)
+		if err != nil {
+			switch {
+			case errors.Is(err, capture.ErrUnsupportedPlatform):
+				writeError(w, http.StatusNotImplemented, "windows-only in v1")
+			case errors.Is(err, capture.ErrUnsupportedFFmpeg):
+				writeError(w, http.StatusFailedDependency, err.Error())
+			case errors.Is(err, capture.ErrInferenceAlreadyRunning):
+				writeError(w, http.StatusConflict, err.Error())
+			case errors.Is(err, capture.ErrSourceNotFound), errors.Is(err, capture.ErrInferenceStartFailed):
+				writeError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("/inference/stop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		res, err := inferencer.Stop(r.Context())
+		if err != nil {
+			switch {
+			case errors.Is(err, capture.ErrInferenceNotRunning):
+				writeError(w, http.StatusNotFound, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("/actuator/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		state := actuatorService.State()
+		if !state.Supported {
+			writeJSON(w, http.StatusNotImplemented, state)
+			return
+		}
+		if !state.Ready {
+			writeJSON(w, http.StatusServiceUnavailable, state)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("/actuator/command", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var req actuator.CommandRequest
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		state, err := actuatorService.Submit(req)
+		if err != nil {
+			switch {
+			case errors.Is(err, actuator.ErrUnsupportedPlatform):
+				writeJSON(w, http.StatusNotImplemented, state)
+			case errors.Is(err, actuator.ErrNotReady):
+				writeJSON(w, http.StatusServiceUnavailable, state)
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "accepted",
+			"state":  state,
+		})
+	})
+
+	mux.HandleFunc("/actuator/tuning", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, actuatorService.TuningState())
+	})
+
+	mux.HandleFunc("/actuator/tuning/apply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var req actuator.Tuning
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		state, err := actuatorService.ApplyTuning(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("/actuator/tuning/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		state, err := actuatorService.SaveTuning()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("/actuator/tuning/reset", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, actuatorService.ResetTuning())
 	})
 
 	mux.HandleFunc("/control/state", func(w http.ResponseWriter, r *http.Request) {
@@ -260,9 +488,31 @@ func main() {
 
 	addr := ":" + port
 	log.Printf("capture API listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(signals)
+
+		<-signals
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("http shutdown failed: %v", err)
+		}
+	}()
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	<-shutdownDone
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

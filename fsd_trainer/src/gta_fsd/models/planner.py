@@ -24,11 +24,14 @@ class DrivingCNN(nn.Module):
         self.conv5 = nn.Conv2d(in_channels=256, out_channels=384, kernel_size=3, stride=1, padding=1)
         self.relu5 = nn.ReLU()
 
+        self.conv6 = nn.Conv2d(in_channels=384, out_channels=384, kernel_size=3, stride=1, padding=1)
+        self.relu6 = nn.ReLU()
+
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten()
 
         self.fc1 = nn.Linear(in_features=384, out_features=256)
-        self.relu6 = nn.ReLU()
+        self.relu7 = nn.ReLU()
         self.fc2 = nn.Linear(in_features=256, out_features=2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -47,10 +50,13 @@ class DrivingCNN(nn.Module):
         x = self.conv5(x)
         x = self.relu5(x)
 
+        x = self.conv6(x)
+        x = self.relu6(x)
+
         x = self.pool(x)
         x = self.flatten(x)
 
         x = self.fc1(x)
-        x = self.relu6(x)
+        x = self.relu7(x)
         x = self.fc2(x)
         return x
