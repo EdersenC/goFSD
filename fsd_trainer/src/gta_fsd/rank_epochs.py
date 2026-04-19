@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from heads import HEAD_SPECS
+
 
 @dataclass(frozen=True)
 class RankedRun:
@@ -20,14 +22,13 @@ class RankedEpoch:
     epoch: int
     checkpoint: str
     val_loss: float
-    val_overall_rmse: float
-    val_overall_mae: float
-    val_steering_rmse: float
-    val_accel_rmse: float
-    train_overall_rmse: float
-    train_overall_mae: float
+    val_control_rmse: float
+    val_control_mae: float
+    train_control_rmse: float
+    train_control_mae: float
     rmse_gap: float
     mae_gap: float
+    control_head_metrics: dict[str, float]
     why: str
 
 
@@ -65,25 +66,39 @@ def require_float(metrics: dict[str, Any], key: str, *, epoch: int, section: str
     return float(value)
 
 
+def _require_metric_with_fallback(
+    metrics: dict[str, Any],
+    primary: str,
+    *,
+    epoch: int,
+    section: str,
+    fallback: str | None = None,
+) -> float:
+    if primary in metrics:
+        return float(metrics[primary])
+    if fallback is not None and fallback in metrics:
+        return float(metrics[fallback])
+    raise KeyError(f"Missing {section}.{primary} for epoch {epoch}")
+
+
 def build_reason(
     *,
     val_loss: float,
-    val_overall_rmse: float,
-    val_overall_mae: float,
-    val_steering_rmse: float,
-    val_accel_rmse: float,
+    val_control_rmse: float,
+    val_control_mae: float,
+    control_head_metrics: dict[str, float],
     rmse_gap: float,
     mae_gap: float,
 ) -> str:
     reason_parts = [
-        f"val overall RMSE {val_overall_rmse:.6f}",
-        f"val overall MAE {val_overall_mae:.6f}",
+        f"val control RMSE {val_control_rmse:.6f}",
+        f"val control MAE {val_control_mae:.6f}",
         f"val loss {val_loss:.6f}",
-        f"steer RMSE {val_steering_rmse:.6f}",
-        f"accel RMSE {val_accel_rmse:.6f}",
-        f"RMSE gap {rmse_gap:+.6f}",
-        f"MAE gap {mae_gap:+.6f}",
     ]
+    for key, value in control_head_metrics.items():
+        reason_parts.append(f"{key} {value:.6f}")
+    reason_parts.append(f"RMSE gap {rmse_gap:+.6f}")
+    reason_parts.append(f"MAE gap {mae_gap:+.6f}")
     return ", ".join(reason_parts)
 
 
@@ -103,20 +118,55 @@ def rank_epochs(run_metrics_path: Path) -> list[RankedEpoch]:
             raise ValueError(f"Invalid metrics section for epoch {epoch}")
 
         val_loss = require_float(val_metrics, "loss", epoch=epoch, section="val_metrics")
-        val_overall_rmse = require_float(val_metrics, "overall_rmse", epoch=epoch, section="val_metrics")
-        val_overall_mae = require_float(val_metrics, "overall_mae", epoch=epoch, section="val_metrics")
-        val_steering_rmse = require_float(val_metrics, "steering_rmse", epoch=epoch, section="val_metrics")
-        val_accel_rmse = require_float(val_metrics, "accel_rmse", epoch=epoch, section="val_metrics")
+        val_control_rmse = _require_metric_with_fallback(
+            val_metrics,
+            "control_overall_rmse",
+            epoch=epoch,
+            section="val_metrics",
+            fallback="overall_rmse",
+        )
+        val_control_mae = _require_metric_with_fallback(
+            val_metrics,
+            "control_overall_mae",
+            epoch=epoch,
+            section="val_metrics",
+            fallback="overall_mae",
+        )
+        train_control_rmse = _require_metric_with_fallback(
+            train_metrics,
+            "control_overall_rmse",
+            epoch=epoch,
+            section="train_metrics",
+            fallback="overall_rmse",
+        )
+        train_control_mae = _require_metric_with_fallback(
+            train_metrics,
+            "control_overall_mae",
+            epoch=epoch,
+            section="train_metrics",
+            fallback="overall_mae",
+        )
 
-        train_overall_rmse = require_float(train_metrics, "overall_rmse", epoch=epoch, section="train_metrics")
-        train_overall_mae = require_float(train_metrics, "overall_mae", epoch=epoch, section="train_metrics")
+        rmse_gap = val_control_rmse - train_control_rmse
+        mae_gap = val_control_mae - train_control_mae
 
-        rmse_gap = val_overall_rmse - train_overall_rmse
-        mae_gap = val_overall_mae - train_overall_mae
+        control_head_metrics: dict[str, float] = {}
+        for spec in HEAD_SPECS:
+            if spec.kind != "control":
+                continue
+            metric_name = f"{spec.name}_rmse"
+            fallback = "steering_rmse" if spec.name == "steer" else None
+            control_head_metrics[metric_name] = _require_metric_with_fallback(
+                val_metrics,
+                metric_name,
+                epoch=epoch,
+                section="val_metrics",
+                fallback=fallback,
+            )
 
         rank_score = (
-            val_overall_rmse * 1000.0
-            + val_overall_mae * 100.0
+            val_control_rmse * 1000.0
+            + val_control_mae * 100.0
             + val_loss * 10.0
             + abs(rmse_gap) * 20.0
             + abs(mae_gap) * 10.0
@@ -128,27 +178,25 @@ def rank_epochs(run_metrics_path: Path) -> list[RankedEpoch]:
                 epoch=epoch,
                 checkpoint=checkpoint,
                 val_loss=val_loss,
-                val_overall_rmse=val_overall_rmse,
-                val_overall_mae=val_overall_mae,
-                val_steering_rmse=val_steering_rmse,
-                val_accel_rmse=val_accel_rmse,
-                train_overall_rmse=train_overall_rmse,
-                train_overall_mae=train_overall_mae,
+                val_control_rmse=val_control_rmse,
+                val_control_mae=val_control_mae,
+                train_control_rmse=train_control_rmse,
+                train_control_mae=train_control_mae,
                 rmse_gap=rmse_gap,
                 mae_gap=mae_gap,
+                control_head_metrics=control_head_metrics,
                 why=build_reason(
                     val_loss=val_loss,
-                    val_overall_rmse=val_overall_rmse,
-                    val_overall_mae=val_overall_mae,
-                    val_steering_rmse=val_steering_rmse,
-                    val_accel_rmse=val_accel_rmse,
+                    val_control_rmse=val_control_rmse,
+                    val_control_mae=val_control_mae,
+                    control_head_metrics=control_head_metrics,
                     rmse_gap=rmse_gap,
                     mae_gap=mae_gap,
                 ),
             )
         )
 
-    ranked.sort(key=lambda item: (item.rank_score, item.val_overall_rmse, item.val_overall_mae, item.epoch))
+    ranked.sort(key=lambda item: (item.rank_score, item.val_control_rmse, item.val_control_mae, item.epoch))
     return ranked
 
 
@@ -167,8 +215,8 @@ def rank_runs(run_metrics_paths: list[Path]) -> list[RankedRun]:
     ranked_runs.sort(
         key=lambda item: (
             item.best_epoch.rank_score,
-            item.best_epoch.val_overall_rmse,
-            item.best_epoch.val_overall_mae,
+            item.best_epoch.val_control_rmse,
+            item.best_epoch.val_control_mae,
             item.run_name,
         )
     )
@@ -193,10 +241,7 @@ def print_run_leaderboard(ranked_runs: list[RankedRun], top: int) -> None:
 
     for index, item in enumerate(visible, start=1):
         best = item.best_epoch
-        print(
-            f"{index}. {item.run_name} :: best_epoch={best.epoch} :: "
-            f"score={best.rank_score:.6f}"
-        )
+        print(f"{index}. {item.run_name} :: best_epoch={best.epoch} :: score={best.rank_score:.6f}")
         print(f"   metrics={item.run_metrics_path}")
         print(f"   checkpoint={best.checkpoint}")
         print(f"   why: {best.why}")

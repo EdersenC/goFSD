@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+INPUT_MODE_MODEL_RAW = "model_raw"
+INPUT_MODE_NORMALIZED = "normalized"
+
 
 @dataclass(frozen=True)
 class ActuatorConfig:
@@ -37,6 +40,7 @@ def build_control_command(
     *,
     steering: float,
     acceleration: float,
+    input_mode: str = INPUT_MODE_MODEL_RAW,
     sequence: int | None = None,
     timestamp_ms: int | None = None,
     handbrake: bool = False,
@@ -48,6 +52,7 @@ def build_control_command(
         "steer": float(steering),
         "throttle": throttle,
         "brake": brake,
+        "inputMode": str(input_mode).strip() or INPUT_MODE_MODEL_RAW,
         "handbrake": bool(handbrake),
         "enabled": bool(enabled),
         "timestampMs": int(timestamp_ms if timestamp_ms is not None else time.time() * 1000),

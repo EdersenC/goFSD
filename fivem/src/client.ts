@@ -12,6 +12,7 @@ log("[client] loaded");
 
 const sceneManager = new SceneManager();
 const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDrivingSceneVariant[];
+const canonicalInnerCitySceneName = "inner-city-driving:default";
 
 type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes" | "startEgo" | "stopEgo";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
@@ -27,10 +28,15 @@ type AvailableScene = {
     label: string
 }
 
+type ControlTelemetryUpdate = {
+    currentSpeed: number
+    timestampMs: number
+}
+
+const TELEMETRY_INTERVAL_MS = 67;
+
 function registerInnerCityScenes() {
-    for (const variant of innerCitySceneNames) {
-        sceneManager.addScene(`inner-city-driving:${variant}`, innerCityDrivingScenes[variant]);
-    }
+    sceneManager.addScene(canonicalInnerCitySceneName, innerCityDrivingScenes.default);
 }
 
 function humanizeSceneVariant(variant: string): string {
@@ -40,14 +46,18 @@ function humanizeSceneVariant(variant: string): string {
 }
 
 function buildAvailableScenes(): AvailableScene[] {
-    return innerCitySceneNames.map((variant) => ({
-        name: `inner-city-driving:${variant}`,
-        label: `Inner City Driving - ${humanizeSceneVariant(variant)}`
-    }));
+    return [{
+        name: canonicalInnerCitySceneName,
+        label: "Inner City Driving"
+    }];
 }
 
 function publishAvailableScenes() {
     emitNet("control:availableScenesResponse", buildAvailableScenes());
+}
+
+function publishTelemetry(update: ControlTelemetryUpdate) {
+    emitNet("control:telemetryUpdate", update);
 }
 
 function reportControlStatus(status: ControlRuntimeStatus, activeSceneName = "", lastError = "") {
@@ -113,12 +123,31 @@ emitNet("control:registerClient");
 reportControlStatus("idle");
 publishAvailableScenes();
 
+let lastTelemetrySentAt = 0;
+setTick(() => {
+    const now = GetGameTimer();
+    if (now-lastTelemetrySentAt < TELEMETRY_INTERVAL_MS) {
+        return;
+    }
+    const currentSpeed = sceneManager.currentEgoSpeed();
+    if (currentSpeed === null) {
+        return;
+    }
+    lastTelemetrySentAt = now;
+    publishTelemetry({
+        currentSpeed,
+        timestampMs: Date.now(),
+    });
+});
+
 RegisterCommand("startScene", async (_source: number, args: string[]) => {
     const requestedVariant = args[0] as InnerCityDrivingSceneVariant | undefined;
     const variant = requestedVariant && requestedVariant in innerCityDrivingScenes
         ? requestedVariant
         : "default";
-    const sceneName = `inner-city-driving:${variant}`;
+    const sceneName = variant === "default"
+        ? canonicalInnerCitySceneName
+        : `inner-city-driving:${variant}`;
 
     await executeSceneByName(sceneName);
 }, false);

@@ -456,31 +456,63 @@
                     <div id="inference-steering" class="status-value">0.0000</div>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Acceleration</span>
-                    <div id="inference-acceleration" class="status-value">0.0000</div>
+                    <span class="status-label">Delta Speed</span>
+                    <div id="inference-delta-speed" class="status-value">0.0000</div>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Prediction Seq</span>
                     <div id="inference-sequence" class="status-value">None</div>
                 </div>
                 <div class="status-item">
+                    <span class="status-label">Frame Index</span>
+                    <div id="inference-frame-index" class="status-value">None</div>
+                </div>
+                <div class="status-item">
                     <span class="status-label">Predicted At</span>
                     <div id="inference-predicted-at" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Control Semantics</span>
+                    <div id="inference-control-semantics" class="status-value">unknown</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Debug Frames</span>
+                    <div id="inference-debug-frames" class="status-value">0 / 0</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Debug Dump Dir</span>
+                    <div id="inference-debug-dir" class="status-value">None</div>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Inference Error</span>
                     <div id="inference-error" class="status-value">None</div>
                 </div>
                 <div class="status-item">
+                    <span class="status-label">Frame Window</span>
+                    <div id="inference-window-indices" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Frame Hashes</span>
+                    <div id="inference-frame-hashes" class="status-value">None</div>
+                </div>
+                <div class="status-item">
                     <span class="status-label">Actuator</span>
                     <div id="actuator-ready" class="status-value">unknown</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Last Request</span>
+                    <div id="actuator-last-command" class="status-value">None</div>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Target Input</span>
+                    <div id="actuator-target" class="status-value">steer=0.000 throttle=0.000 brake=0.000</div>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Applied Input</span>
                     <div id="actuator-applied" class="status-value">steer=0.000 throttle=0.000 brake=0.000</div>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Actuator Error</span>
+                    <span class="status-label">Controller Status</span>
                     <div id="actuator-last-error" class="status-value">None</div>
                 </div>
             </div>
@@ -489,7 +521,7 @@
 
     <section class="card">
         <h2>Actuator Tuning</h2>
-        <p class="muted">Edit the live driving gains and response rates, apply them immediately to the running controller loop, then save the ones that feel right.</p>
+        <p class="muted">Edit the raw-model normalization scales, live driving gains, and response rates, apply them immediately to the running controller loop, then save the ones that feel right.</p>
         <div class="tuning-grid">
             <label class="field" for="tuning-steer-input-gain">
                 <span class="status-label">Steer Gain</span>
@@ -525,6 +557,16 @@
                 <span class="status-label">Brake Gain</span>
                 <input id="tuning-brake-input-gain" type="number" step="0.001" min="0">
                 <span id="saved-brake-input-gain" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-model-steer-scale">
+                <span class="status-label">Raw Steer Scale</span>
+                <input id="tuning-model-steer-scale" type="number" step="0.001" min="0">
+                <span id="saved-model-steer-scale" class="field-note">Saved: --</span>
+            </label>
+            <label class="field" for="tuning-model-accel-scale">
+                <span class="status-label">Raw Accel Scale</span>
+                <input id="tuning-model-accel-scale" type="number" step="0.001" min="0">
+                <span id="saved-model-accel-scale" class="field-note">Saved: --</span>
             </label>
             <label class="field" for="tuning-brake-rate">
                 <span class="status-label">Brake Rate</span>

@@ -7,23 +7,23 @@ const innerCityDrivingWaypoints = [
     routePresets.legionSquare,
     routePresets.portolaDriveParking,
     routePresets.missionRowPoliceStation,
-    routePresets.richardsMajesticStudio,
-    routePresets.textileCityMarket,
-    routePresets.pillboxHillGarage,
-    routePresets.weazelPlazaGarage,
-    routePresets.strawberryCarWash,
-    routePresets.rockfordPlaza,
-    routePresets.ranchoLTDGasoline,
-    routePresets.pillboxMedicalCenter,
-    routePresets.backlotCityStudioGate,
-    routePresets.littleSeoulGasStation,
-    routePresets.strawberryLTDGasoline,
-    routePresets.vespucciCanals,
-    routePresets.orientalTheater,
-    routePresets.delPerroParkingGarage,
-    routePresets.littleSeoulArcadiusApproach,
-    routePresets.kortzCenter,
-    routePresets.delPerroPier
+    // routePresets.richardsMajesticStudio,
+    // routePresets.textileCityMarket,
+    // routePresets.pillboxHillGarage,
+    // routePresets.weazelPlazaGarage,
+    // routePresets.strawberryCarWash,
+    // routePresets.rockfordPlaza,
+    // routePresets.ranchoLTDGasoline,
+    // routePresets.pillboxMedicalCenter,
+    // routePresets.backlotCityStudioGate,
+    // routePresets.littleSeoulGasStation,
+    // routePresets.strawberryLTDGasoline,
+    // routePresets.vespucciCanals,
+    // routePresets.orientalTheater,
+    // routePresets.delPerroParkingGarage,
+    // routePresets.littleSeoulArcadiusApproach,
+    // routePresets.kortzCenter,
+    // routePresets.delPerroPier
 ];
 
 type InnerCityDrivingSceneOptions = {
@@ -57,7 +57,7 @@ const defaultInnerCityDrivingVehicle: InnerCityDrivingVehicle = {
     model: VehicleModel.Random,
     color: VehicleColor.Random,
     maxSpeed: 14,
-    drivingStyle: DrivingStyle.Cautious
+    drivingStyle: DrivingStyle.Normal
 };
 
 export function createInnerCityDrivingScene(options: InnerCityDrivingSceneOptions = {}): SceneType {

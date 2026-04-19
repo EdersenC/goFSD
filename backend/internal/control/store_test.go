@@ -68,6 +68,9 @@ func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
 	if state.Runtime.Status != StatusRunningScene {
 		t.Fatalf("expected runningScene status, got %s", state.Runtime.Status)
 	}
+	if state.Telemetry != nil {
+		t.Fatalf("expected telemetry to be nil before updates, got %+v", state.Telemetry)
+	}
 	if len(state.PendingCommands) != 1 {
 		t.Fatalf("expected 1 pending command, got %d", len(state.PendingCommands))
 	}
@@ -79,6 +82,33 @@ func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
 	state = store.State()
 	if state.Runtime.FiveMConnected {
 		t.Fatal("expected FiveMConnected to become false after poll timeout")
+	}
+}
+
+func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
+	now := time.Date(2026, 4, 18, 1, 2, 3, 0, time.UTC)
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+
+	telemetry := store.UpdateTelemetry(TelemetryUpdate{
+		CurrentSpeed: 4.25,
+		TimestampMs:  123456,
+	})
+	if telemetry == nil {
+		t.Fatal("expected telemetry snapshot")
+	}
+	if telemetry.CurrentSpeed != 4.25 {
+		t.Fatalf("unexpected current speed: %+v", telemetry)
+	}
+
+	state := store.State()
+	if state.Telemetry == nil {
+		t.Fatal("expected telemetry in state")
+	}
+	if state.Telemetry.CurrentSpeed != 4.25 {
+		t.Fatalf("unexpected telemetry in state: %+v", state.Telemetry)
+	}
+	if latest := store.LatestTelemetry(); latest == nil || latest.CurrentSpeed != 4.25 {
+		t.Fatalf("unexpected latest telemetry: %+v", latest)
 	}
 }
 

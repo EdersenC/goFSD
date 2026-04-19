@@ -49,6 +49,17 @@ type StatusUpdate struct {
 	LastError       string        `json:"lastError,omitempty"`
 }
 
+type TelemetryUpdate struct {
+	CurrentSpeed float64 `json:"currentSpeed"`
+	TimestampMs  int64   `json:"timestampMs,omitempty"`
+}
+
+type RuntimeTelemetry struct {
+	CurrentSpeed float64 `json:"currentSpeed"`
+	TimestampMs  int64   `json:"timestampMs,omitempty"`
+	UpdatedAt    string  `json:"updatedAt,omitempty"`
+}
+
 type SceneOption struct {
 	Name  string `json:"name"`
 	Label string `json:"label"`
@@ -64,10 +75,11 @@ type RuntimeState struct {
 }
 
 type State struct {
-	Runtime         RuntimeState  `json:"runtime"`
-	LastCommand     *Command      `json:"lastCommand,omitempty"`
-	PendingCommands []Command     `json:"pendingCommands"`
-	AvailableScenes []SceneOption `json:"availableScenes"`
+	Runtime         RuntimeState      `json:"runtime"`
+	Telemetry       *RuntimeTelemetry `json:"telemetry,omitempty"`
+	LastCommand     *Command          `json:"lastCommand,omitempty"`
+	PendingCommands []Command         `json:"pendingCommands"`
+	AvailableScenes []SceneOption     `json:"availableScenes"`
 }
 
 type Store struct {
@@ -83,6 +95,8 @@ type Store struct {
 	activeSceneName     string
 	lastError           string
 	runtimeUpdatedAt    time.Time
+	telemetry           *RuntimeTelemetry
+	telemetryUpdatedAt  time.Time
 	availableScenes     []SceneOption
 	commandHistoryLimit int
 	commandSeq          int64
@@ -214,6 +228,7 @@ func (s *Store) State() State {
 
 	state := State{
 		Runtime:         s.runtimeStateLocked(),
+		Telemetry:       s.telemetryLocked(),
 		PendingCommands: s.pendingCommandsLocked(),
 		AvailableScenes: append([]SceneOption(nil), s.availableScenes...),
 	}
@@ -224,6 +239,33 @@ func (s *Store) State() State {
 	}
 
 	return state
+}
+
+func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.nowFunc()
+	s.telemetry = &RuntimeTelemetry{
+		CurrentSpeed: update.CurrentSpeed,
+		TimestampMs:  update.TimestampMs,
+		UpdatedAt:    now.Format(time.RFC3339),
+	}
+	s.telemetryUpdatedAt = now
+	copyTelemetry := *s.telemetry
+	return &copyTelemetry
+}
+
+func (s *Store) LatestTelemetry() *RuntimeTelemetry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.telemetryLocked()
+}
+
+func (s *Store) LatestTelemetrySnapshot() (*RuntimeTelemetry, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.telemetryLocked(), s.telemetryUpdatedAt
 }
 
 func (s *Store) runtimeStateLocked() RuntimeState {
@@ -253,6 +295,14 @@ func (s *Store) pendingCommandsLocked() []Command {
 	pending := make([]Command, len(s.commands[nextIndex:]))
 	copy(pending, s.commands[nextIndex:])
 	return pending
+}
+
+func (s *Store) telemetryLocked() *RuntimeTelemetry {
+	if s.telemetry == nil {
+		return nil
+	}
+	copyTelemetry := *s.telemetry
+	return &copyTelemetry
 }
 
 func (s *Store) nextCommandIndexLocked(lastSeenCommandID string) int {

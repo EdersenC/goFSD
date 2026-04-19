@@ -11,23 +11,48 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 from PIL import Image
 from torchvision import transforms
 
-from control_client import build_control_command, load_actuator_config, post_control_command
+from control_client import (
+    INPUT_MODE_MODEL_RAW,
+    load_actuator_config,
+    post_control_command,
+)
+from control_translation import (
+    CONTROL_SEMANTICS_CONTROLLER_INPUT,
+    CONTROL_SEMANTICS_SPEED_DELTA,
+    translate_control_prediction,
+)
+from control_client import build_control_command
+from heads import HeadSpec, head_layout_metadata, head_specs_metadata, resolve_checkpoint_head_specs
 from inference import (
     DEFAULT_CONFIG_PATH,
     build_model,
     load_checkpoint,
     load_config,
     normalize_windows_drive_path,
+    resolve_checkpoint_frame_count,
+    resolve_checkpoint_frame_stride,
     resolve_existing_path,
     select_device,
 )
-
+from model_output import single_control_prediction_from_output, single_prediction_from_output
+from state_inputs import (
+    CURRENT_SPEED_KEY,
+    StateInputConfig,
+    normalize_current_speed_value,
+    state_input_config_from_metadata,
+    state_inputs_metadata,
+)
+from target_transforms import (
+    DeltaSpeedTargetTransform,
+    legacy_delta_speed_target_transform,
+    resolve_checkpoint_delta_speed_target_transform,
+)
 
 
 @dataclass(frozen=True)
@@ -104,7 +129,9 @@ def discover_models(config_path: Path) -> list[dict[str, Any]]:
                 run_id=run_dir.name,
                 epoch=epoch,
                 is_best=is_best,
-                updated_at=datetime.fromtimestamp(checkpoint_path.stat().st_mtime, tz=UTC).isoformat().replace("+00:00", "Z"),
+                updated_at=datetime.fromtimestamp(
+                    checkpoint_path.stat().st_mtime, tz=UTC
+                ).isoformat().replace("+00:00", "Z"),
             ))
 
     models.sort(key=lambda item: (item.run_id, item.is_best, item.epoch, item.path), reverse=True)
@@ -121,6 +148,36 @@ def discover_models(config_path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def control_target_sources(head_specs: list[dict[str, Any]] | None) -> dict[str, str]:
+    if not isinstance(head_specs, list):
+        return {}
+
+    sources: dict[str, str] = {}
+    for item in head_specs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        target_source = str(item.get("target_source", "")).strip()
+        if target_source:
+            sources[name] = target_source
+    return sources
+
+
+def control_semantics_from_sources(sources: Mapping[str, str]) -> str:
+    steer_source = str(sources.get("steer", "")).lower()
+    delta_speed_source = str(sources.get("delta_speed", "")).lower()
+    accel_source = str(sources.get("accel", "")).lower()
+    if "steerinput" in steer_source and ("accelinput" in accel_source or "deltaspeedinput" in delta_speed_source):
+        return CONTROL_SEMANTICS_CONTROLLER_INPUT
+    if "label.delta_speed" in delta_speed_source or "delta_speed" in delta_speed_source:
+        return CONTROL_SEMANTICS_SPEED_DELTA
+    if steer_source or accel_source or delta_speed_source:
+        return "vehicle_state"
+    return CONTROL_SEMANTICS_CONTROLLER_INPUT
+
+
 @dataclass(frozen=True)
 class ServerArgs:
     host: str
@@ -134,18 +191,26 @@ class ModelRuntime:
         self._model: Any = None
         self._device: torch.device | None = None
         self._checkpoint_path: Path | None = None
+        self._head_specs: tuple[HeadSpec, ...] = resolve_checkpoint_head_specs({
+            "head_specs": head_specs_metadata(),
+        })
+        self._head_specs_metadata: list[dict[str, Any]] = head_specs_metadata(self._head_specs)
+        self._state_input_config = StateInputConfig()
+        self._delta_speed_transform: DeltaSpeedTargetTransform = legacy_delta_speed_target_transform()
         self._image_size = (224, 224)
+        self._frame_count = 3
+        self._frame_stride = 2
         self._transform = self._build_transform(self._image_size)
 
     def _build_transform(self, image_size: tuple[int, int]) -> transforms.Compose:
-        return transforms.Compose([
-            transforms.Resize((image_size[1], image_size[0])),
-            transforms.ToTensor(),
-        ])
+        del image_size
+        return transforms.ToTensor()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             loaded = self._model is not None
+            head_specs = self._head_specs
+            target_sources = control_target_sources(self._head_specs_metadata)
             return {
                 "loaded": loaded,
                 "device": None if self._device is None else str(self._device),
@@ -154,20 +219,49 @@ class ModelRuntime:
                     "width": self._image_size[0],
                     "height": self._image_size[1],
                 },
+                "frame_window": {
+                    "size": self._frame_count,
+                    "frame_stride": self._frame_stride,
+                    "input_channels": self._frame_count * 3,
+                },
+                "state_inputs": state_inputs_metadata(self._state_input_config),
+                "delta_speed_target_transform": self._delta_speed_transform.metadata(),
+                "head_specs": self._head_specs_metadata,
+                "head_layout": head_layout_metadata(head_specs),
+                "control_target_sources": target_sources,
+                "control_semantics": control_semantics_from_sources(target_sources),
             }
 
-    def load_model(self, checkpoint_path: Path, device_name: str, image_size: tuple[int, int]) -> dict[str, Any]:
+    def load_model(
+        self,
+        checkpoint_path: Path,
+        device_name: str,
+        image_size: tuple[int, int],
+        frame_count: int,
+        frame_stride: int,
+    ) -> dict[str, Any]:
         device = select_device(device_name)
         checkpoint = load_checkpoint(checkpoint_path, device)
-        model = build_model(checkpoint, device)
+        model = build_model(checkpoint, device, frame_count)
+        state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
+        head_specs = resolve_checkpoint_head_specs(checkpoint)
+        head_specs_metadata_payload = checkpoint.get("head_specs", head_specs_metadata(head_specs))
+        delta_speed_transform = resolve_checkpoint_delta_speed_target_transform(checkpoint)
 
         with self._lock:
             self._model = model
             self._device = device
             self._checkpoint_path = checkpoint_path
+            self._head_specs = head_specs
+            self._head_specs_metadata = head_specs_metadata_payload
+            self._state_input_config = state_input_config
+            self._delta_speed_transform = delta_speed_transform
             self._image_size = image_size
+            self._frame_count = frame_count
+            self._frame_stride = frame_stride
             self._transform = self._build_transform(image_size)
 
+        target_sources = control_target_sources(head_specs_metadata_payload)
         return {
             "status": "loaded",
             "checkpoint": str(checkpoint_path),
@@ -176,6 +270,17 @@ class ModelRuntime:
                 "width": image_size[0],
                 "height": image_size[1],
             },
+            "frame_window": {
+                "size": frame_count,
+                "frame_stride": frame_stride,
+                "input_channels": frame_count * 3,
+            },
+            "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config)),
+            "delta_speed_target_transform": delta_speed_transform.metadata(),
+            "head_specs": head_specs_metadata_payload,
+            "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
+            "control_target_sources": target_sources,
+            "control_semantics": control_semantics_from_sources(target_sources),
             "epoch": int(checkpoint.get("epoch", 0)),
             "train_metrics": checkpoint.get("train_metrics"),
             "val_metrics": checkpoint.get("val_metrics"),
@@ -187,6 +292,12 @@ class ModelRuntime:
             self._model = None
             self._device = None
             self._checkpoint_path = None
+            self._head_specs = resolve_checkpoint_head_specs({
+                "head_specs": head_specs_metadata(),
+            })
+            self._head_specs_metadata = head_specs_metadata(self._head_specs)
+            self._state_input_config = StateInputConfig()
+            self._delta_speed_transform = legacy_delta_speed_target_transform()
         return {
             "status": "unloaded",
             "checkpoint": None if previous is None else str(previous),
@@ -199,33 +310,68 @@ class ModelRuntime:
             model = self._model
             device = self._device
             checkpoint_path = self._checkpoint_path
+            head_specs = self._head_specs
+            head_specs_metadata_payload = self._head_specs_metadata
+            state_input_config = self._state_input_config
+            delta_speed_transform = self._delta_speed_transform
+            frame_count = self._frame_count
+            frame_stride = self._frame_stride
 
         frames = self._extract_frames(payload)
         x = torch.cat(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+        current_speed_raw, current_speed = self._extract_current_speed(payload, state_input_config)
+        if current_speed is not None:
+            current_speed = current_speed.to(device, non_blocking=device.type == "cuda")
 
         with torch.no_grad():
-            pred = model(x).squeeze(0).detach().cpu()
+            output = model(x, current_speed=current_speed)
 
-        return {
+        target_sources = control_target_sources(head_specs_metadata_payload)
+        response = {
             "checkpoint": str(checkpoint_path),
             "device": str(device),
-            "prediction": {
-                "Steering": float(pred[0].item()),
-                "acceleration": float(pred[1].item()),
+            "outputs": single_prediction_from_output(
+                output,
+                head_specs=head_specs,
+                delta_speed_transform=delta_speed_transform,
+            ),
+            "control_outputs": single_control_prediction_from_output(
+                output,
+                head_specs=head_specs,
+                delta_speed_transform=delta_speed_transform,
+            ),
+            "state_inputs": state_inputs_metadata(state_input_config),
+            "delta_speed_target_transform": delta_speed_transform.metadata(),
+            "control_target_sources": target_sources,
+            "control_semantics": control_semantics_from_sources(target_sources),
+            "frame_window": {
+                "size": frame_count,
+                "frame_stride": frame_stride,
+                "input_channels": frame_count * 3,
             },
         }
+        if current_speed_raw is not None and current_speed is not None:
+            response["raw_state_inputs"] = {CURRENT_SPEED_KEY: current_speed_raw}
+            response["normalized_state_inputs"] = {
+                CURRENT_SPEED_KEY: float(current_speed.squeeze(0).item()),
+            }
+        return response
 
     def _extract_frames(self, payload: dict[str, Any]) -> list[torch.Tensor]:
         if "frame_paths" in payload:
             raw_paths = payload["frame_paths"]
             if not isinstance(raw_paths, list):
                 raise ValueError("frame_paths must be a list of strings")
+            if len(raw_paths) != self._frame_count:
+                raise ValueError(f"expected {self._frame_count} frame_paths entries, got {len(raw_paths)}")
             return [self._load_image_from_path(path) for path in raw_paths]
 
         if "frames_base64" in payload:
             raw_frames = payload["frames_base64"]
             if not isinstance(raw_frames, list):
                 raise ValueError("frames_base64 must be a list of base64 strings")
+            if len(raw_frames) != self._frame_count:
+                raise ValueError(f"expected {self._frame_count} frames_base64 entries, got {len(raw_frames)}")
             return [self._load_image_from_base64(item) for item in raw_frames]
 
         raise ValueError("request must include frame_paths or frames_base64")
@@ -236,7 +382,9 @@ class ModelRuntime:
         image_path = Path(normalize_windows_drive_path(raw_path))
         if not image_path.is_file():
             raise FileNotFoundError(f"frame image not found: {image_path}")
-        image = Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as image_file:
+            image = image_file.convert("RGB")
+        self._validate_image_size(image, source=str(image_path))
         return self._transform(image)
 
     def _load_image_from_base64(self, raw_value: Any) -> torch.Tensor:
@@ -244,8 +392,33 @@ class ModelRuntime:
             raise ValueError("frames_base64 entries must be non-empty strings")
         payload = raw_value.split(",", 1)[-1]
         image_bytes = base64.b64decode(payload)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        with Image.open(io.BytesIO(image_bytes)) as image_file:
+            image = image_file.convert("RGB")
+        self._validate_image_size(image, source="frames_base64")
         return self._transform(image)
+
+    def _validate_image_size(self, image: Image.Image, *, source: str) -> None:
+        expected_width, expected_height = self._image_size
+        actual_width, actual_height = image.size
+        if (actual_width, actual_height) != (expected_width, expected_height):
+            raise ValueError(
+                f"frame image has unexpected size for {source}: "
+                f"expected {expected_width}x{expected_height}, "
+                f"found {actual_width}x{actual_height}"
+            )
+
+    def _extract_current_speed(
+        self,
+        payload: dict[str, Any],
+        config: StateInputConfig,
+    ) -> tuple[float | None, torch.Tensor | None]:
+        if not config.current_speed_enabled:
+            return None, None
+        if CURRENT_SPEED_KEY not in payload:
+            raise ValueError(f"request must include {CURRENT_SPEED_KEY} for this checkpoint")
+        raw_value = payload[CURRENT_SPEED_KEY]
+        normalized = normalize_current_speed_value(raw_value, config.current_speed_cap)
+        return float(raw_value), torch.tensor([normalized], dtype=torch.float32)
 
 
 class ModelServer(ThreadingHTTPServer):
@@ -282,17 +455,32 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/predict":
                 result = self.server.runtime.predict(payload)
-                prediction = result.get("prediction", {})
-                steer = float(prediction.get("Steering", 0.0))
-                acceleration = float(prediction.get("acceleration", 0.0))
+                control_outputs = result.get("control_outputs", {})
+                steer = float(control_outputs.get("steer", 0.0))
+                delta_speed = float(control_outputs.get("delta_speed", 0.0))
+                control_semantics = str(result.get("control_semantics") or CONTROL_SEMANTICS_CONTROLLER_INPUT)
+                translated = translate_control_prediction(steer, delta_speed, control_semantics)
                 sequence = self._read_int(payload.get("sequence"))
                 timestamp_ms = self._read_int(payload.get("timestamp_ms"))
                 command = build_control_command(
-                    steering=steer,
-                    acceleration=acceleration,
+                    steering=float(translated["steering"]),
+                    acceleration=float(translated["acceleration"]),
+                    input_mode=str(translated["input_mode"] or INPUT_MODE_MODEL_RAW),
                     sequence=sequence,
                     timestamp_ms=timestamp_ms,
                 )
+                result["translated_control"] = translated
+                print(json.dumps({
+                    "event": "predict_to_actuator",
+                    "sequence": sequence,
+                    "timestamp_ms": timestamp_ms,
+                    "checkpoint": result.get("checkpoint"),
+                    "control_semantics": control_semantics,
+                    "outputs": result.get("outputs", {}),
+                    "control_outputs": control_outputs,
+                    "translated_control": translated,
+                    "actuator_command": command,
+                }, separators=(",", ":")), flush=True)
                 post_control_command(self.server.actuator, command)
                 self._write_json(HTTPStatus.OK, result)
                 return
@@ -328,7 +516,16 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         checkpoint_path = resolve_existing_path(raw_checkpoint, config_path)
         image_size = (file_config.image_width, file_config.image_height)
-        result = self.server.runtime.load_model(checkpoint_path, raw_device.strip().lower(), image_size)
+        checkpoint = load_checkpoint(checkpoint_path, torch.device("cpu"))
+        frame_count = resolve_checkpoint_frame_count(checkpoint, file_config)
+        frame_stride = resolve_checkpoint_frame_stride(checkpoint, file_config)
+        result = self.server.runtime.load_model(
+            checkpoint_path,
+            raw_device.strip().lower(),
+            image_size,
+            frame_count,
+            frame_stride,
+        )
         self._write_json(HTTPStatus.OK, result)
 
     def _read_json_body(self) -> dict[str, Any]:
@@ -354,8 +551,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return None
         try:
             return int(value)
-        except (TypeError, ValueError):
-            raise ValueError("sequence and timestamp_ms must be integers when provided")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sequence and timestamp_ms must be integers when provided") from exc
 
 
 def parse_args() -> ServerArgs:

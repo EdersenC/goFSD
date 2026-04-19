@@ -7,14 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"image"
 	"image/jpeg"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"awesomeProject/internal/control"
 )
 
 const (
@@ -27,6 +32,8 @@ const (
 	defaultInferenceHeight         = 480
 	defaultInferenceRequestTimeout = 5 * time.Second
 	defaultInferenceJPEGQuality    = 90
+	defaultDebugFrameDumpLimit     = 30
+	defaultTelemetryStaleAfter     = 500 * time.Millisecond
 )
 
 var (
@@ -49,18 +56,23 @@ type InferenceModelLoadRequest struct {
 }
 
 type InferencePrediction struct {
-	Steering           float64 `json:"steering"`
-	Acceleration       float64 `json:"acceleration"`
-	CapturedAt         string  `json:"capturedAt"`
-	PredictedAt        string  `json:"predictedAt"`
-	FrameIndex         int     `json:"frameIndex"`
-	Sequence           int     `json:"sequence"`
-	SourceFPS          int     `json:"sourceFps"`
-	InferenceHz        int     `json:"inferenceHz"`
-	ModelServerURL     string  `json:"modelServerUrl"`
-	Checkpoint         string  `json:"checkpoint,omitempty"`
-	ModelDevice        string  `json:"modelDevice,omitempty"`
-	WindowFrameIndices []int   `json:"windowFrameIndices"`
+	Steering           float64           `json:"steering"`
+	DeltaSpeed         float64           `json:"deltaSpeed"`
+	CurrentSpeed       float64           `json:"currentSpeed"`
+	TelemetryAgeMs     int64             `json:"telemetryAgeMs"`
+	ControlSemantics   string            `json:"controlSemantics,omitempty"`
+	CapturedAt         string            `json:"capturedAt"`
+	PredictedAt        string            `json:"predictedAt"`
+	FrameIndex         int               `json:"frameIndex"`
+	Sequence           int               `json:"sequence"`
+	SourceFPS          int               `json:"sourceFps"`
+	InferenceHz        int               `json:"inferenceHz"`
+	ModelServerURL     string            `json:"modelServerUrl"`
+	Checkpoint         string            `json:"checkpoint,omitempty"`
+	ModelDevice        string            `json:"modelDevice,omitempty"`
+	ControlSources     map[string]string `json:"controlSources,omitempty"`
+	WindowFrameIndices []int             `json:"windowFrameIndices"`
+	WindowFrameHashes  []string          `json:"windowFrameHashes"`
 }
 
 type InferenceStatus struct {
@@ -69,12 +81,16 @@ type InferenceStatus struct {
 	SourceFPS        int                  `json:"sourceFps"`
 	InferenceHz      int                  `json:"inferenceHz"`
 	WindowSize       int                  `json:"windowSize"`
-	WindowStride     int                  `json:"windowStride"`
+	FrameStride      int                  `json:"frameStride"`
+	DispatchStride   int                  `json:"dispatchStride"`
 	FrameWidth       int                  `json:"frameWidth"`
 	FrameHeight      int                  `json:"frameHeight"`
 	ModelServerURL   string               `json:"modelServerUrl,omitempty"`
 	StartedAt        string               `json:"startedAt,omitempty"`
 	StoppedAt        string               `json:"stoppedAt,omitempty"`
+	DebugFramesDir   string               `json:"debugFramesDir,omitempty"`
+	DebugFramesSaved int                  `json:"debugFramesSaved"`
+	DebugFramesLimit int                  `json:"debugFramesLimit"`
 	LastPrediction   *InferencePrediction `json:"lastPrediction,omitempty"`
 	FramesSeen       int                  `json:"framesSeen"`
 	PredictionsSent  int                  `json:"predictionsSent"`
@@ -83,13 +99,20 @@ type InferenceStatus struct {
 }
 
 type inferenceSession struct {
-	cancel   context.CancelFunc
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	cmd      *exec.Cmd
-	done     chan error
-	predictQ chan predictionWindow
+	cancel    context.CancelFunc
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	stderr    io.ReadCloser
+	cmd       *exec.Cmd
+	done      chan error
+	predictQ  chan predictionWindow
+	frameDump *debugFrameDump
+}
+
+type debugFrameDump struct {
+	dir   string
+	limit int
+	saved int
 }
 
 type predictionWindow struct {
@@ -107,12 +130,21 @@ type bufferedInferenceFrame struct {
 }
 
 type pythonPredictResponse struct {
-	Checkpoint string `json:"checkpoint"`
-	Device     string `json:"device"`
-	Prediction struct {
-		Steering     float64 `json:"Steering"`
-		Acceleration float64 `json:"acceleration"`
+	Checkpoint           string            `json:"checkpoint"`
+	Device               string            `json:"device"`
+	ControlSemantics     string            `json:"control_semantics"`
+	ControlTargetSources map[string]string `json:"control_target_sources"`
+	Prediction           struct {
+		Steering       *float64 `json:"steering"`
+		LegacySteering *float64 `json:"Steering"`
+		DeltaSpeed     *float64 `json:"delta_speed"`
+		Acceleration   *float64 `json:"acceleration"`
 	} `json:"prediction"`
+	ControlOutputs struct {
+		Steer      *float64 `json:"steer"`
+		DeltaSpeed *float64 `json:"delta_speed"`
+		Accel      *float64 `json:"accel"`
+	} `json:"control_outputs"`
 }
 
 type pythonModelsResponse struct {
@@ -120,23 +152,25 @@ type pythonModelsResponse struct {
 }
 
 type Inferencer struct {
-	mu             sync.Mutex
-	ffmpegBin      string
-	discover       SourceDiscovery
-	probe          CapabilityProbe
-	newCommand     inferenceCommandFactory
-	httpClient     *http.Client
-	nowFunc        func() time.Time
-	requestTimeout time.Duration
-	config         InferenceConfig
-	modelServerURL string
-	autoLoad       bool
-	sourceID       string
-	status         InferenceStatus
-	active         *inferenceSession
+	mu                  sync.Mutex
+	ffmpegBin           string
+	discover            SourceDiscovery
+	probe               CapabilityProbe
+	newCommand          inferenceCommandFactory
+	httpClient          *http.Client
+	nowFunc             func() time.Time
+	requestTimeout      time.Duration
+	config              InferenceConfig
+	modelServerURL      string
+	autoLoad            bool
+	sourceID            string
+	telemetry           *control.Store
+	telemetryStaleAfter time.Duration
+	status              InferenceStatus
+	active              *inferenceSession
 }
 
-func NewInferencer(cfg InferenceConfig) *Inferencer {
+func NewInferencer(cfg InferenceConfig, telemetry *control.Store) *Inferencer {
 	if cfg.ModelServerURL == "" {
 		cfg = DefaultInferenceConfig()
 	}
@@ -147,22 +181,25 @@ func NewInferencer(cfg InferenceConfig) *Inferencer {
 		newCommand: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			return exec.CommandContext(ctx, name, args...)
 		},
-		httpClient:     &http.Client{Timeout: cfg.RequestTimeout},
-		nowFunc:        time.Now,
-		requestTimeout: cfg.RequestTimeout,
-		config:         cfg,
-		modelServerURL: cfg.ModelServerURL,
-		autoLoad:       cfg.AutoLoad,
-		sourceID:       cfg.SourceID,
+		httpClient:          &http.Client{Timeout: cfg.RequestTimeout},
+		nowFunc:             time.Now,
+		requestTimeout:      cfg.RequestTimeout,
+		config:              cfg,
+		modelServerURL:      cfg.ModelServerURL,
+		autoLoad:            cfg.AutoLoad,
+		sourceID:            cfg.SourceID,
+		telemetry:           telemetry,
+		telemetryStaleAfter: defaultTelemetryStaleAfter,
 		status: InferenceStatus{
-			State:        "idle",
-			SourceFPS:    cfg.FPS,
-			InferenceHz:  cfg.FPS / cfg.WindowStride,
-			WindowSize:   cfg.WindowSize,
-			WindowStride: cfg.WindowStride,
-			FrameWidth:   cfg.FrameWidth,
-			FrameHeight:  cfg.FrameHeight,
-			SourceID:     cfg.SourceID,
+			State:          "idle",
+			SourceFPS:      cfg.FPS,
+			InferenceHz:    cfg.FPS / cfg.DispatchStride,
+			WindowSize:     cfg.WindowSize,
+			FrameStride:    cfg.FrameStride,
+			DispatchStride: cfg.DispatchStride,
+			FrameWidth:     cfg.FrameWidth,
+			FrameHeight:    cfg.FrameHeight,
+			SourceID:       cfg.SourceID,
 		},
 	}
 	return inf
@@ -216,16 +253,18 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 
 	startedAt := i.nowFunc().UTC()
 	status := InferenceStatus{
-		State:          "starting",
-		SourceID:       monitor.ID,
-		SourceFPS:      i.config.FPS,
-		InferenceHz:    i.config.FPS / i.config.WindowStride,
-		WindowSize:     i.config.WindowSize,
-		WindowStride:   i.config.WindowStride,
-		FrameWidth:     i.config.FrameWidth,
-		FrameHeight:    i.config.FrameHeight,
-		ModelServerURL: modelServerURL,
-		StartedAt:      startedAt.Format(time.RFC3339Nano),
+		State:            "starting",
+		SourceID:         monitor.ID,
+		SourceFPS:        i.config.FPS,
+		InferenceHz:      i.config.FPS / i.config.DispatchStride,
+		WindowSize:       i.config.WindowSize,
+		FrameStride:      i.config.FrameStride,
+		DispatchStride:   i.config.DispatchStride,
+		FrameWidth:       i.config.FrameWidth,
+		FrameHeight:      i.config.FrameHeight,
+		ModelServerURL:   modelServerURL,
+		StartedAt:        startedAt.Format(time.RFC3339Nano),
+		DebugFramesLimit: defaultDebugFrameDumpLimit,
 	}
 	i.status = status
 	i.mu.Unlock()
@@ -258,14 +297,22 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		return InferenceStatus{}, fmt.Errorf("%w: %v", ErrInferenceStartFailed, err)
 	}
 
+	frameDump, err := newDebugFrameDump(i.nowFunc())
+	if err != nil {
+		i.mu.Lock()
+		i.status.LastError = fmt.Sprintf("failed to prepare debug frame dump: %v", err)
+		i.mu.Unlock()
+	}
+
 	session := &inferenceSession{
-		cancel:   cancel,
-		stdin:    stdin,
-		stdout:   stdout,
-		stderr:   stderr,
-		cmd:      cmd,
-		done:     make(chan error, 1),
-		predictQ: make(chan predictionWindow, 1),
+		cancel:    cancel,
+		stdin:     stdin,
+		stdout:    stdout,
+		stderr:    stderr,
+		cmd:       cmd,
+		done:      make(chan error, 1),
+		predictQ:  make(chan predictionWindow, 1),
+		frameDump: frameDump,
 	}
 
 	i.mu.Lock()
@@ -273,6 +320,11 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	i.status.State = "running"
 	i.status.SourceID = monitor.ID
 	i.status.ModelServerURL = modelServerURL
+	if frameDump != nil {
+		i.status.DebugFramesDir = frameDump.dir
+		i.status.DebugFramesLimit = frameDump.limit
+		i.status.DebugFramesSaved = frameDump.saved
+	}
 	status = cloneInferenceStatus(i.status)
 	i.mu.Unlock()
 
@@ -423,7 +475,7 @@ func (i *Inferencer) consumeInferenceStderr(session *inferenceSession) {
 func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *inferenceSession) {
 	defer func() { _ = session.stdout.Close() }()
 	frameBytes := make([]byte, inferenceRawFrameBytes(i.config.FrameWidth, i.config.FrameHeight))
-	buffer := make([]bufferedInferenceFrame, 0, requiredFrameCount(i.config.WindowSize, i.config.WindowStride))
+	buffer := make([]bufferedInferenceFrame, 0, requiredFrameCount(i.config.WindowSize, i.config.FrameStride))
 	frameIndex := 0
 	sequence := 0
 
@@ -447,8 +499,13 @@ func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *infere
 			capturedAt: capturedAt,
 			image:      rgbFrameToRGBA(frameBytes, i.config.FrameWidth, i.config.FrameHeight),
 		}
+		if saved, err := maybeDumpDebugFrame(session.frameDump, frame); err == nil {
+			i.mu.Lock()
+			i.status.DebugFramesSaved = saved
+			i.mu.Unlock()
+		}
 		buffer = append(buffer, frame)
-		if len(buffer) > requiredFrameCount(i.config.WindowSize, i.config.WindowStride) {
+		if len(buffer) > requiredFrameCount(i.config.WindowSize, i.config.FrameStride) {
 			buffer = buffer[1:]
 		}
 
@@ -456,9 +513,9 @@ func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *infere
 		i.status.FramesSeen++
 		i.mu.Unlock()
 
-		if shouldDispatchInferenceFrame(frameIndex, i.config.WindowSize, i.config.WindowStride) {
+		if shouldDispatchInferenceFrame(frameIndex, i.config.WindowSize, i.config.FrameStride, i.config.DispatchStride) {
 			sequence++
-			window := buildPredictionWindow(buffer, sequence, i.config.WindowSize, i.config.WindowStride)
+			window := buildPredictionWindow(buffer, sequence, i.config.WindowSize, i.config.FrameStride)
 			if window != nil {
 				i.enqueuePredictionWindow(session, *window)
 			}
@@ -501,17 +558,24 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 }
 
 func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL string, window predictionWindow) (*InferencePrediction, error) {
+	currentSpeed, telemetryAge, err := i.liveCurrentSpeed()
+	if err != nil {
+		return nil, err
+	}
 	framesBase64 := make([]string, 0, len(window.frames))
+	frameHashes := make([]string, 0, len(window.frames))
 	for _, frame := range window.frames {
 		encoded, err := i.encodeJPEGBase64(frame)
 		if err != nil {
 			return nil, err
 		}
 		framesBase64 = append(framesBase64, encoded)
+		frameHashes = append(frameHashes, hashInferencePayload(encoded))
 	}
 
 	body, err := json.Marshal(map[string]any{
 		"frames_base64": framesBase64,
+		"current_speed": currentSpeed,
 		"sequence":      window.sequenceNumber,
 		"timestamp_ms":  i.nowFunc().UTC().UnixMilli(),
 	})
@@ -542,21 +606,114 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
+	steering, deltaSpeed, err := parsed.controlPrediction()
+	if err != nil {
+		return nil, err
+	}
 
 	return &InferencePrediction{
-		Steering:           parsed.Prediction.Steering,
-		Acceleration:       parsed.Prediction.Acceleration,
+		Steering:           steering,
+		DeltaSpeed:         deltaSpeed,
+		CurrentSpeed:       currentSpeed,
+		TelemetryAgeMs:     telemetryAge.Milliseconds(),
+		ControlSemantics:   parsed.ControlSemantics,
 		CapturedAt:         window.capturedAt.Format(time.RFC3339Nano),
 		PredictedAt:        i.nowFunc().UTC().Format(time.RFC3339Nano),
 		FrameIndex:         window.frameIndex,
 		Sequence:           window.sequenceNumber,
 		SourceFPS:          i.config.FPS,
-		InferenceHz:        i.config.FPS / i.config.WindowStride,
+		InferenceHz:        i.config.FPS / i.config.DispatchStride,
 		ModelServerURL:     modelServerURL,
 		Checkpoint:         parsed.Checkpoint,
 		ModelDevice:        parsed.Device,
+		ControlSources:     cloneStringMap(parsed.ControlTargetSources),
 		WindowFrameIndices: append([]int(nil), window.frameIndices...),
+		WindowFrameHashes:  append([]string(nil), frameHashes...),
 	}, nil
+}
+
+func (i *Inferencer) liveCurrentSpeed() (float64, time.Duration, error) {
+	if i.telemetry == nil {
+		return 0, 0, errors.New("inference telemetry store is not configured")
+	}
+	telemetry, updatedAt := i.telemetry.LatestTelemetrySnapshot()
+	if telemetry == nil || updatedAt.IsZero() {
+		return 0, 0, errors.New("live currentSpeed telemetry is unavailable")
+	}
+	age := i.nowFunc().Sub(updatedAt)
+	if age > i.telemetryStaleAfter {
+		return 0, age, fmt.Errorf("live currentSpeed telemetry is stale: age=%s", age)
+	}
+	return telemetry.CurrentSpeed, age, nil
+}
+
+func (r pythonPredictResponse) controlPrediction() (float64, float64, error) {
+	if r.ControlOutputs.Steer != nil && r.ControlOutputs.DeltaSpeed != nil {
+		return *r.ControlOutputs.Steer, *r.ControlOutputs.DeltaSpeed, nil
+	}
+	if r.ControlOutputs.Steer != nil && r.ControlOutputs.Accel != nil {
+		return *r.ControlOutputs.Steer, *r.ControlOutputs.Accel, nil
+	}
+	if r.Prediction.Steering != nil && r.Prediction.DeltaSpeed != nil {
+		return *r.Prediction.Steering, *r.Prediction.DeltaSpeed, nil
+	}
+	if r.Prediction.Steering != nil && r.Prediction.Acceleration != nil {
+		return *r.Prediction.Steering, *r.Prediction.Acceleration, nil
+	}
+	if r.Prediction.LegacySteering != nil && r.Prediction.DeltaSpeed != nil {
+		return *r.Prediction.LegacySteering, *r.Prediction.DeltaSpeed, nil
+	}
+	if r.Prediction.LegacySteering != nil && r.Prediction.Acceleration != nil {
+		return *r.Prediction.LegacySteering, *r.Prediction.Acceleration, nil
+	}
+	return 0, 0, fmt.Errorf("python predict response missing control outputs")
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func newDebugFrameDump(now time.Time) (*debugFrameDump, error) {
+	root := filepath.Join(os.TempDir(), "awesomeProject-inference-frames")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, now.UTC().Format("20060102-150405.000"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return &debugFrameDump{
+		dir:   dir,
+		limit: defaultDebugFrameDumpLimit,
+	}, nil
+}
+
+func maybeDumpDebugFrame(dump *debugFrameDump, frame bufferedInferenceFrame) (int, error) {
+	if dump == nil || dump.saved >= dump.limit {
+		if dump == nil {
+			return 0, nil
+		}
+		return dump.saved, nil
+	}
+
+	filename := filepath.Join(dump.dir, fmt.Sprintf("frame-%04d.jpg", dump.saved))
+	file, err := os.Create(filename)
+	if err != nil {
+		return dump.saved, err
+	}
+	defer file.Close()
+	if err := jpeg.Encode(file, frame.image, &jpeg.Options{Quality: 95}); err != nil {
+		return dump.saved, err
+	}
+	dump.saved++
+	return dump.saved, nil
 }
 
 func (i *Inferencer) loadRemoteModel(ctx context.Context, modelServerURL string) error {
@@ -640,29 +797,29 @@ func buildInferenceVideoFilter(spec captureSpec, cfg InferenceConfig) string {
 	return base + ",format=rgb24"
 }
 
-func shouldDispatchInferenceFrame(frameIndex int, windowSize int, stride int) bool {
-	if windowSize < 1 || windowSize%2 == 0 || stride < 1 {
+func shouldDispatchInferenceFrame(frameIndex int, windowSize int, frameStride int, dispatchStride int) bool {
+	if windowSize < 1 || windowSize%2 == 0 || frameStride < 1 || dispatchStride < 1 {
 		return false
 	}
-	return frameIndex >= requiredFrameCount(windowSize, stride)-1 && frameIndex%stride == 0
+	return frameIndex >= requiredFrameCount(windowSize, frameStride)-1 && frameIndex%dispatchStride == 0
 }
 
-func requiredFrameCount(windowSize int, stride int) int {
-	if windowSize < 1 || stride < 1 {
+func requiredFrameCount(windowSize int, frameStride int) int {
+	if windowSize < 1 || frameStride < 1 {
 		return 0
 	}
-	return ((windowSize - 1) * stride) + 1
+	return ((windowSize - 1) * frameStride) + 1
 }
 
-func buildPredictionWindow(buffer []bufferedInferenceFrame, sequence int, windowSize int, stride int) *predictionWindow {
-	needed := requiredFrameCount(windowSize, stride)
+func buildPredictionWindow(buffer []bufferedInferenceFrame, sequence int, windowSize int, frameStride int) *predictionWindow {
+	needed := requiredFrameCount(windowSize, frameStride)
 	if len(buffer) < needed {
 		return nil
 	}
 	selected := buffer[len(buffer)-needed:]
 	windowFrames := make([]*image.RGBA, 0, windowSize)
 	windowIndices := make([]int, 0, windowSize)
-	for idx := 0; idx < len(selected); idx += stride {
+	for idx := 0; idx < len(selected); idx += frameStride {
 		windowFrames = append(windowFrames, selected[idx].image)
 		windowIndices = append(windowIndices, selected[idx].index)
 	}
@@ -709,10 +866,18 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 	out := status
 	if status.LastPrediction != nil {
 		copyPrediction := *status.LastPrediction
+		copyPrediction.ControlSources = cloneStringMap(status.LastPrediction.ControlSources)
 		copyPrediction.WindowFrameIndices = append([]int(nil), status.LastPrediction.WindowFrameIndices...)
+		copyPrediction.WindowFrameHashes = append([]string(nil), status.LastPrediction.WindowFrameHashes...)
 		out.LastPrediction = &copyPrediction
 	}
 	return out
+}
+
+func hashInferencePayload(encoded string) string {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(encoded))
+	return fmt.Sprintf("%016x", hasher.Sum64())
 }
 
 func parseBoolEnv(key string, fallback bool) bool {

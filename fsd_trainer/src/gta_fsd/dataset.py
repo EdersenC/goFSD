@@ -1,10 +1,10 @@
-"""Helpers for loading processed trip datasets from a single run."""
+"""Helpers for loading processed trip datasets from one or more run directories."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import torch
 from PIL import Image
@@ -12,10 +12,24 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from heads import HEAD_SPECS, HeadSpec, build_targets_from_label
+from state_inputs import StateInputConfig, build_state_inputs_from_label, training_state_input_config
+
+
+DatasetTargets = dict[str, Tensor]
+DatasetStateInputs = dict[str, Tensor]
+
 
 class Trip:
-    def __init__(self, trip_dir: str | Path):
+    def __init__(self, trip_dir: str | Path, *, run_path: str | Path):
         self.trip_dir = Path(trip_dir)
+        self.run_path = Path(run_path)
+        self.sample_indices: list[int] = []
+
+    @property
+    def trip_key(self) -> str:
+        relative_trip_dir = self.trip_dir.relative_to(self.run_path)
+        return (Path(self.run_path.name) / relative_trip_dir).as_posix()
 
     def load_data(self) -> dict[str, Any]:
         metadata_path = self.trip_dir / "metadata.json"
@@ -34,6 +48,9 @@ class Trip:
         return {
             "trip_dir": self.trip_dir,
             "trip_name": self.trip_dir.name,
+            "trip_key": self.trip_key,
+            "run_path": self.run_path,
+            "run_name": self.run_path.name,
             "metadata": metadata,
             "metadata_path": metadata_path,
             "video_path": video_path,
@@ -41,6 +58,7 @@ class Trip:
             "dataset_path": dataset_path,
             "processing_path": processing_path,
             "samples": self.load_samples(),
+            "sample_indices": list(self.sample_indices),
             "run_id": metadata.get("runId"),
             "scene_id": metadata.get("sceneId"),
             "scene_variant": metadata.get("sceneVariant"),
@@ -60,51 +78,98 @@ class Trip:
                     continue
                 sample = json.loads(line)
                 sample["trip_dir"] = self.trip_dir
+                sample["run_path"] = self.run_path
+                sample["run_name"] = self.run_path.name
+                sample["trip_key"] = self.trip_key
                 sample["frame_paths"] = [self.trip_dir / Path(path) for path in sample.get("frame_paths", [])]
                 samples.append(sample)
         return samples
 
 
-class FsdDataset(Dataset[tuple[Tensor, Tensor]]):
-    def __init__(self, run_id: str, data_root: str | Path, image_size: tuple[int, int] = (480, 480)):
-        self.data_root: Path = Path(data_root)
-        self.run_id: str = run_id
-        self.run_dir: Path = self.data_root / "runs" / run_id
-        self.scene_dir: Path = self._resolve_scene_dir()
+class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
+    def __init__(
+        self,
+        run_paths: Iterable[str | Path] | None = None,
+        *,
+        run_id: str | None = None,
+        data_root: str | Path | None = None,
+        image_size: tuple[int, int] = (480, 480),
+        expected_window_size: int = 3,
+        state_input_config: StateInputConfig | None = None,
+        head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
+    ):
+        if expected_window_size < 1:
+            raise ValueError("expected_window_size must be > 0")
+
+        self.expected_window_size = expected_window_size
+        self.image_size = image_size
+        self.state_input_config = state_input_config or training_state_input_config()
+        self.head_specs = head_specs
+        self.data_root = None if data_root is None else Path(data_root)
+        self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
         self.trips: list[Trip] = self._load_trips()
         self.samples: list[dict[str, Any]] = self._load_samples()
-        self.transform: Callable[[Image.Image], Tensor] = transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-        ])
+        self.transform: Callable[[Image.Image], Tensor] = transforms.ToTensor()
 
-    def _resolve_scene_dir(self) -> Path:
-        if not self.run_dir.is_dir():
-            raise FileNotFoundError(f"Run directory does not exist: {self.run_dir}")
+    def _resolve_run_paths(
+        self,
+        run_paths: Iterable[str | Path] | None,
+        *,
+        run_id: str | None,
+        data_root: str | Path | None,
+    ) -> list[Path]:
+        resolved: list[Path] = []
+        if run_paths is not None:
+            for raw_path in run_paths:
+                path = Path(raw_path)
+                if not str(path).strip():
+                    raise ValueError("run_paths entries must be non-empty")
+                resolved.append(path)
 
-        scene_dirs = sorted(path for path in self.run_dir.iterdir() if path.is_dir())
+        if resolved:
+            return resolved
+
+        if run_id is None or data_root is None:
+            raise ValueError("Provide run_paths or both run_id and data_root")
+        return [Path(data_root) / "runs" / run_id]
+
+    def _resolve_scene_dirs(self, run_path: Path) -> list[Path]:
+        if not run_path.is_dir():
+            raise FileNotFoundError(f"Run directory does not exist: {run_path}")
+
+        scene_dirs = sorted(path for path in run_path.iterdir() if path.is_dir())
         if not scene_dirs:
-            raise FileNotFoundError(f"No scene directory found in run: {self.run_dir}")
-        if len(scene_dirs) > 1:
-            raise ValueError(
-                f"Expected one scene directory in {self.run_dir}, found {len(scene_dirs)}"
-            )
-
-        return scene_dirs[0]
+            raise FileNotFoundError(f"No scene directory found in run: {run_path}")
+        return scene_dirs
 
     def _load_trips(self) -> list[Trip]:
-        trip_dirs = sorted(
-            path
-            for path in self.scene_dir.iterdir()
-            if path.is_dir() and path.name.startswith("trip-")
-        )
-        return [Trip(trip_dir) for trip_dir in trip_dirs]
+        trips: list[Trip] = []
+        for run_path in self.run_paths:
+            for scene_dir in self._resolve_scene_dirs(run_path):
+                trip_dirs = sorted(
+                    path
+                    for path in scene_dir.iterdir()
+                    if path.is_dir() and path.name.startswith("trip-")
+                )
+                for trip_dir in trip_dirs:
+                    trips.append(Trip(trip_dir, run_path=run_path))
+        return trips
 
     def _load_samples(self) -> list[dict[str, Any]]:
         samples: list[dict[str, Any]] = []
         for trip in self.trips:
-            samples.extend(trip.load_samples())
+            start_index = len(samples)
+            trip_samples = trip.load_samples()
+            samples.extend(trip_samples)
+            trip.sample_indices = list(range(start_index, len(samples)))
         return samples
+
+    @property
+    def trip_count(self) -> int:
+        return len(self.trips)
+
+    def trip_sample_indices(self) -> list[list[int]]:
+        return [list(trip.sample_indices) for trip in self.trips]
 
     def load_trip_data(self, trip_index: int) -> dict[str, Any]:
         if trip_index < 0 or trip_index >= len(self.trips):
@@ -114,27 +179,50 @@ class FsdDataset(Dataset[tuple[Tensor, Tensor]]):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
+    def _load_frame_tensor(self, frame_path: Path) -> Tensor:
+        expected_width, expected_height = self.image_size
+        with Image.open(frame_path) as image_file:
+            image = image_file.convert("RGB")
+        actual_width, actual_height = image.size
+        if (actual_width, actual_height) != (expected_width, expected_height):
+            raise ValueError(
+                "Frame image has unexpected size: "
+                f"expected {expected_width}x{expected_height}, "
+                f"found {actual_width}x{actual_height} at {frame_path}"
+            )
+        return self.transform(image)
+
+    def __getitem__(self, index: int) -> tuple[Tensor, DatasetStateInputs, DatasetTargets]:
         sample = self.samples[index]
         frame_paths = sample.get("frame_paths", [])
         if not frame_paths:
             raise ValueError(f"No frame paths found for sample at index {index}")
-        if len(frame_paths) != 3:
-            raise ValueError(f"Expected 3 frame paths for sample at index {index}, found {len(frame_paths)}")
+        if len(frame_paths) != self.expected_window_size:
+            raise ValueError(
+                "Expected "
+                f"{self.expected_window_size} frame paths for sample at index {index}, "
+                f"found {len(frame_paths)}"
+            )
 
         frame_tensors: list[Tensor] = []
         for frame_path in frame_paths:
             if not frame_path.is_file():
                 raise FileNotFoundError(f"Frame image not found: {frame_path}")
-            image = Image.open(frame_path).convert("RGB")
-            image_tensor = self.transform(image)
-            frame_tensors.append(image_tensor)
+            frame_tensors.append(self._load_frame_tensor(frame_path))
 
         label = sample["label"]
-        steering = float(label["Steering"])
-        acceleration = float(label["acceleration"])
         x = torch.cat(frame_tensors, dim=0)
-        y = torch.tensor([steering, acceleration], dtype=torch.float32)
-        return x, y
+        state_inputs = build_state_inputs_from_label(label, self.state_input_config)
+        targets = build_targets(label, head_specs=self.head_specs)
+        return x, state_inputs, targets
 
 
+def build_targets(
+    label: dict[str, Any],
+    *,
+    steering: float | None = None,
+    delta_speed: float | None = None,
+    head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
+) -> DatasetTargets:
+    del steering, delta_speed
+    return build_targets_from_label(label, head_specs=head_specs)

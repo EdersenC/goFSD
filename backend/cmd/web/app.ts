@@ -18,12 +18,20 @@ const queueList = document.getElementById("queue");
 const queueEmpty = document.getElementById("queue-empty");
 const inferenceState = document.getElementById("inference-state");
 const inferenceSteering = document.getElementById("inference-steering");
-const inferenceAcceleration = document.getElementById("inference-acceleration");
+const inferenceDeltaSpeed = document.getElementById("inference-delta-speed");
 const inferenceSequence = document.getElementById("inference-sequence");
+const inferenceFrameIndex = document.getElementById("inference-frame-index");
 const inferencePredictedAt = document.getElementById("inference-predicted-at");
+const inferenceControlSemantics = document.getElementById("inference-control-semantics");
+const inferenceDebugFrames = document.getElementById("inference-debug-frames");
+const inferenceDebugDir = document.getElementById("inference-debug-dir");
 const inferenceError = document.getElementById("inference-error");
+const inferenceWindowIndices = document.getElementById("inference-window-indices");
+const inferenceFrameHashes = document.getElementById("inference-frame-hashes");
 const actuatorReady = document.getElementById("actuator-ready");
 const actuatorLastError = document.getElementById("actuator-last-error");
+const actuatorLastCommand = document.getElementById("actuator-last-command");
+const actuatorTarget = document.getElementById("actuator-target");
 const actuatorApplied = document.getElementById("actuator-applied");
 const actuatorConfigPath = document.getElementById("actuator-config-path");
 const actuatorApplyButton = document.getElementById("actuator-apply");
@@ -34,6 +42,8 @@ const maxSteerScaleInput = document.getElementById("tuning-max-steer-scale");
 const steerInputGainInput = document.getElementById("tuning-steer-input-gain");
 const throttleInputGainInput = document.getElementById("tuning-throttle-input-gain");
 const brakeInputGainInput = document.getElementById("tuning-brake-input-gain");
+const modelSteerScaleInput = document.getElementById("tuning-model-steer-scale");
+const modelAccelScaleInput = document.getElementById("tuning-model-accel-scale");
 const steerRateInput = document.getElementById("tuning-steer-rate");
 const throttleRateInput = document.getElementById("tuning-throttle-rate");
 const brakeRateInput = document.getElementById("tuning-brake-rate");
@@ -42,6 +52,8 @@ const maxSteerScaleSaved = document.getElementById("saved-max-steer-scale");
 const steerInputGainSaved = document.getElementById("saved-steer-input-gain");
 const throttleInputGainSaved = document.getElementById("saved-throttle-input-gain");
 const brakeInputGainSaved = document.getElementById("saved-brake-input-gain");
+const modelSteerScaleSaved = document.getElementById("saved-model-steer-scale");
+const modelAccelScaleSaved = document.getElementById("saved-model-accel-scale");
 const steerRateSaved = document.getElementById("saved-steer-rate");
 const throttleRateSaved = document.getElementById("saved-throttle-rate");
 const brakeRateSaved = document.getElementById("saved-brake-rate");
@@ -51,6 +63,7 @@ let selectedSceneName = "";
 let selectedModelPath = "";
 let lastModelsRefreshAt = 0;
 let actuatorTuningDirty = false;
+let actuatorRefreshInFlight = false;
 
 function setBusy(nextBusy) {
     busy = nextBusy;
@@ -271,30 +284,105 @@ function renderInferenceStatus(status) {
     const prediction = status && status.lastPrediction ? status.lastPrediction : null;
     inferenceState.textContent = status && status.state ? status.state : "idle";
     inferenceSteering.textContent = prediction ? Number(prediction.steering || 0).toFixed(4) : "0.0000";
-    inferenceAcceleration.textContent = prediction ? Number(prediction.acceleration || 0).toFixed(4) : "0.0000";
+    inferenceDeltaSpeed.textContent = prediction ? Number(prediction.deltaSpeed || 0).toFixed(4) : "0.0000";
     inferenceSequence.textContent = prediction && prediction.sequence !== undefined ? String(prediction.sequence) : "None";
+    inferenceFrameIndex.textContent = prediction && prediction.frameIndex !== undefined ? String(prediction.frameIndex) : "None";
     inferencePredictedAt.textContent = prediction && prediction.predictedAt ? prediction.predictedAt : "None";
+    inferenceControlSemantics.textContent = prediction && prediction.controlSemantics
+        ? String(prediction.controlSemantics)
+        : "unknown";
+    inferenceDebugFrames.textContent = status
+        ? `${Number(status.debugFramesSaved || 0)} / ${Number(status.debugFramesLimit || 0)}`
+        : "0 / 0";
+    inferenceDebugDir.textContent = status && status.debugFramesDir ? String(status.debugFramesDir) : "None";
+    inferenceWindowIndices.textContent = prediction && Array.isArray(prediction.windowFrameIndices) && prediction.windowFrameIndices.length
+        ? prediction.windowFrameIndices.join(", ")
+        : "None";
+    inferenceFrameHashes.textContent = prediction && Array.isArray(prediction.windowFrameHashes) && prediction.windowFrameHashes.length
+        ? prediction.windowFrameHashes.map((value) => String(value).slice(0, 8)).join(" ")
+        : "None";
     inferenceError.textContent = status && status.lastError ? status.lastError : "None";
+}
+
+function formatTimestamp(value) {
+    if (!value) {
+        return "never";
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+        return String(value);
+    }
+    return parsed.toLocaleTimeString();
+}
+
+function formatControlLine(control, options = {}) {
+    if (!control) {
+        return "None";
+    }
+    const parts = [
+        `steer=${Number(control.steer || 0).toFixed(3)}`,
+        `throttle=${Number(control.throttle || 0).toFixed(3)}`,
+        `brake=${Number(control.brake || 0).toFixed(3)}`,
+    ];
+    if (control.handbrake) {
+        parts.push("handbrake=on");
+    }
+    if (options.includeEnabled) {
+        parts.push(control.enabled === false ? "disabled" : "enabled");
+    }
+    if (options.includeStale && control.stale) {
+        parts.push("stale");
+    }
+    if (options.includeMode && control.inputMode) {
+        parts.push(control.inputMode);
+    }
+    if (options.includeSequence && control.sequence !== undefined) {
+        parts.push(`seq=${control.sequence}`);
+    }
+    if (options.includeTimestamp && control.updatedAt) {
+        parts.push(`at=${formatTimestamp(control.updatedAt)}`);
+    }
+    if (options.includeTimestamp && control.receivedAt) {
+        parts.push(`at=${formatTimestamp(control.receivedAt)}`);
+    }
+    return parts.join(" ");
 }
 
 function renderActuatorState(state) {
     const supported = state && state.supported !== false;
     const ready = Boolean(state && state.ready);
     actuatorReady.textContent = !supported ? "unsupported" : (ready ? "ready" : "not ready");
-    actuatorLastError.textContent = state && state.lastError ? state.lastError : "None";
+    actuatorLastCommand.textContent = formatControlLine(state && state.lastCommand ? state.lastCommand : null, {
+        includeEnabled: true,
+        includeMode: true,
+        includeSequence: true,
+        includeTimestamp: true,
+    });
+    actuatorTarget.textContent = formatControlLine(state && state.target ? state.target : null, {
+        includeEnabled: true,
+        includeStale: true,
+        includeTimestamp: true,
+    });
+    actuatorApplied.textContent = formatControlLine(state && state.applied ? state.applied : null, {
+        includeEnabled: true,
+        includeStale: true,
+        includeTimestamp: true,
+    });
 
-    const applied = state && state.applied ? state.applied : null;
-    if (!applied) {
-        actuatorApplied.textContent = "steer=0.000 throttle=0.000 brake=0.000";
-        return;
+    const controllerStatus = [];
+    if (state && state.lastApplyError) {
+        controllerStatus.push(`error ${state.lastApplyError}`);
+    } else if (state && state.lastApplySucceededAt) {
+        controllerStatus.push(`ok at ${formatTimestamp(state.lastApplySucceededAt)}`);
+    } else if (state && state.lastApplyAttemptedAt) {
+        controllerStatus.push(`attempted at ${formatTimestamp(state.lastApplyAttemptedAt)}`);
+    } else {
+        controllerStatus.push("idle");
     }
-
-    actuatorApplied.textContent =
-        `steer=${Number(applied.steer || 0).toFixed(3)} ` +
-        `throttle=${Number(applied.throttle || 0).toFixed(3)} ` +
-        `brake=${Number(applied.brake || 0).toFixed(3)}` +
-        `${applied.handbrake ? " handbrake=on" : ""}` +
-        `${applied.stale ? " stale" : ""}`;
+    if (state && state.lastError) {
+        controllerStatus.push(`service ${state.lastError}`);
+    }
+    actuatorLastError.textContent = controllerStatus.join(" · ");
 }
 
 function readActuatorTuningForm() {
@@ -304,6 +392,8 @@ function readActuatorTuningForm() {
         steerInputGain: Number(steerInputGainInput.value),
         throttleInputGain: Number(throttleInputGainInput.value),
         brakeInputGain: Number(brakeInputGainInput.value),
+        modelSteerScale: Number(modelSteerScaleInput.value),
+        modelAccelScale: Number(modelAccelScaleInput.value),
         steerRatePerSecond: Number(steerRateInput.value),
         throttleRatePerSecond: Number(throttleRateInput.value),
         brakeRatePerSecond: Number(brakeRateInput.value),
@@ -337,6 +427,8 @@ function renderActuatorTuning(state, force = false) {
         steerInputGainSaved.textContent = `Saved: ${formatTuningValue(saved.steerInputGain)}`;
         throttleInputGainSaved.textContent = `Saved: ${formatTuningValue(saved.throttleInputGain)}`;
         brakeInputGainSaved.textContent = `Saved: ${formatTuningValue(saved.brakeInputGain)}`;
+        modelSteerScaleSaved.textContent = `Saved: ${formatTuningValue(saved.modelSteerScale)}`;
+        modelAccelScaleSaved.textContent = `Saved: ${formatTuningValue(saved.modelAccelScale)}`;
         steerRateSaved.textContent = `Saved: ${formatTuningValue(saved.steerRatePerSecond)}`;
         throttleRateSaved.textContent = `Saved: ${formatTuningValue(saved.throttleRatePerSecond)}`;
         brakeRateSaved.textContent = `Saved: ${formatTuningValue(saved.brakeRatePerSecond)}`;
@@ -351,6 +443,8 @@ function renderActuatorTuning(state, force = false) {
     steerInputGainInput.value = formatTuningValue(live.steerInputGain);
     throttleInputGainInput.value = formatTuningValue(live.throttleInputGain);
     brakeInputGainInput.value = formatTuningValue(live.brakeInputGain);
+    modelSteerScaleInput.value = formatTuningValue(live.modelSteerScale);
+    modelAccelScaleInput.value = formatTuningValue(live.modelAccelScale);
     steerRateInput.value = formatTuningValue(live.steerRatePerSecond);
     throttleRateInput.value = formatTuningValue(live.throttleRatePerSecond);
     brakeRateInput.value = formatTuningValue(live.brakeRatePerSecond);
@@ -387,6 +481,21 @@ async function refresh(forceModels = false) {
     }
 }
 
+async function refreshActuator() {
+    if (actuatorRefreshInFlight || document.hidden) {
+        return;
+    }
+    actuatorRefreshInFlight = true;
+    try {
+        const state = await fetchActuatorState();
+        renderActuatorState(state);
+    } catch (error) {
+        actuatorLastError.textContent = error instanceof Error ? error.message : "failed to refresh actuator";
+    } finally {
+        actuatorRefreshInFlight = false;
+    }
+}
+
 async function handleCommand(type, successMessage) {
     try {
         setBusy(true);
@@ -415,6 +524,8 @@ for (const input of [
     steerInputGainInput,
     throttleInputGainInput,
     brakeInputGainInput,
+    modelSteerScaleInput,
+    modelAccelScaleInput,
     steerRateInput,
     throttleRateInput,
     brakeRateInput,
@@ -521,6 +632,9 @@ setBusy(false);
 refresh(true).catch((error) => {
     setBanner(error instanceof Error ? error.message : "failed to load state", "error");
 });
+setInterval(() => {
+    refreshActuator();
+}, 100);
 setInterval(() => {
     refresh(true).catch((error) => {
         setBanner(error instanceof Error ? error.message : "failed to refresh state", "error");

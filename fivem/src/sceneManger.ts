@@ -15,6 +15,7 @@ import {defaultScene} from "./datasets";
 const egoService = new EgoService();
 const envService = new EnvironmentService();
 export const newScene = defaultScene;
+const canonicalInnerCitySceneName = "inner-city-driving:default";
 
 export type SceneType = {
     environment: Environment
@@ -177,15 +178,22 @@ export class SceneManager {
     private runningAllScenes = false;
     private egoControlActive = false;
 
-    public async executeScene(name: string) {
-        const scene = this.Scenes.get(name);
+    public async executeScene(name: string, options?: { shuffleWaypoints?: boolean; runId?: string }) {
+        const resolvedName = this.resolveSceneName(name);
+        const scene = this.Scenes.get(resolvedName);
         if (scene) {
             if (this.activeSceneName) {
                 throw new Error(`Scene "${this.activeSceneName}" is already running`);
             }
 
-            const runId = createRunId();
-            this.activeSceneName = name;
+            const runId = options?.runId?.trim() ? options.runId.trim() : createRunId();
+            const preparedScene = cloneScene(scene);
+            const shouldShuffleWaypoints = options?.shuffleWaypoints ?? true;
+            if (shouldShuffleWaypoints && Array.isArray(preparedScene.ego?.waypoints) && preparedScene.ego.waypoints.length > 1) {
+                preparedScene.ego.waypoints = shuffleArray([...preparedScene.ego.waypoints]) as Route[];
+                log(`Shuffled ${preparedScene.ego.waypoints.length} waypoints for scene "${resolvedName}".`);
+            }
+            this.activeSceneName = resolvedName;
             this.stopCurrentSceneRequested = false;
 
             try {
@@ -193,11 +201,10 @@ export class SceneManager {
                     throw new Error(SceneStoppedErrorCode);
                 }
 
-                envService.execute(scene.environment);
-                await egoService.execute(scene.ego, name, runId);
+                await egoService.execute(preparedScene.ego, resolvedName, runId, preparedScene.environment);
             } catch (error: any) {
                 if (this.isSceneStoppedError(error)) {
-                    log(`Scene "${name}" stopped by command.`);
+                    log(`Scene "${resolvedName}" stopped by command.`);
                     return;
                 }
                 throw error;
@@ -206,7 +213,7 @@ export class SceneManager {
                 this.stopCurrentSceneRequested = false;
             }
 
-            log(`Scene "${name}" executed.`);
+            log(`Scene "${resolvedName}" executed.`);
         } else {
             log(`Scene "${name}" not found.`);
         }
@@ -216,13 +223,21 @@ export class SceneManager {
         console.log("Executing all scenes...", this.Scenes);
         this.runningAllScenes = true;
         this.stopAllScenesRequested = false;
+        const runId = createRunId();
         try {
-            for (const [name, scene] of this.Scenes.entries()) {
+            for (const [name] of this.Scenes.entries()) {
                 if (this.stopAllScenesRequested) {
                     log("endAllScenes requested; stopping queued scenes.");
                     break;
                 }
-                await this.executeScene(name)
+                try {
+                    await this.executeScene(name, {shuffleWaypoints: true, runId})
+                } catch (error: any) {
+                    if (this.isSceneStoppedError(error)) {
+                        throw error;
+                    }
+                    log(`Scene "${name}" failed during runAllScenes: ${error?.message ?? error}`);
+                }
                 if (this.stopAllScenesRequested) {
                     log("endAllScenes requested; scene queue stopped.");
                     break;
@@ -296,8 +311,23 @@ export class SceneManager {
         log("Stopped ego control.");
     }
 
+    public currentEgoSpeed(): number | null {
+        return egoService.currentSpeed();
+    }
+
     public addScene(name: string, scene: SceneType) {
         this.Scenes.set(name, scene);
+    }
+
+    private resolveSceneName(name: string): string {
+        if (this.Scenes.has(name)) {
+            return name;
+        }
+        const parsed = parseSceneName(name);
+        if (parsed.sceneId === "inner-city-driving") {
+            return canonicalInnerCitySceneName;
+        }
+        return name;
     }
 
     public getScene(name: string): SceneType | undefined {

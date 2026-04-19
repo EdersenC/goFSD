@@ -20,11 +20,18 @@ import (
 const (
 	defaultFFmpegBin                = "ffmpeg"
 	defaultFFprobeBin               = "ffprobe"
+	defaultImageWidth               = 224
+	defaultImageHeight              = 224
 	defaultWindowSize               = 3
-	defaultWindowStride             = 2
+	defaultFrameStride              = 2
+	defaultSampleStride             = 2
 	defaultLabelTolerance           = 100 * time.Millisecond
+	defaultDeltaSpeedClip           = 2.0
+	defaultDeltaSpeedNormalize      = true
 	defaultFlashBrightnessThreshold = 245.0
 	defaultFlashFrameLimit          = 90
+	defaultStoppedSampleBurst       = 3
+	defaultStoppedSampleSpacing     = 2.0
 )
 
 var (
@@ -49,6 +56,8 @@ type ProcessingStatus struct {
 	Error       string `json:"error,omitempty"`
 	FramesDir   string `json:"framesDir,omitempty"`
 	DatasetFile string `json:"datasetFile,omitempty"`
+	ImageWidth  int    `json:"imageWidth,omitempty"`
+	ImageHeight int    `json:"imageHeight,omitempty"`
 	FrameCount  int    `json:"frameCount,omitempty"`
 	SampleCount int    `json:"sampleCount,omitempty"`
 }
@@ -64,12 +73,18 @@ type Processor struct {
 	ffmpegBin                string
 	ffprobeBin               string
 	newCommand               commandFactory
+	imageWidth               int
+	imageHeight              int
 	windowSize               int
-	windowStride             int
+	frameStride              int
+	sampleStride             int
 	labelTolerance           time.Duration
+	deltaSpeedClip           float64
+	deltaSpeedNormalize      bool
 	flashBrightnessThreshold float64
 	flashFrameLimit          int
 	force                    bool
+	datasetOnly              bool
 }
 
 type Option func(*Processor)
@@ -88,6 +103,16 @@ type tripMetadata struct {
 	SceneVariant string  `json:"sceneVariant"`
 	TripIndex    int     `json:"tripIndex"`
 	SyncTime     float64 `json:"syncTime"`
+	TripSeed     string  `json:"tripSeed"`
+	WeatherType  string  `json:"weatherType"`
+	TimeOfDay    string  `json:"timeOfDay"`
+	Time         struct {
+		Hour   int `json:"hour"`
+		Minute int `json:"minute"`
+		Second int `json:"second"`
+	} `json:"time"`
+	VehicleModel string `json:"vehicleModel"`
+	VehicleColor string `json:"vehicleColor"`
 }
 
 type runTripRecord struct {
@@ -110,9 +135,14 @@ func NewProcessor(opts ...Option) *Processor {
 		newCommand: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			return exec.CommandContext(ctx, name, args...)
 		},
+		imageWidth:               defaultImageWidth,
+		imageHeight:              defaultImageHeight,
 		windowSize:               defaultWindowSize,
-		windowStride:             defaultWindowStride,
+		frameStride:              defaultFrameStride,
+		sampleStride:             defaultSampleStride,
 		labelTolerance:           defaultLabelTolerance,
+		deltaSpeedClip:           defaultDeltaSpeedClip,
+		deltaSpeedNormalize:      defaultDeltaSpeedNormalize,
 		flashBrightnessThreshold: defaultFlashBrightnessThreshold,
 		flashFrameLimit:          defaultFlashFrameLimit,
 	}
@@ -124,11 +154,23 @@ func NewProcessor(opts ...Option) *Processor {
 	if p.windowSize < 1 || p.windowSize%2 == 0 {
 		p.windowSize = defaultWindowSize
 	}
-	if p.windowStride < 1 {
-		p.windowStride = defaultWindowStride
+	if p.frameStride < 1 {
+		p.frameStride = defaultFrameStride
+	}
+	if p.imageWidth < 1 {
+		p.imageWidth = defaultImageWidth
+	}
+	if p.imageHeight < 1 {
+		p.imageHeight = defaultImageHeight
+	}
+	if p.sampleStride < 1 {
+		p.sampleStride = defaultSampleStride
 	}
 	if p.labelTolerance <= 0 {
 		p.labelTolerance = defaultLabelTolerance
+	}
+	if p.deltaSpeedClip <= 0 {
+		p.deltaSpeedClip = defaultDeltaSpeedClip
 	}
 	if p.flashFrameLimit < 1 {
 		p.flashFrameLimit = defaultFlashFrameLimit
@@ -145,16 +187,50 @@ func WithCommandFactory(factory func(ctx context.Context, name string, args ...s
 	}
 }
 
-func WithWindowConfig(size int, stride int) Option {
+func WithImageSize(width int, height int) Option {
+	return func(p *Processor) {
+		p.imageWidth = width
+		p.imageHeight = height
+	}
+}
+
+func WithSamplingConfig(size int, frameStride int, sampleStride int) Option {
 	return func(p *Processor) {
 		p.windowSize = size
-		p.windowStride = stride
+		p.frameStride = frameStride
+		p.sampleStride = sampleStride
+	}
+}
+
+func WithLabelTolerance(tolerance time.Duration) Option {
+	return func(p *Processor) {
+		p.labelTolerance = tolerance
+	}
+}
+
+func WithDeltaSpeedTargetConfig(clip float64, normalize bool) Option {
+	return func(p *Processor) {
+		p.deltaSpeedClip = clip
+		p.deltaSpeedNormalize = normalize
+	}
+}
+
+func WithSyncFlashDetection(brightnessThreshold float64, frameLimit int) Option {
+	return func(p *Processor) {
+		p.flashBrightnessThreshold = brightnessThreshold
+		p.flashFrameLimit = frameLimit
 	}
 }
 
 func WithForce(force bool) Option {
 	return func(p *Processor) {
 		p.force = force
+	}
+}
+
+func WithDatasetOnly(datasetOnly bool) Option {
+	return func(p *Processor) {
+		p.datasetOnly = datasetOnly
 	}
 }
 
@@ -167,12 +243,14 @@ func (p *Processor) Queue(tripDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !p.force && shouldSkipProcessing(tripPath) {
+	if !p.force && p.shouldSkipTrip(tripPath) {
 		status := ProcessingStatus{
 			State:       "skipped",
 			CompletedAt: time.Now().Format(time.RFC3339),
 			FramesDir:   "frames",
 			DatasetFile: "dataset.jsonl",
+			ImageWidth:  p.imageWidth,
+			ImageHeight: p.imageHeight,
 		}
 		return statusPath, writeStatusFile(statusPath, status)
 	}
@@ -180,6 +258,8 @@ func (p *Processor) Queue(tripDir string) (string, error) {
 		State:       "queued",
 		FramesDir:   "frames",
 		DatasetFile: "dataset.jsonl",
+		ImageWidth:  p.imageWidth,
+		ImageHeight: p.imageHeight,
 	}
 	return statusPath, writeStatusFile(statusPath, status)
 }
@@ -189,12 +269,14 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 	if err != nil {
 		return err
 	}
-	if !p.force && shouldSkipProcessing(tripPath) {
+	if !p.force && p.shouldSkipTrip(tripPath) {
 		return writeStatusFile(filepath.Join(tripPath, "processing.json"), ProcessingStatus{
 			State:       "skipped",
 			CompletedAt: time.Now().Format(time.RFC3339),
 			FramesDir:   "frames",
 			DatasetFile: "dataset.jsonl",
+			ImageWidth:  p.imageWidth,
+			ImageHeight: p.imageHeight,
 		})
 	}
 
@@ -204,6 +286,8 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 		StartedAt:   time.Now().Format(time.RFC3339),
 		FramesDir:   "frames",
 		DatasetFile: "dataset.jsonl",
+		ImageWidth:  p.imageWidth,
+		ImageHeight: p.imageHeight,
 	}); err != nil {
 		return err
 	}
@@ -213,6 +297,8 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 		StartedAt:   time.Now().Format(time.RFC3339),
 		FramesDir:   "frames",
 		DatasetFile: "dataset.jsonl",
+		ImageWidth:  p.imageWidth,
+		ImageHeight: p.imageHeight,
 	}
 
 	defer func() {
@@ -253,14 +339,19 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 		return errors.New("ffprobe returned no video frames")
 	}
 
-	if err := extractFrames(ctx, p.newCommand, p.ffmpegBin, videoPath, framesDir); err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
-		return err
-	}
+	if p.datasetOnly {
+		frames = AttachImagePaths(frames, "frames")
+		frames = filterFramesWithExistingImages(tripPath, frames)
+	} else {
+		if err := extractFrames(ctx, p.newCommand, p.ffmpegBin, videoPath, framesDir, p.imageWidth, p.imageHeight); err != nil {
+			status.State = "failed"
+			status.Error = err.Error()
+			return err
+		}
 
-	frames = AttachImagePaths(frames, "frames")
-	frames = filterFramesWithExistingImages(tripPath, frames)
+		frames = AttachImagePaths(frames, "frames")
+		frames = filterFramesWithExistingImages(tripPath, frames)
+	}
 	if len(frames) == 0 {
 		status.State = "failed"
 		status.Error = "no extracted frames found on disk"
@@ -282,7 +373,18 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 	}
 
 	labels := buildTimedLabels(record.VehicleData, metadata.SyncTime)
-	samples := buildDatasetSamples(frames, labels, anchorPTS, p.windowSize, p.windowStride, p.labelTolerance)
+	samples := buildDatasetSamples(
+		frames,
+		labels,
+		anchorPTS,
+		p.windowSize,
+		p.frameStride,
+		p.sampleStride,
+		p.labelTolerance,
+		p.deltaSpeedClip,
+		p.deltaSpeedNormalize,
+	)
+	samples = thinStoppedSamples(samples, defaultStoppedSampleBurst, defaultStoppedSampleSpacing)
 	if err := writeDatasetFile(datasetPath, samples); err != nil {
 		status.State = "failed"
 		status.Error = err.Error()
@@ -344,7 +446,15 @@ func AttachImagePaths(frames []VideoFrame, dir string) []VideoFrame {
 	return out
 }
 
-func extractFrames(ctx context.Context, factory commandFactory, ffmpegBin string, videoPath string, framesDir string) error {
+func extractFrames(
+	ctx context.Context,
+	factory commandFactory,
+	ffmpegBin string,
+	videoPath string,
+	framesDir string,
+	imageWidth int,
+	imageHeight int,
+) error {
 	if err := os.RemoveAll(framesDir); err != nil {
 		return fmt.Errorf("failed to clear frames dir: %w", err)
 	}
@@ -357,6 +467,7 @@ func extractFrames(ctx context.Context, factory commandFactory, ffmpegBin string
 		"-y",
 		"-i", videoPath,
 		"-vsync", "0",
+		"-vf", fmt.Sprintf("scale=%d:%d", imageWidth, imageHeight),
 		"-q:v", "2",
 		outputPattern,
 	)
@@ -479,24 +590,39 @@ func buildTimedLabels(vehicleData []map[string]any, syncTime float64) []timedLab
 	return labels
 }
 
-func buildDatasetSamples(frames []VideoFrame, labels []timedLabel, anchorPTS float64, windowSize int, stride int, tolerance time.Duration) []DatasetSample {
-	if len(frames) == 0 || len(labels) == 0 || windowSize < 1 || windowSize%2 == 0 || stride < 1 {
+func buildDatasetSamples(
+	frames []VideoFrame,
+	labels []timedLabel,
+	anchorPTS float64,
+	windowSize int,
+	frameStride int,
+	sampleStride int,
+	tolerance time.Duration,
+	deltaSpeedClip float64,
+	deltaSpeedNormalize bool,
+) []DatasetSample {
+	if len(frames) == 0 || len(labels) == 0 || windowSize < 1 || windowSize%2 == 0 || frameStride < 1 || sampleStride < 1 {
 		return nil
 	}
 
 	halfWindow := windowSize / 2
-	startIndex := halfWindow * stride
-	endIndex := len(frames) - 1 - (halfWindow * stride)
+	startIndex := halfWindow * frameStride
+	endIndex := len(frames) - 1 - (halfWindow * frameStride)
 	if startIndex > endIndex {
 		return nil
 	}
 
 	toleranceSeconds := tolerance.Seconds()
 	samples := make([]DatasetSample, 0)
-	for center := startIndex; center <= endIndex; center += stride {
+	for center := startIndex; center <= endIndex; center += sampleStride {
+		futureCenter := center + sampleStride
+		if futureCenter > endIndex {
+			break
+		}
+
 		window := make([]string, 0, windowSize)
 		for offset := -halfWindow; offset <= halfWindow; offset++ {
-			idx := center + offset*stride
+			idx := center + offset*frameStride
 			window = append(window, frames[idx].ImagePath)
 		}
 
@@ -506,16 +632,139 @@ func buildDatasetSamples(frames []VideoFrame, labels []timedLabel, anchorPTS flo
 		if !ok {
 			continue
 		}
+		futureRelativeSeconds := frames[futureCenter].PTS - anchorPTS
+		futureLabel, ok := nearestLabel(labels, futureRelativeSeconds, toleranceSeconds)
+		if !ok {
+			continue
+		}
+		derivedLabel, ok := buildTrainingLabel(
+			label.Label,
+			futureLabel.Label,
+			deltaSpeedClip,
+			deltaSpeedNormalize,
+		)
+		if !ok {
+			continue
+		}
 
 		samples = append(samples, DatasetSample{
 			AnchorVideoPTS: centerFrame.PTS,
 			AnchorGameTime: label.RelativeSeconds,
 			FramePaths:     window,
-			Label:          label.Label,
+			Label:          derivedLabel,
 		})
 	}
 
 	return samples
+}
+
+func buildTrainingLabel(current map[string]any, future map[string]any, deltaSpeedClip float64, deltaSpeedNormalize bool) (map[string]any, bool) {
+	currentSpeed, ok := numberField(current["currentSpeed"])
+	if !ok {
+		return nil, false
+	}
+	futureSpeed, ok := numberField(future["currentSpeed"])
+	if !ok {
+		return nil, false
+	}
+
+	derived := make(map[string]any, len(current))
+	for key, value := range current {
+		if key == "acceleration" {
+			continue
+		}
+		derived[key] = value
+	}
+	deltaSpeed := futureSpeed - currentSpeed
+	clippedDeltaSpeed := clampFloat64(deltaSpeed, -deltaSpeedClip, deltaSpeedClip)
+	deltaSpeedTarget := clippedDeltaSpeed
+	if deltaSpeedNormalize {
+		deltaSpeedTarget = clippedDeltaSpeed / deltaSpeedClip
+	}
+	derived["delta_speed"] = clippedDeltaSpeed
+	derived["delta_speed_target"] = deltaSpeedTarget
+	derived["future_speed"] = futureSpeed
+	return derived, true
+}
+
+func clampFloat64(value float64, minimum float64, maximum float64) float64 {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func thinStoppedSamples(samples []DatasetSample, initialBurst int, spacingSeconds float64) []DatasetSample {
+	if len(samples) == 0 || initialBurst < 1 || spacingSeconds <= 0 {
+		return samples
+	}
+
+	filtered := make([]DatasetSample, 0, len(samples))
+	inStoppedRun := false
+	stoppedKept := 0
+	lastStoppedKeepTime := 0.0
+
+	for _, sample := range samples {
+		if isStoppedLabelValue(sample.Label["isStopped"]) {
+			if !inStoppedRun {
+				inStoppedRun = true
+				stoppedKept = 1
+				lastStoppedKeepTime = sample.AnchorGameTime
+				filtered = append(filtered, sample)
+				continue
+			}
+
+			if stoppedKept < initialBurst || sample.AnchorGameTime-lastStoppedKeepTime >= spacingSeconds {
+				stoppedKept++
+				lastStoppedKeepTime = sample.AnchorGameTime
+				filtered = append(filtered, sample)
+			}
+			continue
+		}
+
+		inStoppedRun = false
+		stoppedKept = 0
+		lastStoppedKeepTime = 0.0
+		filtered = append(filtered, sample)
+	}
+
+	return filtered
+}
+
+func isStoppedLabelValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case float32:
+		return typed != 0
+	case int:
+		return typed != 0
+	case int8:
+		return typed != 0
+	case int16:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case uint:
+		return typed != 0
+	case uint8:
+		return typed != 0
+	case uint16:
+		return typed != 0
+	case uint32:
+		return typed != 0
+	case uint64:
+		return typed != 0
+	default:
+		return false
+	}
 }
 
 func nearestLabel(labels []timedLabel, target float64, toleranceSeconds float64) (timedLabel, bool) {
@@ -644,6 +893,17 @@ func shouldSkipProcessing(tripDir string) bool {
 		}
 	}
 	return false
+}
+
+func shouldSkipDatasetOnlyProcessing(tripDir string) bool {
+	return fileExists(filepath.Join(tripDir, "dataset.jsonl"))
+}
+
+func (p *Processor) shouldSkipTrip(tripDir string) bool {
+	if p.datasetOnly {
+		return shouldSkipDatasetOnlyProcessing(tripDir)
+	}
+	return shouldSkipProcessing(tripDir)
 }
 
 func fileExists(path string) bool {

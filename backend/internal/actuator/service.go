@@ -12,11 +12,18 @@ import (
 )
 
 var ErrNotReady = errors.New("virtual controller is not ready")
+var ErrInvalidInputMode = errors.New("invalid actuator input mode")
+
+const (
+	InputModeModelRaw   = "model_raw"
+	InputModeNormalized = "normalized"
+)
 
 type CommandRequest struct {
 	Steer       float64 `json:"steer"`
 	Throttle    float64 `json:"throttle"`
 	Brake       float64 `json:"brake"`
+	InputMode   string  `json:"inputMode,omitempty"`
 	Handbrake   bool    `json:"handbrake"`
 	Enabled     *bool   `json:"enabled,omitempty"`
 	Sequence    int64   `json:"sequence,omitempty"`
@@ -26,28 +33,35 @@ type CommandRequest struct {
 type commandEnvelope struct {
 	controlState
 	Enabled     bool   `json:"enabled"`
+	InputMode   string `json:"inputMode"`
 	Sequence    int64  `json:"sequence,omitempty"`
 	TimestampMs int64  `json:"timestampMs,omitempty"`
 	ReceivedAt  string `json:"receivedAt"`
 }
 
-type AppliedState struct {
+type controllerSnapshot struct {
 	controlState
 	Enabled   bool   `json:"enabled"`
 	Stale     bool   `json:"stale"`
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
+type AppliedState = controllerSnapshot
+
 type State struct {
-	Supported      bool             `json:"supported"`
-	Ready          bool             `json:"ready"`
-	Platform       string           `json:"platform"`
-	ControllerType string           `json:"controllerType"`
-	TickHz         int              `json:"tickHz"`
-	StaleTimeoutMs int64            `json:"staleTimeoutMs"`
-	LastError      string           `json:"lastError,omitempty"`
-	LastCommand    *commandEnvelope `json:"lastCommand,omitempty"`
-	Applied        AppliedState     `json:"applied"`
+	Supported            bool               `json:"supported"`
+	Ready                bool               `json:"ready"`
+	Platform             string             `json:"platform"`
+	ControllerType       string             `json:"controllerType"`
+	TickHz               int                `json:"tickHz"`
+	StaleTimeoutMs       int64              `json:"staleTimeoutMs"`
+	LastError            string             `json:"lastError,omitempty"`
+	LastCommand          *commandEnvelope   `json:"lastCommand,omitempty"`
+	Target               controllerSnapshot `json:"target"`
+	Applied              AppliedState       `json:"applied"`
+	LastApplyError       string             `json:"lastApplyError,omitempty"`
+	LastApplyAttemptedAt string             `json:"lastApplyAttemptedAt,omitempty"`
+	LastApplySucceededAt string             `json:"lastApplySucceededAt,omitempty"`
 }
 
 type TuningState struct {
@@ -60,21 +74,25 @@ type TuningState struct {
 type Service struct {
 	cfg Config
 
-	mu          sync.Mutex
-	nowFunc     func() time.Time
-	controller  controller
-	cancel      context.CancelFunc
-	done        chan struct{}
-	lastTickAt  time.Time
-	started     bool
-	ready       bool
-	supported   bool
-	lastError   string
-	lastCmd     *commandEnvelope
-	applied     AppliedState
-	configPath  string
-	liveTuning  Tuning
-	savedTuning Tuning
+	mu                   sync.Mutex
+	nowFunc              func() time.Time
+	controller           controller
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	lastTickAt           time.Time
+	started              bool
+	ready                bool
+	supported            bool
+	lastError            string
+	lastCmd              *commandEnvelope
+	target               controllerSnapshot
+	applied              AppliedState
+	lastApplyError       string
+	lastApplyAttemptedAt string
+	lastApplySucceededAt string
+	configPath           string
+	liveTuning           Tuning
+	savedTuning          Tuning
 }
 
 func NewService(cfg Config, configPath string) *Service {
@@ -87,6 +105,11 @@ func NewService(cfg Config, configPath string) *Service {
 		liveTuning:  initialTuning,
 		savedTuning: initialTuning,
 		applied: AppliedState{
+			controlState: controlState{},
+			Enabled:      false,
+			Stale:        true,
+		},
+		target: controllerSnapshot{
 			controlState: controlState{},
 			Enabled:      false,
 			Stale:        true,
@@ -147,6 +170,12 @@ func (s *Service) Close() error {
 	s.applied.Enabled = false
 	s.applied.Stale = true
 	s.applied.controlState = controlState{}
+	s.target.Enabled = false
+	s.target.Stale = true
+	s.target.controlState = controlState{}
+	s.lastApplyError = ""
+	s.lastApplyAttemptedAt = ""
+	s.lastApplySucceededAt = ""
 	s.mu.Unlock()
 
 	if cancel != nil {
@@ -164,22 +193,6 @@ func (s *Service) Close() error {
 
 func (s *Service) Submit(req CommandRequest) (State, error) {
 	now := s.nowFunc().UTC()
-	cmd := commandEnvelope{
-		controlState: controlState{
-			Steer:     clamp(req.Steer, -1, 1),
-			Throttle:  clamp(req.Throttle, 0, 1),
-			Brake:     clamp(req.Brake, 0, 1),
-			Handbrake: req.Handbrake,
-		},
-		Enabled:     true,
-		Sequence:    req.Sequence,
-		TimestampMs: req.TimestampMs,
-		ReceivedAt:  now.Format(time.RFC3339Nano),
-	}
-	if req.Enabled != nil {
-		cmd.Enabled = *req.Enabled
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -190,6 +203,10 @@ func (s *Service) Submit(req CommandRequest) (State, error) {
 		return s.stateLocked(now), ErrNotReady
 	}
 
+	cmd, err := buildCommandEnvelope(req, now)
+	if err != nil {
+		return s.stateLocked(now), err
+	}
 	s.lastCmd = &cmd
 	return s.stateLocked(now), nil
 }
@@ -279,46 +296,86 @@ func (s *Service) step(now time.Time) error {
 	}
 	s.lastTickAt = now
 
-	target, stale, enabled := s.targetLocked(now)
-	if stale || !enabled {
-		s.applied.controlState = target
-	} else {
-		s.applied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
-		s.applied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
-		s.applied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
-	}
-	s.applied.Handbrake = target.Handbrake
-	s.applied.Enabled = enabled
-	s.applied.Stale = stale
-	s.applied.UpdatedAt = now.Format(time.RFC3339Nano)
+	target := s.targetLocked(now)
+	s.target = target
 
-	return s.controller.Apply(s.applied.controlState)
+	nextApplied := s.applied
+	if target.Stale || !target.Enabled {
+		nextApplied.controlState = target.controlState
+	} else {
+		nextApplied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
+		nextApplied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
+		nextApplied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
+	}
+	nextApplied.Handbrake = target.Handbrake
+	nextApplied.Enabled = target.Enabled
+	nextApplied.Stale = target.Stale
+	nextApplied.UpdatedAt = now.Format(time.RFC3339Nano)
+
+	s.lastApplyAttemptedAt = now.Format(time.RFC3339Nano)
+	if err := s.controller.Apply(nextApplied.controlState); err != nil {
+		s.lastApplyError = err.Error()
+		return err
+	}
+
+	s.applied = nextApplied
+	s.lastApplyError = ""
+	s.lastApplySucceededAt = now.Format(time.RFC3339Nano)
+	return nil
 }
 
-func (s *Service) targetLocked(now time.Time) (controlState, bool, bool) {
-	if s.lastCmd == nil {
+func (s *Service) targetLocked(now time.Time) controllerSnapshot {
+	target, stale, enabled := resolveTarget(s.lastCmd, s.liveTuning, s.cfg.StaleTimeout, now)
+	return controllerSnapshot{
+		controlState: target,
+		Enabled:      enabled,
+		Stale:        stale,
+		UpdatedAt:    now.Format(time.RFC3339Nano),
+	}
+}
+
+func resolveTarget(cmd *commandEnvelope, tuning Tuning, staleTimeout time.Duration, now time.Time) (controlState, bool, bool) {
+	if cmd == nil {
 		return controlState{}, true, false
 	}
 
-	receivedAt, err := time.Parse(time.RFC3339Nano, s.lastCmd.ReceivedAt)
+	receivedAt, err := time.Parse(time.RFC3339Nano, cmd.ReceivedAt)
 	if err != nil {
 		return controlState{}, true, false
 	}
-	if !s.lastCmd.Enabled {
+	if !cmd.Enabled {
 		return controlState{}, false, false
 	}
-	if now.Sub(receivedAt) > s.cfg.StaleTimeout {
+	if now.Sub(receivedAt) > staleTimeout {
 		return controlState{}, true, false
 	}
 
-	steer := clamp(s.lastCmd.Steer*s.liveTuning.SteerInputGain, -1, 1)
-	if math.Abs(steer) < s.liveTuning.SteerDeadzone {
+	inputMode, err := normalizeInputMode(cmd.InputMode)
+	if err != nil {
+		return controlState{}, true, false
+	}
+
+	steer := cmd.Steer
+	throttle := cmd.Throttle
+	brake := cmd.Brake
+	if inputMode == InputModeModelRaw {
+		steer *= tuning.ModelSteerScale
+		throttle *= tuning.ModelAccelScale
+		brake *= tuning.ModelAccelScale
+	}
+
+	steer = clamp(steer, -1, 1)
+	throttle = clamp(throttle, 0, 1)
+	brake = clamp(brake, 0, 1)
+
+	steer = clamp(steer*tuning.SteerInputGain, -1, 1)
+	if math.Abs(steer) < tuning.SteerDeadzone {
 		steer = 0
 	}
-	steer = clamp(steer*s.liveTuning.MaxSteerScale, -1, 1)
+	steer = clamp(steer*tuning.MaxSteerScale, -1, 1)
 
-	throttle := clamp(s.lastCmd.Throttle*s.liveTuning.ThrottleInputGain, 0, 1)
-	brake := clamp(s.lastCmd.Brake*s.liveTuning.BrakeInputGain, 0, 1)
+	throttle = clamp(throttle*tuning.ThrottleInputGain, 0, 1)
+	brake = clamp(brake*tuning.BrakeInputGain, 0, 1)
 	if brake > 0 {
 		throttle = 0
 	}
@@ -327,20 +384,24 @@ func (s *Service) targetLocked(now time.Time) (controlState, bool, bool) {
 		Steer:     steer,
 		Throttle:  throttle,
 		Brake:     brake,
-		Handbrake: s.lastCmd.Handbrake,
+		Handbrake: cmd.Handbrake,
 	}, false, true
 }
 
 func (s *Service) stateLocked(now time.Time) State {
 	state := State{
-		Supported:      s.supported,
-		Ready:          s.ready,
-		Platform:       runtime.GOOS,
-		ControllerType: "xbox360",
-		TickHz:         s.cfg.TickHz,
-		StaleTimeoutMs: s.cfg.StaleTimeout.Milliseconds(),
-		LastError:      s.lastError,
-		Applied:        s.applied,
+		Supported:            s.supported,
+		Ready:                s.ready,
+		Platform:             runtime.GOOS,
+		ControllerType:       "xbox360",
+		TickHz:               s.cfg.TickHz,
+		StaleTimeoutMs:       s.cfg.StaleTimeout.Milliseconds(),
+		LastError:            s.lastError,
+		Target:               s.target,
+		Applied:              s.applied,
+		LastApplyError:       s.lastApplyError,
+		LastApplyAttemptedAt: s.lastApplyAttemptedAt,
+		LastApplySucceededAt: s.lastApplySucceededAt,
 	}
 
 	if s.lastCmd != nil {
@@ -371,6 +432,42 @@ func clamp(value float64, min float64, max float64) float64 {
 		return max
 	}
 	return value
+}
+
+func buildCommandEnvelope(req CommandRequest, now time.Time) (commandEnvelope, error) {
+	inputMode, err := normalizeInputMode(req.InputMode)
+	if err != nil {
+		return commandEnvelope{}, err
+	}
+
+	cmd := commandEnvelope{
+		controlState: controlState{
+			Steer:     req.Steer,
+			Throttle:  req.Throttle,
+			Brake:     req.Brake,
+			Handbrake: req.Handbrake,
+		},
+		Enabled:     true,
+		InputMode:   inputMode,
+		Sequence:    req.Sequence,
+		TimestampMs: req.TimestampMs,
+		ReceivedAt:  now.Format(time.RFC3339Nano),
+	}
+	if req.Enabled != nil {
+		cmd.Enabled = *req.Enabled
+	}
+	return cmd, nil
+}
+
+func normalizeInputMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", InputModeModelRaw:
+		return InputModeModelRaw, nil
+	case InputModeNormalized:
+		return InputModeNormalized, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidInputMode, raw)
+	}
 }
 
 func moveTowards(current float64, target float64, maxDelta float64) float64 {

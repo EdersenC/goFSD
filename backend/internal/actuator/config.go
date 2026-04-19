@@ -14,9 +14,11 @@ const (
 	defaultTickHz              = 60
 	defaultSteerDeadzone       = 0.02
 	defaultMaxSteerScale       = 1.0
-	defaultSteerInputGain      = 4.0
-	defaultThrottleInputGain   = 2.0
-	defaultBrakeInputGain      = 2.0
+	defaultSteerInputGain      = 1.0
+	defaultThrottleInputGain   = 1.0
+	defaultBrakeInputGain      = 1.0
+	defaultModelSteerScale     = 1.0
+	defaultModelAccelScale     = 1.0
 	defaultSteerRatePerSecond  = 6.0
 	defaultThrottleRatePerSec  = 4.0
 	defaultBrakeRatePerSecond  = 6.0
@@ -33,6 +35,8 @@ type Config struct {
 	SteerInputGain     float64
 	ThrottleInputGain  float64
 	BrakeInputGain     float64
+	ModelSteerScale    float64
+	ModelAccelScale    float64
 	SteerRatePerSecond float64
 	ThrottleRatePerSec float64
 	BrakeRatePerSecond float64
@@ -46,6 +50,8 @@ type Tuning struct {
 	SteerInputGain     float64 `json:"steerInputGain"`
 	ThrottleInputGain  float64 `json:"throttleInputGain"`
 	BrakeInputGain     float64 `json:"brakeInputGain"`
+	ModelSteerScale    float64 `json:"modelSteerScale"`
+	ModelAccelScale    float64 `json:"modelAccelScale"`
 	SteerRatePerSecond float64 `json:"steerRatePerSecond"`
 	ThrottleRatePerSec float64 `json:"throttleRatePerSecond"`
 	BrakeRatePerSecond float64 `json:"brakeRatePerSecond"`
@@ -67,6 +73,8 @@ type actuatorSection struct {
 	SteerInputGain     float64 `toml:"steer_input_gain"`
 	ThrottleInputGain  float64 `toml:"throttle_input_gain"`
 	BrakeInputGain     float64 `toml:"brake_input_gain"`
+	ModelSteerScale    float64 `toml:"model_steer_scale"`
+	ModelAccelScale    float64 `toml:"model_accel_scale"`
 	SteerRatePerSecond float64 `toml:"steer_rate_per_second"`
 	ThrottleRatePerSec float64 `toml:"throttle_rate_per_second"`
 	BrakeRatePerSecond float64 `toml:"brake_rate_per_second"`
@@ -83,6 +91,8 @@ func DefaultConfig() Config {
 		SteerInputGain:     defaultSteerInputGain,
 		ThrottleInputGain:  defaultThrottleInputGain,
 		BrakeInputGain:     defaultBrakeInputGain,
+		ModelSteerScale:    defaultModelSteerScale,
+		ModelAccelScale:    defaultModelAccelScale,
 		SteerRatePerSecond: defaultSteerRatePerSecond,
 		ThrottleRatePerSec: defaultThrottleRatePerSec,
 		BrakeRatePerSecond: defaultBrakeRatePerSecond,
@@ -128,6 +138,12 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if section.BrakeInputGain > 0 {
 		cfg.BrakeInputGain = section.BrakeInputGain
+	}
+	if section.ModelSteerScale > 0 {
+		cfg.ModelSteerScale = section.ModelSteerScale
+	}
+	if section.ModelAccelScale > 0 {
+		cfg.ModelAccelScale = section.ModelAccelScale
 	}
 	if section.SteerRatePerSecond > 0 {
 		cfg.SteerRatePerSecond = section.SteerRatePerSecond
@@ -179,6 +195,8 @@ func (c Config) Tuning() Tuning {
 		SteerInputGain:     c.SteerInputGain,
 		ThrottleInputGain:  c.ThrottleInputGain,
 		BrakeInputGain:     c.BrakeInputGain,
+		ModelSteerScale:    c.ModelSteerScale,
+		ModelAccelScale:    c.ModelAccelScale,
 		SteerRatePerSecond: c.SteerRatePerSecond,
 		ThrottleRatePerSec: c.ThrottleRatePerSec,
 		BrakeRatePerSecond: c.BrakeRatePerSecond,
@@ -191,6 +209,8 @@ func (c *Config) ApplyTuning(tuning Tuning) {
 	c.SteerInputGain = tuning.SteerInputGain
 	c.ThrottleInputGain = tuning.ThrottleInputGain
 	c.BrakeInputGain = tuning.BrakeInputGain
+	c.ModelSteerScale = tuning.ModelSteerScale
+	c.ModelAccelScale = tuning.ModelAccelScale
 	c.SteerRatePerSecond = tuning.SteerRatePerSecond
 	c.ThrottleRatePerSec = tuning.ThrottleRatePerSec
 	c.BrakeRatePerSecond = tuning.BrakeRatePerSecond
@@ -211,6 +231,12 @@ func ValidateTuning(tuning Tuning) error {
 	}
 	if tuning.BrakeInputGain <= 0 {
 		return fmt.Errorf("backend actuator brake_input_gain must be > 0")
+	}
+	if tuning.ModelSteerScale <= 0 {
+		return fmt.Errorf("backend actuator model_steer_scale must be > 0")
+	}
+	if tuning.ModelAccelScale <= 0 {
+		return fmt.Errorf("backend actuator model_accel_scale must be > 0")
 	}
 	if tuning.SteerRatePerSecond <= 0 {
 		return fmt.Errorf("backend actuator steer_rate_per_second must be > 0")
@@ -249,6 +275,8 @@ func SaveTuning(path string, tuning Tuning) error {
 	actuatorSection["steer_input_gain"] = tuning.SteerInputGain
 	actuatorSection["throttle_input_gain"] = tuning.ThrottleInputGain
 	actuatorSection["brake_input_gain"] = tuning.BrakeInputGain
+	actuatorSection["model_steer_scale"] = tuning.ModelSteerScale
+	actuatorSection["model_accel_scale"] = tuning.ModelAccelScale
 	actuatorSection["steer_rate_per_second"] = tuning.SteerRatePerSecond
 	actuatorSection["throttle_rate_per_second"] = tuning.ThrottleRatePerSec
 	actuatorSection["brake_rate_per_second"] = tuning.BrakeRatePerSecond

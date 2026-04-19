@@ -1,14 +1,11 @@
 package capture
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	toml "github.com/pelletier/go-toml/v2"
 )
 
 const (
@@ -23,15 +20,12 @@ type InferenceConfig struct {
 	AutoLoad       bool
 	FPS            int
 	WindowSize     int
-	WindowStride   int
+	FrameStride    int
+	DispatchStride int
 	FrameWidth     int
 	FrameHeight    int
 	RequestTimeout time.Duration
 	JPEGQuality    int
-}
-
-type backendConfigFile struct {
-	Backend backendSection `toml:"backend"`
 }
 
 type backendSection struct {
@@ -44,8 +38,7 @@ type backendInferenceSection struct {
 	SourceID       string `toml:"source_id"`
 	AutoLoad       *bool  `toml:"auto_load"`
 	FPS            int    `toml:"fps"`
-	WindowSize     int    `toml:"window_size"`
-	WindowStride   int    `toml:"window_stride"`
+	DispatchStride *int   `toml:"dispatch_stride"`
 	FrameWidth     int    `toml:"frame_width"`
 	FrameHeight    int    `toml:"frame_height"`
 	RequestTimeout string `toml:"request_timeout"`
@@ -72,7 +65,8 @@ func DefaultInferenceConfig() InferenceConfig {
 		AutoLoad:       parseBoolEnv("INFERENCE_AUTO_LOAD_MODEL", true),
 		FPS:            defaultInferenceFPS,
 		WindowSize:     defaultInferenceWindowSize,
-		WindowStride:   defaultInferenceStride,
+		FrameStride:    defaultInferenceStride,
+		DispatchStride: defaultInferenceStride,
 		FrameWidth:     defaultInferenceWidth,
 		FrameHeight:    defaultInferenceHeight,
 		RequestTimeout: parseDurationEnv("INFERENCE_REQUEST_TIMEOUT", defaultInferenceRequestTimeout),
@@ -119,25 +113,24 @@ func ResolveInferenceConfigPath(explicitPath string) (string, error) {
 
 func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	cfg := DefaultInferenceConfig()
-	if strings.TrimSpace(path) == "" {
-		return cfg, nil
-	}
-
-	raw, err := os.ReadFile(path)
+	datasetConfig, err := LoadDatasetConfig(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return cfg, nil
-		}
 		return InferenceConfig{}, err
 	}
+	cfg.WindowSize = datasetConfig.WindowSize
+	cfg.FrameStride = datasetConfig.FrameStride
 
-	var parsed backendConfigFile
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
+	parsed, _, err := loadTrainConfigFile(path)
+	if err != nil {
 		return InferenceConfig{}, err
 	}
 
 	section := parsed.Backend.Inference
-	cfg.ConfigPath = path
+	if strings.TrimSpace(path) != "" {
+		if _, statErr := os.Stat(path); statErr == nil {
+			cfg.ConfigPath = path
+		}
+	}
 	if value := strings.TrimRight(strings.TrimSpace(section.ModelServerURL), "/"); value != "" {
 		cfg.ModelServerURL = value
 	}
@@ -153,11 +146,8 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if section.FPS > 0 {
 		cfg.FPS = section.FPS
 	}
-	if section.WindowSize > 0 {
-		cfg.WindowSize = section.WindowSize
-	}
-	if section.WindowStride > 0 {
-		cfg.WindowStride = section.WindowStride
+	if section.DispatchStride != nil {
+		cfg.DispatchStride = *section.DispatchStride
 	}
 	if section.FrameWidth > 0 {
 		cfg.FrameWidth = section.FrameWidth
@@ -182,11 +172,22 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if cfg.FPS < 1 {
 		return InferenceConfig{}, fmt.Errorf("backend inference fps must be > 0")
 	}
-	if cfg.WindowSize < 1 || cfg.WindowSize%2 == 0 {
-		return InferenceConfig{}, fmt.Errorf("backend inference window_size must be a positive odd number")
+	if err := validateDatasetConfig("dataset", DatasetConfig{
+		ImageWidth:                   datasetConfig.ImageWidth,
+		ImageHeight:                  datasetConfig.ImageHeight,
+		WindowSize:                   cfg.WindowSize,
+		FrameStride:                  cfg.FrameStride,
+		SampleStride:                 defaultDatasetSampleStride,
+		LabelTolerance:               defaultDatasetLabelTolerance,
+		DeltaSpeedClip:               defaultDatasetDeltaSpeedClip,
+		DeltaSpeedNormalize:          defaultDatasetDeltaSpeedNormalize,
+		SyncFlashBrightnessThreshold: defaultSyncFlashBrightnessThreshold,
+		SyncFlashFrameLimit:          defaultDatasetSyncFlashFrameLimit,
+	}); err != nil {
+		return InferenceConfig{}, err
 	}
-	if cfg.WindowStride < 1 {
-		return InferenceConfig{}, fmt.Errorf("backend inference window_stride must be > 0")
+	if cfg.DispatchStride < 1 {
+		return InferenceConfig{}, fmt.Errorf("backend inference dispatch_stride must be > 0")
 	}
 	if cfg.FrameWidth < 1 || cfg.FrameHeight < 1 {
 		return InferenceConfig{}, fmt.Errorf("backend inference frame dimensions must be > 0")

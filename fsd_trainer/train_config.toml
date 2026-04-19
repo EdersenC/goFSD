@@ -1,61 +1,138 @@
+# Dataset selection and sample-shape settings shared by preprocessing, training, and live inference.
 [dataset]
+# Root folder that contains the collected `runs/` directory.
 data_root = "S:\\fsd_fivem_data"
-run_id = "2026-04-14_08-17-23AM_ym5rls"
-val_id = "2026-04-13_07-52-20AM_mrsdzs"
+# Run ids accumulated into the training dataset from `data_root\\runs\\<run-id>`.
+train_run_ids = [
+  '2026-04-17_02-40-43AM_i79xhm',
+  '2026-04-17_03-49-45AM_sdx54h',
+  '2026-04-17_04-22-50AM_z4122y',
+  '2026-04-17_06-43-20AM_l9iojs',
+  '2026-04-17_07-15-43AM_uq6bn9',
+  '2026-04-17_08-52-20AM_fpkezz',
+  '2026-04-17_09-15-03AM_qm66eg'
+]
+# Run ids accumulated into the validation dataset from `data_root\\runs\\<run-id>`.
+val_run_ids = [
+  '2026-04-17_03-06-46AM_kv6jng',
+  '2026-04-17_08-12-45AM_0zz7wc',
+]
+# Final resize width passed to the trainer/model loader.
 image_width = 480
+# Final resize height passed to the trainer/model loader.
 image_height = 480
+# Number of sequential frames stored in each dataset sample and expected by the model.
+window_size = 5
+# Spacing between frames inside one sample window, measured in extracted frames.
+frame_stride = 2
+# How far to move the sample center before emitting the next dataset sample.
+# Example: `window_size = 5`, `frame_stride = 2`, `sample_stride = 10`
+# yields `[0,2,4,6,8]`, then `[10,12,14,16,18]`.
+sample_stride = 10
+# Max absolute timestamp mismatch allowed when attaching a control label to a sample center.
+label_tolerance = "100ms"
+# Hard clip applied to future_speed - currentSpeed before writing `label.delta_speed`.
+delta_speed_clip = 2.0
+# When enabled, preprocessing also writes `label.delta_speed_target = label.delta_speed / delta_speed_clip`
+# and training uses that bounded target while inference converts model output back to raw delta-speed units.
+delta_speed_normalize = true
+# Early-frame flash detector used to align video to logged game time.
+sync_flash_brightness_threshold = 245.0
+sync_flash_frame_limit = 90
 
+# Output location for checkpoints and run metrics created by training.
 [output]
 base_dir = "fsd_trainer/training_runs"
 
+# Core training hyperparameters.
 [training]
+# `auto` prefers CUDA when available, otherwise CPU.
 device = "auto"
-epochs = 10
-learning_rate = 0.001
-early_stopping_metric = "overall_mae"
+epochs = 15
+learning_rate = 0.005
+early_stopping_metric = "control_overall_mae"
 early_stopping_patience = 3
 early_stopping_min_delta = 0.0
 
+# Per-head training loss weights.
+# `steer` and `delta_speed` remain the control heads.
+# `future_speed` is now an active auxiliary regression head.
+# Larger values push optimization harder toward that head once it is active.
+[training.loss_weights]
+# Main steering control target.
+steer = 0.3
+# Main signed delta-speed control target.
+delta_speed = 1.0
+# Active auxiliary future absolute-speed target.
+future_speed = 0.1
+# Inactive auxiliary GPS XY target placeholder.
+route_xy = 0.0
+# Inactive auxiliary speed regression head placeholder.
+speed = 0.0
+# Inactive auxiliary stop/not-stop binary head placeholder.
+is_stopped = 0.0
+
+# DataLoader settings for training and validation batches.
 [loader]
-batch_size = 164
-num_workers = 3
+# CUDA batch size.
+batch_size = 100
+# Worker count used when CUDA dataloading is enabled.
+num_workers = 2
 pin_memory = true
-prefetch_factor = 6
+prefetch_factor = 2
 persistent_workers = true
-val_split = 0.20
+# Fraction of validation trips sampled each epoch. Entire trips are kept together.
+val_split = 1.0
+# CPU fallback batch size when CUDA is not used.
 cpu_batch_size = 32
 
+# Standalone sample-inference settings used by `src/gta_fsd/inference.py`.
 [inference]
-checkpoint = "fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260416-080606/epoch-006.pt"
+# Checkpoint path loaded for ad-hoc inference and the model server default.
+checkpoint = 'fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260417-223758/epoch-003.pt'
+# `auto` prefers CUDA when available, otherwise CPU.
 device = "cuda"
+# Optional dataset root override for sample inference; defaults to `[dataset].data_root`.
 data_root = "S:\\fsd_fivem_data"
+# Optional run id used when loading a sample from the dataset.
 run_id = "2026-04-14_08-17-23AM_ym5rls"
 sample_index = 400
 output_json = false
 
+# Backend live-inference capture settings. Window size and model frame spacing come from `[dataset]`.
 [backend.inference]
 model_server_url = "http://127.0.0.1:8090"
 model_device = "cuda"
 source_id = "monitor-2"
 auto_load = true
 fps = 30
-window_size = 3
-window_stride = 2
+# How often to dispatch predictions once a full model window is available.
+dispatch_stride = 2
 frame_width = 480
 frame_height = 480
 request_timeout = "5s"
 jpeg_quality = 90
 
+# Backend virtual-controller actuator tuning.
 [backend.actuator]
 url = "http://127.0.0.1:8080"
 request_timeout = "500ms"
+# Actuator update frequency in Hz.
 tick_hz = 15
+# Failsafe timeout before controls relax back toward neutral.
 stale_timeout = "250ms"
+# Ignore tiny steering values near zero.
 steer_deadzone = 0.02
+# Final steering clamp after gains are applied.
 max_steer_scale = 1.0
-steer_input_gain = 3.0
-throttle_input_gain = 2.0
-brake_input_gain = 2.0
+# Neutral actuator scaling so runtime command shaping happens in the Python
+# translation layer instead of being amplified again in Go.
+model_steer_scale = 1.0
+model_accel_scale = 1.0
+steer_input_gain = 1.0
+throttle_input_gain = 1.0
+brake_input_gain = 1.0
+# Max per-second rate-of-change for smoothed controller values.
 steer_rate_per_second = 2.5
 throttle_rate_per_second = 1.3
 brake_rate_per_second = 3.0

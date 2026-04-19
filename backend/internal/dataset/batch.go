@@ -9,13 +9,21 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type TripProcessResult struct {
-	TripDir string
-	State   string
-	Error   error
+	TripDir     string
+	State       string
+	Error       error
+	Event       string
+	WorkerID    int
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Duration    time.Duration
 }
+
+type TripProcessCallback func(TripProcessResult)
 
 func CollectTripDirs(root string, inputs []string) ([]string, error) {
 	searchRoots := inputs
@@ -73,6 +81,16 @@ func CollectTripDirs(root string, inputs []string) ([]string, error) {
 }
 
 func ProcessTripDirs(ctx context.Context, tripDirs []string, workers int, opts ...Option) []TripProcessResult {
+	return ProcessTripDirsWithCallback(ctx, tripDirs, workers, nil, opts...)
+}
+
+func ProcessTripDirsWithCallback(
+	ctx context.Context,
+	tripDirs []string,
+	workers int,
+	callback TripProcessCallback,
+	opts ...Option,
+) []TripProcessResult {
 	if workers < 1 {
 		workers = 1
 	}
@@ -82,44 +100,109 @@ func ProcessTripDirs(ctx context.Context, tripDirs []string, workers int, opts .
 	}
 
 	jobs := make(chan string)
-	resultCh := make(chan TripProcessResult, len(tripDirs))
+	resultCh := make(chan TripProcessResult, len(tripDirs)*2)
 	var wg sync.WaitGroup
 
 	for i := 0; i < workers; i++ {
+		workerID := i + 1
 		processor := NewProcessor(opts...)
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			for tripDir := range jobs {
+				startedAt := time.Now()
+				resultCh <- TripProcessResult{
+					Event:     "started",
+					TripDir:   tripDir,
+					WorkerID:  workerID,
+					StartedAt: startedAt,
+				}
+
 				select {
 				case <-ctx.Done():
-					resultCh <- TripProcessResult{TripDir: tripDir, State: "failed", Error: ctx.Err()}
+					resultCh <- TripProcessResult{
+						Event:       "finished",
+						TripDir:     tripDir,
+						State:       "failed",
+						Error:       ctx.Err(),
+						WorkerID:    workerID,
+						StartedAt:   startedAt,
+						CompletedAt: time.Now(),
+						Duration:    time.Since(startedAt),
+					}
 					continue
 				default:
 				}
 
 				statusPath, err := processor.Queue(tripDir)
 				if err != nil {
-					resultCh <- TripProcessResult{TripDir: tripDir, State: "failed", Error: err}
+					resultCh <- TripProcessResult{
+						Event:       "finished",
+						TripDir:     tripDir,
+						State:       "failed",
+						Error:       err,
+						WorkerID:    workerID,
+						StartedAt:   startedAt,
+						CompletedAt: time.Now(),
+						Duration:    time.Since(startedAt),
+					}
 					continue
 				}
 				if err := processor.ProcessTrip(ctx, tripDir); err != nil {
 					status, readErr := ReadStatusFile(statusPath)
+					completedAt := time.Now()
 					if readErr == nil {
-						resultCh <- TripProcessResult{TripDir: tripDir, State: status.State, Error: err}
+						resultCh <- TripProcessResult{
+							Event:       "finished",
+							TripDir:     tripDir,
+							State:       status.State,
+							Error:       err,
+							WorkerID:    workerID,
+							StartedAt:   startedAt,
+							CompletedAt: completedAt,
+							Duration:    completedAt.Sub(startedAt),
+						}
 					} else {
-						resultCh <- TripProcessResult{TripDir: tripDir, State: "failed", Error: err}
+						resultCh <- TripProcessResult{
+							Event:       "finished",
+							TripDir:     tripDir,
+							State:       "failed",
+							Error:       err,
+							WorkerID:    workerID,
+							StartedAt:   startedAt,
+							CompletedAt: completedAt,
+							Duration:    completedAt.Sub(startedAt),
+						}
 					}
 					continue
 				}
 				status, err := ReadStatusFile(statusPath)
+				completedAt := time.Now()
 				if err != nil {
-					resultCh <- TripProcessResult{TripDir: tripDir, State: "completed", Error: nil}
+					resultCh <- TripProcessResult{
+						Event:       "finished",
+						TripDir:     tripDir,
+						State:       "completed",
+						Error:       nil,
+						WorkerID:    workerID,
+						StartedAt:   startedAt,
+						CompletedAt: completedAt,
+						Duration:    completedAt.Sub(startedAt),
+					}
 					continue
 				}
-				resultCh <- TripProcessResult{TripDir: tripDir, State: status.State, Error: nil}
+				resultCh <- TripProcessResult{
+					Event:       "finished",
+					TripDir:     tripDir,
+					State:       status.State,
+					Error:       nil,
+					WorkerID:    workerID,
+					StartedAt:   startedAt,
+					CompletedAt: completedAt,
+					Duration:    completedAt.Sub(startedAt),
+				}
 			}
-		}()
+		}(workerID)
 	}
 
 	go func() {
@@ -139,7 +222,12 @@ func ProcessTripDirs(ctx context.Context, tripDirs []string, workers int, opts .
 	}()
 
 	for result := range resultCh {
-		results = append(results, result)
+		if callback != nil {
+			callback(result)
+		}
+		if result.Event == "" || result.Event == "finished" {
+			results = append(results, result)
+		}
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].TripDir < results[j].TripDir

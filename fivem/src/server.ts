@@ -39,6 +39,7 @@ type RunStoragePaths = {
     runsDir: string
     sceneDir: string
     sceneDirRelative: string
+    runDirRelative: string
     runFile: string
     runTiming: RunIdParts
 }
@@ -69,12 +70,17 @@ type ControlStatusUpdate = {
     lastError?: string
 }
 
+type ControlTelemetryUpdate = {
+    currentSpeed: number
+    timestampMs?: number
+}
+
 type AvailableScene = {
     name: string
     label: string
 }
 
-const activeTripByRun = new Map<string, string>();
+const activeTripByStream = new Map<string, string>();
 const pendingTrips = new Map<string, AggregatedTrip>();
 let controlPollInFlight = false;
 let lastSeenControlCommandId = "";
@@ -152,6 +158,18 @@ onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
     }
 });
 
+onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
+    rememberControlPlayerSource((global as any).source);
+    try {
+        await apiRequest("/control/telemetry", "POST", {
+            currentSpeed: update?.currentSpeed ?? 0,
+            timestampMs: update?.timestampMs ?? 0
+        });
+    } catch (err: any) {
+        console.error(`[control] failed to push telemetry update: ${err?.message ?? err}`);
+    }
+});
+
 onNet("control:availableScenesResponse", async (scenes: AvailableScene[]) => {
     rememberControlPlayerSource((global as any).source);
     try {
@@ -185,8 +203,8 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     const manifestFile = resolveManifestFile(dataRoot);
     const manifestDir = path.dirname(manifestFile);
     const tripStorage = buildTripStoragePaths(dataRoot, runStorage, data.tripIndex);
-    const tripKey = `${data.runId}:${data.tripIndex}`;
-    const runKey = data.runId;
+    const streamKey = buildTripStreamKey(data.runId, data.sceneId, data.sceneVariant);
+    const tripKey = buildTripKey(data.runId, data.sceneId, data.sceneVariant, data.tripIndex);
 
     console.log(`[server] received chunk ${data.chunkIndex} for trip ${data.tripIndex} run ${data.runId} with ${data.vehicleData.length} points complete=${data.isTripComplete}`);
 
@@ -220,12 +238,12 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
         }
     }
 
-    const previousTripKey = activeTripByRun.get(runKey);
+    const previousTripKey = activeTripByStream.get(streamKey);
     if (previousTripKey && previousTripKey !== tripKey) {
         flushTrip(previousTripKey, runStorage, manifestFile, fs, dataRoot);
     }
 
-    activeTripByRun.set(runKey, tripKey);
+    activeTripByStream.set(streamKey, tripKey);
 
     const existingTrip = pendingTrips.get(tripKey);
     if (existingTrip) {
@@ -250,9 +268,17 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
 
     if (data.isTripComplete) {
         flushTrip(tripKey, runStorage, manifestFile, fs, dataRoot);
-        activeTripByRun.delete(runKey);
+        activeTripByStream.delete(streamKey);
     }
 });
+
+function buildTripStreamKey(runId: string, sceneId: string, sceneVariant: string): string {
+    return `${runId}:${sceneId}:${sceneVariant}`;
+}
+
+function buildTripKey(runId: string, sceneId: string, sceneVariant: string, tripIndex: number): string {
+    return `${buildTripStreamKey(runId, sceneId, sceneVariant)}:${tripIndex}`;
+}
 
 function sanitizePathSegment(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -328,13 +354,14 @@ function buildRunStoragePaths(dataRoot: string, sceneId: string, sceneVariant: s
         runTiming.runFolder
     );
     const sceneDir = path.join(runsDir, sceneFolder);
+    const runDirRelative = `runs/${runTiming.runFolder}`;
     const sceneDirRelative = `runs/${runTiming.runFolder}/${sceneFolder}`;
-
-    const runFile = path.join(sceneDir, "run.jsonl");
+    const runFile = path.join(runsDir, "run.jsonl");
 
     return {
         runsDir,
         sceneDir,
+        runDirRelative,
         sceneDirRelative,
         runFile,
         runTiming
@@ -555,6 +582,7 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
     }
 
     const tripStorage = buildTripStoragePaths(dataRoot, runStorage, trip.tripIndex);
+    const runFile = runStorage.runFile;
 
     if (!fs.existsSync(tripStorage.tripDir)) {
         fs.mkdirSync(tripStorage.tripDir, { recursive: true });
@@ -563,6 +591,9 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
     const tripMetadata = {
         runId: trip.runId,
         runFolder: runStorage.runTiming.runFolder,
+        runDir: runStorage.runsDir,
+        runDirRelative: runStorage.runDirRelative,
+        runFile,
         sceneFolder: pathBasename(runStorage.sceneDir),
         runLocalTime: runStorage.runTiming.humanTime,
         sceneId: trip.sceneId,
@@ -571,6 +602,13 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
         chunkDurationMs: trip.chunkDurationMs,
         syncTime: trip.syncTime,
         endTime: trip.endTime,
+        tripSeed: trip.tripProfile?.seed ?? "",
+        weatherType: trip.tripProfile?.weatherType ?? "",
+        timeOfDay: trip.tripProfile?.timeBucket ?? "",
+        time: trip.tripProfile?.time ?? null,
+        vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
+        vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
+        tripProfile: trip.tripProfile ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
@@ -580,12 +618,13 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
 
     fs.writeFileSync(tripStorage.metadataFile, JSON.stringify(tripMetadata, null, 2) + "\n");
 
-    const runFile = runStorage.runFile;
     fs.appendFileSync(runFile, JSON.stringify(trip) + "\n");
 
     const manifestLine = JSON.stringify({
         runId: trip.runId,
         runFolder: runStorage.runTiming.runFolder,
+        runDir: runStorage.runsDir,
+        runDirRelative: runStorage.runDirRelative,
         sceneFolder: pathBasename(runStorage.sceneDir),
         runLocalTime: runStorage.runTiming.humanTime,
         sceneId: trip.sceneId,
@@ -594,6 +633,13 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
         chunkDurationMs: trip.chunkDurationMs,
         syncTime: trip.syncTime,
         endTime: trip.endTime,
+        tripSeed: trip.tripProfile?.seed ?? "",
+        weatherType: trip.tripProfile?.weatherType ?? "",
+        timeOfDay: trip.tripProfile?.timeBucket ?? "",
+        time: trip.tripProfile?.time ?? null,
+        vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
+        vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
+        tripProfile: trip.tripProfile ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,

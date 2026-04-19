@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +9,30 @@ from typing import Any
 
 import torch
 
+from config import (
+    DEFAULT_IMAGE_HEIGHT,
+    DEFAULT_IMAGE_WIDTH,
+    normalize_windows_drive_path,
+    parse_dataset_window,
+)
 from dataset import FsdDataset
+from heads import (
+    head_layout_metadata,
+    head_specs_metadata,
+    resolve_checkpoint_head_specs,
+    validate_checkpoint_head_layout,
+)
+from model_output import (
+    single_control_prediction_from_output,
+    single_prediction_from_output,
+    single_tensor_mapping,
+)
 from models.planner import DrivingCNN
+from state_inputs import CURRENT_SPEED_KEY, state_input_config_from_metadata, state_inputs_metadata
+from target_transforms import (
+    legacy_delta_speed_target_transform,
+    resolve_checkpoint_delta_speed_target_transform,
+)
 
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
@@ -28,6 +49,9 @@ class InferenceConfig:
     output_json: bool
     image_width: int
     image_height: int
+    window_size: int
+    frame_stride: int
+    sample_stride: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,20 +100,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def normalize_windows_drive_path(value: str) -> str:
-    cleaned = value.strip().strip("\"'")
-    if os.name == "nt" and len(cleaned) >= 2 and cleaned[1] == ":":
-        if len(cleaned) == 2:
-            cleaned += "\\"
-        elif cleaned[2] not in ("\\", "/"):
-            cleaned = f"{cleaned[:2]}\\{cleaned[2:]}"
-    return cleaned
-
-
 def load_config(path: Path) -> InferenceConfig:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     inference_raw = raw.get("inference", {})
     dataset_raw = raw.get("dataset", {})
+    window_size, frame_stride, sample_stride = parse_dataset_window(raw)
 
     checkpoint = str(inference_raw.get("checkpoint", "")).strip()
     if not checkpoint:
@@ -99,8 +114,8 @@ def load_config(path: Path) -> InferenceConfig:
     data_root = None if data_root_raw is None else normalize_windows_drive_path(str(data_root_raw))
     run_id_raw = inference_raw.get("run_id")
     run_id = None if run_id_raw is None else str(run_id_raw).strip()
-    image_width = int(inference_raw.get("image_width", dataset_raw.get("image_width", 224)))
-    image_height = int(inference_raw.get("image_height", dataset_raw.get("image_height", 224)))
+    image_width = int(inference_raw.get("image_width", dataset_raw.get("image_width", DEFAULT_IMAGE_WIDTH)))
+    image_height = int(inference_raw.get("image_height", dataset_raw.get("image_height", DEFAULT_IMAGE_HEIGHT)))
 
     return InferenceConfig(
         checkpoint=checkpoint,
@@ -111,6 +126,9 @@ def load_config(path: Path) -> InferenceConfig:
         output_json=bool(inference_raw.get("output_json", False)),
         image_width=image_width,
         image_height=image_height,
+        window_size=window_size,
+        frame_stride=frame_stride,
+        sample_stride=sample_stride,
     )
 
 
@@ -135,6 +153,9 @@ def resolve_config(args: argparse.Namespace) -> InferenceConfig:
         output_json=output_json,
         image_width=file_config.image_width,
         image_height=file_config.image_height,
+        window_size=file_config.window_size,
+        frame_stride=file_config.frame_stride,
+        sample_stride=file_config.sample_stride,
     )
 
 
@@ -159,9 +180,7 @@ def resolve_existing_path(raw_path: str, config_path: Path) -> Path:
             return resolved
 
     tried = "\n".join(f"- {path}" for path in candidates)
-    raise FileNotFoundError(
-        f"Checkpoint does not exist: {raw_path}\nTried:\n{tried}"
-    )
+    raise FileNotFoundError(f"Checkpoint does not exist: {raw_path}\nTried:\n{tried}")
 
 
 def select_device(requested: str) -> torch.device:
@@ -184,14 +203,50 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
         raise ValueError(f"Unexpected checkpoint payload in {checkpoint_path}")
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint is missing model_state_dict: {checkpoint_path}")
+    validate_checkpoint_head_layout(checkpoint)
     return checkpoint
 
 
-def build_model(checkpoint: dict[str, Any], device: torch.device) -> DrivingCNN:
-    model = DrivingCNN().to(device)
+def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
+    state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
+    head_specs = resolve_checkpoint_head_specs(checkpoint)
+    model = DrivingCNN(frame_count=frame_count, head_specs=head_specs, state_input_config=state_input_config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
+    model.delta_speed_target_transform = resolve_checkpoint_delta_speed_target_transform(checkpoint)
     model.eval()
     return model
+
+
+def resolve_checkpoint_frame_count(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
+    checkpoint_frame_count = checkpoint.get("frame_window_size")
+    if checkpoint_frame_count is not None:
+        expected = int(checkpoint_frame_count)
+        if expected != config.window_size:
+            raise ValueError(
+                "Config/checkpoint frame-window mismatch: "
+                f"config dataset.window_size={config.window_size}, "
+                f"checkpoint frame_window_size={expected}"
+            )
+        return expected
+    return config.window_size
+
+
+def resolve_checkpoint_frame_stride(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
+    checkpoint_frame_stride = checkpoint.get("frame_stride", checkpoint.get("frame_window_stride"))
+    if checkpoint_frame_stride is not None:
+        expected = int(checkpoint_frame_stride)
+        if expected != config.frame_stride:
+            raise ValueError(
+                "Config/checkpoint frame-stride mismatch: "
+                f"config dataset.frame_stride={config.frame_stride}, "
+                f"checkpoint frame_stride={expected}"
+            )
+        return expected
+    return config.frame_stride
+
+
+def checkpoint_sample_stride(checkpoint: dict[str, Any]) -> int:
+    return int(checkpoint.get("sample_stride", 0) or 0)
 
 
 def run_sample_inference(
@@ -202,29 +257,45 @@ def run_sample_inference(
     run_id: str,
     sample_index: int,
     image_size: tuple[int, int],
+    expected_window_size: int,
 ) -> dict[str, Any]:
-    dataset = FsdDataset(run_id=run_id, data_root=data_root, image_size=image_size)
+    dataset = FsdDataset(
+        run_id=run_id,
+        data_root=data_root,
+        image_size=image_size,
+        expected_window_size=expected_window_size,
+        head_specs=model.head_specs,
+    )
     if sample_index < 0 or sample_index >= len(dataset):
         raise IndexError(f"sample_index out of range: {sample_index}, dataset size={len(dataset)}")
 
-    x, y = dataset[sample_index]
+    x, state_inputs, targets = dataset[sample_index]
     sample_meta = dataset.samples[sample_index]
     x = x.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    current_speed = state_inputs.get(CURRENT_SPEED_KEY)
+    if current_speed is not None:
+        current_speed = current_speed.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
 
     with torch.no_grad():
-        pred = model(x).squeeze(0).detach().cpu()
+        output = model(x, current_speed=current_speed)
+    head_specs = model.head_specs
+    delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
 
     return {
         "sample_index": sample_index,
         "frame_paths": [str(path) for path in sample_meta.get("frame_paths", [])],
-        "prediction": {
-            "Steering": float(pred[0].item()),
-            "acceleration": float(pred[1].item()),
-        },
-        "target": {
-            "Steering": float(y[0].item()),
-            "acceleration": float(y[1].item()),
-        },
+        "state_inputs": single_tensor_mapping(state_inputs),
+        "outputs": single_prediction_from_output(
+            output,
+            head_specs=head_specs,
+            delta_speed_transform=delta_speed_transform,
+        ),
+        "control_outputs": single_control_prediction_from_output(
+            output,
+            head_specs=head_specs,
+            delta_speed_transform=delta_speed_transform,
+        ),
+        "target": single_tensor_mapping(targets, delta_speed_transform=delta_speed_transform),
     }
 
 
@@ -234,10 +305,19 @@ def build_output(
     device: torch.device,
     sample_result: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    head_specs = resolve_checkpoint_head_specs(checkpoint)
     output: dict[str, Any] = {
         "checkpoint": str(checkpoint_path),
         "device": str(device),
         "epoch": int(checkpoint.get("epoch", 0)),
+        "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
+        "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
+        "sample_stride": checkpoint_sample_stride(checkpoint),
+        "input_channels": int(checkpoint.get("input_channels", 0) or 0),
+        "delta_speed_target_transform": resolve_checkpoint_delta_speed_target_transform(checkpoint).metadata(),
+        "head_specs": checkpoint.get("head_specs", head_specs_metadata(head_specs)),
+        "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
+        "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config_from_metadata(None))),
         "train_metrics": checkpoint.get("train_metrics"),
         "val_metrics": checkpoint.get("val_metrics"),
     }
@@ -250,24 +330,44 @@ def print_plain(output: dict[str, Any]) -> None:
     print(f"Loaded checkpoint: {output['checkpoint']}")
     print(f"Device: {output['device']}")
     print(f"Epoch: {output['epoch']}")
+    if int(output.get("frame_window_size", 0) or 0) > 0:
+        print(
+            "Frame window: "
+            f"size={output['frame_window_size']} "
+            f"frame_stride={output['frame_stride']} "
+            f"sample_stride={output['sample_stride']} "
+            f"input_channels={output['input_channels']}"
+        )
+    state_inputs = output.get("state_inputs") or {}
+    current_speed = state_inputs.get("current_speed") if isinstance(state_inputs, dict) else None
+    if isinstance(current_speed, dict) and current_speed.get("enabled"):
+        print(
+            "State inputs: "
+            f"current_speed enabled cap={float(current_speed.get('cap', 0.0)):.3f} "
+            f"fusion={current_speed.get('fusion', 'unknown')}"
+        )
 
     val_metrics = output.get("val_metrics") or {}
     if isinstance(val_metrics, dict) and val_metrics:
         print(
             "Validation metrics: "
             f"loss={float(val_metrics.get('loss', 0.0)):.6f} "
-            f"overall_mae={float(val_metrics.get('overall_mae', 0.0)):.6f} "
-            f"overall_rmse={float(val_metrics.get('overall_rmse', 0.0)):.6f}"
+            f"control_mae={float(val_metrics.get('control_overall_mae', val_metrics.get('overall_mae', 0.0))):.6f} "
+            f"control_rmse={float(val_metrics.get('control_overall_rmse', val_metrics.get('overall_rmse', 0.0))):.6f}"
         )
 
     sample = output.get("sample")
     if isinstance(sample, dict):
-        prediction = sample["prediction"]
+        control_outputs = sample["control_outputs"]
+        all_outputs = sample["outputs"]
         target = sample["target"]
+        aux_outputs = {key: value for key, value in all_outputs.items() if key not in control_outputs}
         print()
         print(f"Sample index: {sample['sample_index']}")
-        print(f"Prediction: Steering={prediction['Steering']:.6f} acceleration={prediction['acceleration']:.6f}")
-        print(f"Target:     Steering={target['Steering']:.6f} acceleration={target['acceleration']:.6f}")
+        print(f"Control outputs: {control_outputs}")
+        if aux_outputs:
+            print(f"Aux outputs:     {aux_outputs}")
+        print(f"Targets:         {target}")
         frame_paths = sample.get("frame_paths") or []
         if frame_paths:
             print("Frames:")
@@ -281,7 +381,9 @@ def main() -> None:
     device = select_device(config.device)
     checkpoint_path = resolve_existing_path(config.checkpoint, args.config)
     checkpoint = load_checkpoint(checkpoint_path, device)
-    model = build_model(checkpoint, device)
+    frame_count = resolve_checkpoint_frame_count(checkpoint, config)
+    _ = resolve_checkpoint_frame_stride(checkpoint, config)
+    model = build_model(checkpoint, device, frame_count)
 
     sample_result: dict[str, Any] | None = None
     if config.run_id or config.data_root:
@@ -294,6 +396,7 @@ def main() -> None:
             run_id=config.run_id,
             sample_index=config.sample_index,
             image_size=(config.image_width, config.image_height),
+            expected_window_size=config.window_size,
         )
 
     output = build_output(checkpoint_path, checkpoint, device, sample_result)

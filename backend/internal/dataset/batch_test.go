@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -47,5 +48,48 @@ func TestProcessTripDirsSkipsExistingOutputs(t *testing.T) {
 	}
 	if results[0].Error != nil {
 		t.Fatalf("unexpected error: %v", results[0].Error)
+	}
+}
+
+func TestProcessTripDirsWithCallbackReportsResults(t *testing.T) {
+	tmp := t.TempDir()
+	tripDir := filepath.Join(tmp, "run-a", "scene-a", "trip-000")
+	framesDir := filepath.Join(tripDir, "frames")
+	if err := os.MkdirAll(framesDir, 0o755); err != nil {
+		t.Fatalf("mkdir frames: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(framesDir, "000001.jpg"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	var mu sync.Mutex
+	seen := make([]TripProcessResult, 0, 2)
+	results := ProcessTripDirsWithCallback(
+		context.Background(),
+		[]string{tripDir},
+		1,
+		func(result TripProcessResult) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, result)
+		},
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("unexpected result count: got=%d want=1", len(results))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("unexpected callback count: got=%d want=2", len(seen))
+	}
+	if seen[0].Event != "started" || seen[0].TripDir != tripDir || seen[0].WorkerID != 1 {
+		t.Fatalf("unexpected start callback result: %+v", seen[0])
+	}
+	if seen[1].Event != "finished" || seen[1].TripDir != tripDir || seen[1].State != "skipped" || seen[1].Error != nil {
+		t.Fatalf("unexpected finish callback result: %+v", seen[1])
+	}
+	if seen[1].Duration < 0 {
+		t.Fatalf("unexpected negative duration: %+v", seen[1])
 	}
 }
