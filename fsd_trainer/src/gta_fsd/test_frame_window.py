@@ -21,6 +21,7 @@ from heads import (
     get_control_outputs,
     head_layout_metadata,
     inactive_loss_weight_override_names,
+    resolve_checkpoint_head_specs,
     validate_checkpoint_head_layout,
 )
 from inference import InferenceConfig, build_output, resolve_checkpoint_frame_stride
@@ -74,9 +75,11 @@ def create_trip_fixture(
             ],
             "label": {
                 "Steering": float(sample_index),
+                "future_steer": float(sample_index) + 0.25,
                 "delta_speed": 0.0,
                 "delta_speed_target": 0.0,
                 "future_speed": 4.0,
+                "future_speed_target": 4.0,
                 "gps": [1.0, 2.0, 3.0],
                 "currentSpeed": 4.0,
                 "isStopped": 0,
@@ -137,8 +140,20 @@ class FrameWindowConfigTests(unittest.TestCase):
 
         self.assertEqual(set(output.keys()), {spec.name for spec in HEAD_SPECS})
         self.assertEqual(tuple(output["steer"].shape), (2,))
-        self.assertEqual(tuple(output["delta_speed"].shape), (2,))
         self.assertEqual(tuple(output["future_speed"].shape), (2,))
+        self.assertEqual(tuple(output["delta_speed"].shape), (2,))
+
+    def test_driving_cnn_runs_without_current_speed_when_disabled(self) -> None:
+        model = DrivingCNN(frame_count=5, state_input_config=StateInputConfig())
+        self.assertEqual(model.conv1.in_channels, 15)
+
+        x = torch.zeros((2, 15, 32, 32), dtype=torch.float32)
+        output = model(x)
+
+        self.assertEqual(set(output.keys()), {spec.name for spec in HEAD_SPECS})
+        self.assertEqual(tuple(output["steer"].shape), (2,))
+        self.assertEqual(tuple(output["future_speed"].shape), (2,))
+        self.assertEqual(tuple(output["delta_speed"].shape), (2,))
 
     def test_dataset_rejects_mismatched_frame_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,9 +173,11 @@ class FrameWindowConfigTests(unittest.TestCase):
                 ],
                 "label": {
                     "Steering": 0.0,
+                    "future_steer": 0.0,
                     "delta_speed": 0.0,
                     "delta_speed_target": 0.0,
                     "future_speed": 4.0,
+                    "future_speed_target": 4.0,
                     "gps": [1.0, 2.0, 3.0],
                     "currentSpeed": 4.0,
                     "isStopped": 1,
@@ -384,12 +401,12 @@ class FrameWindowConfigTests(unittest.TestCase):
 
         self.assertEqual(tuple(control.shape), (1, 2))
         self.assertAlmostEqual(float(control[0, 0].item()), 0.25, places=6)
-        self.assertAlmostEqual(float(control[0, 1].item()), -0.1, places=6)
+        self.assertAlmostEqual(float(control[0, 1].item()), 2.9, places=6)
         self.assertEqual(
             prediction,
-            {"steer": 0.25, "delta_speed": -0.10000000149011612, "future_speed": 2.9000000953674316},
+            {"steer": 0.25, "future_speed": 2.9000000953674316, "delta_speed": -0.10000000149011612},
         )
-        self.assertEqual(control_prediction, {"steer": 0.25, "delta_speed": -0.10000000149011612})
+        self.assertEqual(control_prediction, {"steer": 0.25, "future_speed": 2.9000000953674316})
 
     def test_model_output_helpers_denormalize_delta_speed_when_requested(self) -> None:
         output = {
@@ -409,16 +426,18 @@ class FrameWindowConfigTests(unittest.TestCase):
 
         self.assertEqual(
             prediction,
-            {"steer": 0.25, "delta_speed": -1.0, "future_speed": 2.9000000953674316},
+            {"steer": 0.25, "future_speed": 2.9000000953674316, "delta_speed": -1.0},
         )
-        self.assertEqual(control_prediction, {"steer": 0.25, "delta_speed": -1.0})
+        self.assertEqual(control_prediction, {"steer": 0.25, "future_speed": 2.9000000953674316})
 
     def test_dataset_builds_spec_driven_targets(self) -> None:
         label = {
             "Steering": 0.25,
+            "future_steer": 0.35,
             "delta_speed": -0.1,
             "delta_speed_target": -0.05,
             "future_speed": 2.9,
+            "future_speed_target": 2.8,
             "gps": [190.0, -815.0, 31.0],
             "currentSpeed": 3.0,
             "isStopped": 1,
@@ -427,9 +446,9 @@ class FrameWindowConfigTests(unittest.TestCase):
 
         targets = build_targets(label)
         self.assertEqual(set(targets.keys()), {"steer", "delta_speed", "future_speed"})
-        self.assertAlmostEqual(float(targets["steer"].item()), 0.25, places=6)
+        self.assertAlmostEqual(float(targets["steer"].item()), 0.35, places=6)
         self.assertAlmostEqual(float(targets["delta_speed"].item()), -0.05, places=6)
-        self.assertAlmostEqual(float(targets["future_speed"].item()), 2.9, places=6)
+        self.assertAlmostEqual(float(targets["future_speed"].item()), 2.8, places=6)
 
     def test_dataset_returns_normalized_current_speed_state_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,7 +491,7 @@ class FrameWindowConfigTests(unittest.TestCase):
         }
 
         control_outputs = get_control_outputs(outputs)
-        self.assertEqual(set(control_outputs.keys()), {"steer", "delta_speed"})
+        self.assertEqual(set(control_outputs.keys()), {"steer", "future_speed"})
 
     def test_head_layout_metadata_matches_registry_order(self) -> None:
         self.assertEqual(
@@ -483,15 +502,17 @@ class FrameWindowConfigTests(unittest.TestCase):
     def test_all_head_specs_preserve_auxiliary_heads_for_future_reactivation(self) -> None:
         self.assertEqual(
             [spec.name for spec in ALL_HEAD_SPECS],
-            ["steer", "delta_speed", "future_speed", "route_xy", "speed", "is_stopped"],
+            ["steer", "future_speed", "delta_speed", "route_xy", "speed", "is_stopped"],
         )
 
     def test_build_targets_from_label_includes_trained_auxiliary_heads(self) -> None:
         label = {
             "Steering": 0.02145645022392273,
+            "future_steer": 0.03145645022392273,
             "delta_speed": 0.04291290044784546,
             "delta_speed_target": 0.02145645022392273,
             "future_speed": 0.05235547572374344,
+            "future_speed_target": 0.06235547572374344,
             "coords": [191.87716674804688, -814.9187622070312, 31.073318481445312],
             "currentSpeed": 0.00944257527589798,
             "drivingStyle": 526523,
@@ -507,9 +528,11 @@ class FrameWindowConfigTests(unittest.TestCase):
     def test_auxiliary_target_builders_are_still_available(self) -> None:
         label = {
             "Steering": 0.02145645022392273,
+            "future_steer": 0.03145645022392273,
             "delta_speed": 0.04291290044784546,
             "delta_speed_target": 0.02145645022392273,
             "future_speed": 0.05235547572374344,
+            "future_speed_target": 0.06235547572374344,
             "coords": [191.87716674804688, -814.9187622070312, 31.073318481445312],
             "currentSpeed": 0.00944257527589798,
             "drivingStyle": 526523,
@@ -519,12 +542,14 @@ class FrameWindowConfigTests(unittest.TestCase):
             "yaw": 70.4722900390625,
         }
 
+        future_steer = ALL_HEAD_SPECS_BY_NAME["steer"].target_builder(label)
         future_speed = ALL_HEAD_SPECS_BY_NAME["future_speed"].target_builder(label)
         route_xy = ALL_HEAD_SPECS_BY_NAME["route_xy"].target_builder(label)
         speed = ALL_HEAD_SPECS_BY_NAME["speed"].target_builder(label)
         is_stopped = ALL_HEAD_SPECS_BY_NAME["is_stopped"].target_builder(label)
 
-        self.assertAlmostEqual(float(future_speed.item()), 0.05235547572374344, places=6)
+        self.assertAlmostEqual(float(future_steer.item()), 0.03145645022392273, places=6)
+        self.assertAlmostEqual(float(future_speed.item()), 0.06235547572374344, places=6)
         self.assertEqual(route_xy.tolist(), [190.74496459960938, -815.3811645507812])
         self.assertAlmostEqual(float(speed.item()), 0.00944257527589798, places=6)
         self.assertAlmostEqual(float(is_stopped.item()), 1.0, places=6)
@@ -532,9 +557,11 @@ class FrameWindowConfigTests(unittest.TestCase):
     def test_is_stopped_target_accepts_boolean_false(self) -> None:
         is_stopped = ALL_HEAD_SPECS_BY_NAME["is_stopped"].target_builder({
             "Steering": 0.0,
+            "future_steer": 0.0,
             "delta_speed": 0.0,
             "delta_speed_target": 0.0,
             "future_speed": 0.0,
+            "future_speed_target": 0.0,
             "gps": [0.0, 0.0, 0.0],
             "currentSpeed": 0.0,
             "isStopped": False,
@@ -550,7 +577,7 @@ class FrameWindowConfigTests(unittest.TestCase):
 
         resolved = apply_loss_weight_overrides(overrides)
 
-        self.assertEqual([spec.name for spec in resolved], ["steer", "delta_speed", "future_speed"])
+        self.assertEqual([spec.name for spec in resolved], ["steer", "future_speed", "delta_speed"])
         self.assertAlmostEqual(resolved[0].loss_weight, 1.5, places=6)
         self.assertEqual(inactive_loss_weight_override_names(overrides), ("route_xy", "speed"))
 
@@ -562,9 +589,29 @@ class FrameWindowConfigTests(unittest.TestCase):
         validate_checkpoint_head_layout({
             "head_layout": [
                 ALL_HEAD_SPECS_BY_NAME["steer"].layout_metadata(),
-                ALL_HEAD_SPECS_BY_NAME["delta_speed"].layout_metadata(),
+                {
+                    **ALL_HEAD_SPECS_BY_NAME["delta_speed"].layout_metadata(),
+                    "kind": "control",
+                    "used_for_control": True,
+                },
             ],
         })
+
+    def test_checkpoint_head_resolution_preserves_legacy_delta_speed_control(self) -> None:
+        resolved = resolve_checkpoint_head_specs({
+            "head_layout": [
+                ALL_HEAD_SPECS_BY_NAME["steer"].layout_metadata(),
+                {
+                    **ALL_HEAD_SPECS_BY_NAME["delta_speed"].layout_metadata(),
+                    "kind": "control",
+                    "used_for_control": True,
+                },
+            ],
+        })
+
+        self.assertEqual([spec.name for spec in resolved], ["steer", "delta_speed"])
+        self.assertTrue(resolved[1].used_for_control)
+        self.assertEqual(resolved[1].kind, "control")
 
 
 if __name__ == "__main__":

@@ -27,9 +27,9 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			FrameCount: 5,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.1, "delta_speed": -2.0, "delta_speed_target": -1.0, "future_speed": 3.0, "currentSpeed": 5.0, "isStopped": 0}},
-			{Label: map[string]any{"Steering": 0.1, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 5.0, "currentSpeed": 5.0, "isStopped": 1}},
-			{Label: map[string]any{"Steering": 0.1, "delta_speed": 2.0, "delta_speed_target": 1.0, "future_speed": 7.0, "currentSpeed": 5.0, "isStopped": true}},
+			{Label: map[string]any{"Steering": 0.1, "future_steer": 0.2, "delta_speed": -2.0, "delta_speed_target": -1.0, "future_speed": 3.0, "future_speed_target": 3.5, "currentSpeed": 5.0, "routeDistance": 12.0, "leadVehicleDistance": 18.0, "hasLeadVehicle": true, "isInJunction": true, "eventOffroad": false, "isStopped": 0}},
+			{Label: map[string]any{"Steering": 0.1, "future_steer": 0.15, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 5.0, "future_speed_target": 5.0, "currentSpeed": 5.0, "routeDistance": 6.0, "leadVehicleDistance": 10.0, "hasLeadVehicle": true, "isInJunction": false, "eventOffroad": true, "isStopped": 1}},
+			{Label: map[string]any{"Steering": 0.1, "future_steer": 0.05, "delta_speed": 2.0, "delta_speed_target": 1.0, "future_speed": 7.0, "future_speed_target": 7.5, "currentSpeed": 5.0, "routeDistance": 2.0, "hasLeadVehicle": false, "isInJunction": false, "eventOffroad": false, "isStopped": true}},
 		},
 	})
 
@@ -64,7 +64,7 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			FrameCount: 2,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.5, "delta_speed": 1.0, "delta_speed_target": 0.5, "future_speed": 11.0, "currentSpeed": 10.0, "isStopped": 0}},
+			{Label: map[string]any{"Steering": 0.5, "future_steer": 0.4, "delta_speed": 1.0, "delta_speed_target": 0.5, "future_speed": 11.0, "future_speed_target": 11.0, "currentSpeed": 10.0, "isStopped": 0}},
 		},
 	})
 
@@ -107,6 +107,15 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 	}
 	if summary.FlatLabelTripCounts["steer"] != 1 {
 		t.Fatalf("unexpected flat steer trip count: %+v", summary.FlatLabelTripCounts)
+	}
+	if summary.BooleanStats["lead_vehicle_present"].TrueCount != 2 || summary.BooleanStats["lead_vehicle_present"].Count != 3 {
+		t.Fatalf("unexpected lead vehicle stats: %+v", summary.BooleanStats["lead_vehicle_present"])
+	}
+	if summary.BooleanStats["event_offroad"].TrueCount != 1 || summary.BooleanStats["in_junction"].TrueCount != 1 {
+		t.Fatalf("unexpected event/junction stats: offroad=%+v junction=%+v", summary.BooleanStats["event_offroad"], summary.BooleanStats["in_junction"])
+	}
+	if routeStats := summary.LabelStats["route_distance"]; math.Abs(routeStats.Mean-6.666666666666667) > 1e-9 {
+		t.Fatalf("unexpected route distance stats: %+v", routeStats)
 	}
 	if summary.Diversity.WeatherTypes.Count != 3 || summary.Diversity.WeatherTypes.UniqueCount != 2 {
 		t.Fatalf("unexpected weather diversity: %+v", summary.Diversity.WeatherTypes)
@@ -159,7 +168,7 @@ func TestWriteRunDatasetReportsWritesFile(t *testing.T) {
 			FrameCount: 1,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.2, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 4.0, "currentSpeed": 4.0, "isStopped": 0}},
+			{Label: map[string]any{"Steering": 0.2, "future_steer": 0.25, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 4.0, "future_speed_target": 4.0, "currentSpeed": 4.0, "isStopped": 0}},
 		},
 	})
 

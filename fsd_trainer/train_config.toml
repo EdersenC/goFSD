@@ -9,13 +9,14 @@ train_run_ids = [
   '2026-04-17_04-22-50AM_z4122y',
   '2026-04-17_06-43-20AM_l9iojs',
   '2026-04-17_07-15-43AM_uq6bn9',
-  '2026-04-17_08-52-20AM_fpkezz',
-  '2026-04-17_09-15-03AM_qm66eg'
+  '2026-04-19_05-02-23AM_kovr34'
 ]
 # Run ids accumulated into the validation dataset from `data_root\\runs\\<run-id>`.
 val_run_ids = [
   '2026-04-17_03-06-46AM_kv6jng',
   '2026-04-17_08-12-45AM_0zz7wc',
+  '2026-04-17_08-52-20AM_fpkezz',
+  '2026-04-17_09-15-03AM_qm66eg'
 ]
 # Final resize width passed to the trainer/model loader.
 image_width = 480
@@ -49,22 +50,22 @@ base_dir = "fsd_trainer/training_runs"
 # `auto` prefers CUDA when available, otherwise CPU.
 device = "auto"
 epochs = 15
-learning_rate = 0.005
+learning_rate = 0.001
 early_stopping_metric = "control_overall_mae"
 early_stopping_patience = 3
 early_stopping_min_delta = 0.0
 
 # Per-head training loss weights.
-# `steer` and `delta_speed` remain the control heads.
-# `future_speed` is now an active auxiliary regression head.
-# Larger values push optimization harder toward that head once it is active.
+# `steer` and `future_speed` are the active control heads.
+# `delta_speed` remains trainable as an auxiliary regularizer/diagnostic target.
+# Larger values push optimization harder toward that head.
 [training.loss_weights]
 # Main steering control target.
-steer = 0.3
-# Main signed delta-speed control target.
-delta_speed = 1.0
-# Active auxiliary future absolute-speed target.
-future_speed = 0.1
+steer = 1
+# Main target-speed-at-horizon control target.
+future_speed = 1.0
+# Auxiliary signed delta-speed target retained for regularization and diagnostics.
+delta_speed = 0.2
 # Inactive auxiliary GPS XY target placeholder.
 route_xy = 0.0
 # Inactive auxiliary speed regression head placeholder.
@@ -74,13 +75,20 @@ is_stopped = 0.0
 
 # DataLoader settings for training and validation batches.
 [loader]
-# CUDA batch size.
-batch_size = 100
-# Worker count used when CUDA dataloading is enabled.
-num_workers = 2
-pin_memory = true
-prefetch_factor = 2
-persistent_workers = true
+# Training loader settings.
+train_batch_size = 34
+train_num_workers = 8
+train_pin_memory = true
+train_prefetch_factor = 1
+train_persistent_workers = false
+# Validation loader settings. Keep this lighter than training so the epoch
+# boundary does not retain another full worker pool and prefetched queue.
+val_batch_size = 34
+val_num_workers = 4
+val_pin_memory = true
+val_prefetch_factor = 1
+val_persistent_workers = false
+log_every_n_batches = 10
 # Fraction of validation trips sampled each epoch. Entire trips are kept together.
 val_split = 1.0
 # CPU fallback batch size when CUDA is not used.

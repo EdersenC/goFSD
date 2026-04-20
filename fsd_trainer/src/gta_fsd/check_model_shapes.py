@@ -17,7 +17,7 @@ from inference import (
     select_device,
 )
 from models.planner import DrivingCNN
-from state_inputs import training_state_input_config
+from state_inputs import StateInputConfig, training_state_input_config
 from train import load_config as load_train_config
 
 
@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
 
 def _shape_map(mapping: dict[str, torch.Tensor]) -> dict[str, list[int]]:
     return {key: list(value.shape) for key, value in mapping.items()}
+
+
+def _parameter_count(model: torch.nn.Module) -> int:
+    return sum(parameter.numel() for parameter in model.parameters())
 
 
 def _stack_targets(samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -153,6 +157,13 @@ def main() -> None:
     dummy_speed = torch.zeros((1,), dtype=torch.float32, device=device)
     with torch.no_grad():
         dummy_outputs = model(dummy, current_speed=dummy_speed)
+    model_without_speed = DrivingCNN(
+        frame_count=config.dataset.window_size,
+        state_input_config=StateInputConfig(),
+    ).to(device)
+    model_without_speed.eval()
+    with torch.no_grad():
+        dummy_outputs_without_speed = model_without_speed(dummy)
 
     payload: dict[str, Any] = {
         "device": str(device),
@@ -163,7 +174,9 @@ def main() -> None:
             "input_channels": config.dataset.window_size * 3,
         },
         "head_layout": head_layout_metadata(),
+        "parameter_count": _parameter_count(model),
         "dummy_output_shapes": _shape_map(dummy_outputs),
+        "dummy_output_shapes_without_current_speed": _shape_map(dummy_outputs_without_speed),
     }
     if loaded_checkpoint is not None:
         payload["checkpoint"] = loaded_checkpoint

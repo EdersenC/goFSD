@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
-from PIL import Image
-from torchvision import transforms
 
 from dataset import FsdDataset
 from inference import (
@@ -23,6 +21,7 @@ from inference import (
     select_device,
 )
 from heads import head_layout_metadata, head_specs_metadata, resolve_checkpoint_head_specs
+from image_io import load_rgb_tensor_from_path
 from model_output import single_control_prediction_from_output, single_tensor_mapping
 from train import TrainConfig, load_config as load_train_config
 from state_inputs import CURRENT_SPEED_KEY, StateInputConfig, state_input_config_from_metadata, state_inputs_metadata
@@ -137,18 +136,8 @@ def resolve_debug_dir(override: Path | None) -> Path:
     return resolve_latest_debug_dir(resolve_debug_frames_root())
 
 
-def load_frame_tensor(frame_path: Path, image_size: tuple[int, int], to_tensor: transforms.Compose) -> torch.Tensor:
-    expected_width, expected_height = image_size
-    with Image.open(frame_path) as image_file:
-        image = image_file.convert("RGB")
-    actual_width, actual_height = image.size
-    if (actual_width, actual_height) != (expected_width, expected_height):
-        raise ValueError(
-            "Frame image has unexpected size: "
-            f"expected {expected_width}x{expected_height}, "
-            f"found {actual_width}x{actual_height} at {frame_path}"
-        )
-    return to_tensor(image)
+def load_frame_tensor(frame_path: Path, image_size: tuple[int, int]) -> torch.Tensor:
+    return load_rgb_tensor_from_path(frame_path, image_size)
 
 
 def list_debug_frame_paths(debug_dir: Path) -> list[Path]:
@@ -203,7 +192,11 @@ def predict_control_outputs(
     with torch.no_grad():
         output = model(x, current_speed=current_speed)
     delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
-    return single_control_prediction_from_output(output, delta_speed_transform=delta_speed_transform)
+    return single_control_prediction_from_output(
+        output,
+        head_specs=model.head_specs,
+        delta_speed_transform=delta_speed_transform,
+    )
 
 
 def summarize_control_ranges(items: Iterable[dict[str, Any]]) -> dict[str, dict[str, float | bool]]:
@@ -311,7 +304,6 @@ def evaluate_debug_windows(
             "skipped_reason": "current_speed-enabled checkpoints require live speed telemetry; debug frame dumps are image-only",
         }
 
-    to_tensor = transforms.ToTensor()
     frame_paths = list_debug_frame_paths(debug_dir)
     windows = build_debug_windows(
         frame_paths,
@@ -322,7 +314,7 @@ def evaluate_debug_windows(
 
     results: list[dict[str, Any]] = []
     for window_index, window_paths in enumerate(windows):
-        frame_tensors = [load_frame_tensor(path, image_size, to_tensor) for path in window_paths]
+        frame_tensors = [load_frame_tensor(path, image_size) for path in window_paths]
         stacked_frames = torch.cat(frame_tensors, dim=0)
         start_frame_index = frame_paths.index(window_paths[0])
         results.append({

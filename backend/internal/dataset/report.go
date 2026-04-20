@@ -20,11 +20,55 @@ const (
 )
 
 var trackedLabelFields = map[string]string{
-	"steer":              "Steering",
-	"delta_speed":        "delta_speed",
-	"delta_speed_target": "delta_speed_target",
-	"future_speed":       "future_speed",
-	"current_speed":      "currentSpeed",
+	"steer":               "Steering",
+	"future_steer":        "future_steer",
+	"delta_speed":         "delta_speed",
+	"delta_speed_target":  "delta_speed_target",
+	"future_speed":        "future_speed",
+	"future_speed_target": "future_speed_target",
+	"current_speed":       "currentSpeed",
+	"velocity_forward":    "velocityForward",
+	"velocity_lateral":    "velocityLateral",
+	"velocity_vertical":   "velocityVertical",
+	"yaw_rate":            "yawRate",
+	"gear":                "gear",
+	"rpm":                 "rpm",
+	"engine_health":       "engineHealth",
+	"body_health":         "bodyHealth",
+	"route_distance":      "routeDistance",
+	"route_heading_err":   "routeHeadingError",
+	"route_forward":       "routeForwardDelta",
+	"route_lateral":       "routeLateralDelta",
+	"road_node_distance":  "roadNodeDistance",
+	"road_node_heading":   "roadNodeHeading",
+	"road_node_density":   "roadNodeDensity",
+	"road_lanes_fwd":      "roadLaneCountForward",
+	"road_lanes_back":     "roadLaneCountBackward",
+	"road_edge_span":      "roadEdgeSpan",
+	"nearby_vehicles":     "nearbyVehicleCount30m",
+	"nearby_peds":         "nearbyPedCount20m",
+	"lead_distance":       "leadVehicleDistance",
+	"lead_rel_speed":      "leadVehicleRelativeSpeed",
+	"lead_ttc":            "leadVehicleTTC",
+	"lead_heading_delta":  "leadVehicleHeadingDelta",
+	"time_since_sync_ms":  "timeSinceSyncMs",
+	"time_since_chunk_ms": "timeSinceChunkStartMs",
+}
+
+var trackedBooleanFields = map[string]string{
+	"route_gps_valid":          "routeGpsValid",
+	"on_road":                  "isOnRoad",
+	"offroad_node":             "isOffroadNode",
+	"in_junction":              "isInJunction",
+	"traffic_light_node":       "hasTrafficLightNode",
+	"highway":                  "isHighway",
+	"lead_vehicle_present":     "hasLeadVehicle",
+	"stopped_at_traffic_light": "isStoppedAtTrafficLights",
+	"event_collision":          "eventCollision",
+	"event_offroad":            "eventOffroad",
+	"event_wrong_way":          "eventWrongWay",
+	"event_reversing":          "eventReversing",
+	"event_handbrake":          "eventHandbrake",
 }
 
 type DatasetReportConfig struct {
@@ -45,6 +89,14 @@ type NumericSummary struct {
 	Mean  float64 `json:"mean"`
 	Std   float64 `json:"std"`
 	Flat  bool    `json:"flat"`
+}
+
+type BooleanSummary struct {
+	Count      int     `json:"count"`
+	TrueCount  int     `json:"true_count"`
+	FalseCount int     `json:"false_count"`
+	TrueRate   float64 `json:"true_rate"`
+	FalseRate  float64 `json:"false_rate"`
 }
 
 type DeltaSpeedClipSummary struct {
@@ -90,6 +142,7 @@ type DatasetReportSummary struct {
 	TripStates          map[string]int            `json:"trip_states"`
 	FlatLabelTripCounts map[string]int            `json:"flat_label_trip_counts"`
 	LabelStats          map[string]NumericSummary `json:"label_stats"`
+	BooleanStats        map[string]BooleanSummary `json:"boolean_stats"`
 	DeltaSpeedClip      DeltaSpeedClipSummary     `json:"delta_speed_clip"`
 	Diversity           DatasetDiversitySummary   `json:"diversity"`
 }
@@ -117,6 +170,7 @@ type TripDatasetReport struct {
 	StoppedSampleShare float64                   `json:"stopped_sample_share"`
 	FlatLabels         []string                  `json:"flat_labels"`
 	LabelStats         map[string]NumericSummary `json:"label_stats"`
+	BooleanStats       map[string]BooleanSummary `json:"boolean_stats"`
 	DeltaSpeedClip     DeltaSpeedClipSummary     `json:"delta_speed_clip"`
 	Warnings           []string                  `json:"warnings,omitempty"`
 }
@@ -152,6 +206,11 @@ type numericAccumulator struct {
 	sumSquares float64
 	min        float64
 	max        float64
+}
+
+type booleanAccumulator struct {
+	count     int
+	trueCount int
 }
 
 type categoricalAccumulator struct {
@@ -198,6 +257,27 @@ func (n *numericAccumulator) summary() NumericSummary {
 func newCategoricalAccumulator() *categoricalAccumulator {
 	return &categoricalAccumulator{
 		counts: make(map[string]int),
+	}
+}
+
+func (b *booleanAccumulator) add(value bool) {
+	b.count++
+	if value {
+		b.trueCount++
+	}
+}
+
+func (b *booleanAccumulator) summary() BooleanSummary {
+	if b.count == 0 {
+		return BooleanSummary{}
+	}
+	falseCount := b.count - b.trueCount
+	return BooleanSummary{
+		Count:      b.count,
+		TrueCount:  b.trueCount,
+		FalseCount: falseCount,
+		TrueRate:   float64(b.trueCount) / float64(b.count),
+		FalseRate:  float64(falseCount) / float64(b.count),
 	}
 }
 
@@ -250,6 +330,7 @@ type summaryAccumulator struct {
 	tripStates          map[string]int
 	flatLabelTripCounts map[string]int
 	labelStats          map[string]*numericAccumulator
+	booleanStats        map[string]*booleanAccumulator
 	weatherTypes        *categoricalAccumulator
 	timeOfDay           *categoricalAccumulator
 	vehicleModels       *categoricalAccumulator
@@ -266,6 +347,7 @@ func newSummaryAccumulator(clipValue float64) *summaryAccumulator {
 		tripStates:          make(map[string]int),
 		flatLabelTripCounts: make(map[string]int),
 		labelStats:          make(map[string]*numericAccumulator),
+		booleanStats:        make(map[string]*booleanAccumulator),
 		weatherTypes:        newCategoricalAccumulator(),
 		timeOfDay:           newCategoricalAccumulator(),
 		vehicleModels:       newCategoricalAccumulator(),
@@ -327,6 +409,18 @@ func (a *summaryAccumulator) addSample(label map[string]any) {
 			}
 		}
 	}
+	for key, rawKey := range trackedBooleanFields {
+		value, ok := booleanField(label[rawKey])
+		if !ok {
+			continue
+		}
+		acc := a.booleanStats[key]
+		if acc == nil {
+			acc = &booleanAccumulator{}
+			a.booleanStats[key] = acc
+		}
+		acc.add(value)
+	}
 	if isStoppedLabelValue(label["isStopped"]) {
 		a.stoppedSampleCount++
 	} else {
@@ -339,6 +433,10 @@ func (a *summaryAccumulator) summary() DatasetReportSummary {
 	labelStats := make(map[string]NumericSummary, len(a.labelStats))
 	for key, acc := range a.labelStats {
 		labelStats[key] = acc.summary()
+	}
+	booleanStats := make(map[string]BooleanSummary, len(a.booleanStats))
+	for key, acc := range a.booleanStats {
+		booleanStats[key] = acc.summary()
 	}
 
 	clipSummary := DeltaSpeedClipSummary{ClipValue: a.clipValue}
@@ -403,6 +501,7 @@ func (a *summaryAccumulator) summary() DatasetReportSummary {
 		TripStates:          tripStates,
 		FlatLabelTripCounts: flatTripCounts,
 		LabelStats:          labelStats,
+		BooleanStats:        booleanStats,
 		DeltaSpeedClip:      clipSummary,
 		Diversity:           diversity,
 	}
@@ -699,6 +798,7 @@ func buildTripDatasetReport(ctx tripContext, deltaSpeedClip float64) (TripDatase
 		StoppedSampleShare: summary.StoppedSampleShare,
 		FlatLabels:         flatLabels,
 		LabelStats:         summary.LabelStats,
+		BooleanStats:       summary.BooleanStats,
 		DeltaSpeedClip:     summary.DeltaSpeedClip,
 		Warnings:           warnings,
 	}, rawLabels, nil

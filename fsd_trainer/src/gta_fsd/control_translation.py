@@ -9,6 +9,7 @@ except ImportError:
 
 CONTROL_SEMANTICS_CONTROLLER_INPUT = "controller_input"
 CONTROL_SEMANTICS_SPEED_DELTA = "speed_delta"
+CONTROL_SEMANTICS_TARGET_SPEED = "target_speed"
 CONTROL_SEMANTICS_VEHICLE_STATE = "vehicle_state"
 
 DEFAULT_VEHICLE_STATE_STEER_GAIN = 12.0
@@ -18,6 +19,8 @@ DEFAULT_VEHICLE_STATE_ACCEL_GAIN = 2.0
 DEFAULT_VEHICLE_STATE_ACCEL_DEADBAND = 0.05
 DEFAULT_SPEED_DELTA_GAIN = 1.0
 DEFAULT_SPEED_DELTA_DEADBAND = 0.02
+DEFAULT_TARGET_SPEED_ERROR_GAIN = 0.5
+DEFAULT_TARGET_SPEED_ERROR_DEADBAND = 0.05
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -28,6 +31,8 @@ def translate_control_prediction(
     steering: float,
     acceleration: float,
     control_semantics: str,
+    *,
+    current_speed: float | None = None,
 ) -> dict[str, Any]:
     semantics = str(control_semantics or "").strip() or CONTROL_SEMANTICS_CONTROLLER_INPUT
     raw_steer = float(steering)
@@ -49,6 +54,32 @@ def translate_control_prediction(
                 "mode": CONTROL_SEMANTICS_SPEED_DELTA,
                 "delta_speed_gain": DEFAULT_SPEED_DELTA_GAIN,
                 "delta_speed_deadband": DEFAULT_SPEED_DELTA_DEADBAND,
+            },
+        }
+
+    if semantics == CONTROL_SEMANTICS_TARGET_SPEED:
+        if current_speed is None:
+            raise ValueError("current_speed is required for target_speed control semantics")
+
+        translated_steer = clamp(raw_steer, -1.0, 1.0)
+        speed_error = raw_accel - float(current_speed)
+        signed_accel = clamp(speed_error * DEFAULT_TARGET_SPEED_ERROR_GAIN, -1.0, 1.0)
+        if abs(signed_accel) < DEFAULT_TARGET_SPEED_ERROR_DEADBAND:
+            signed_accel = 0.0
+
+        return {
+            "input_mode": INPUT_MODE_NORMALIZED,
+            "steering": translated_steer,
+            "acceleration": signed_accel,
+            "throttle": max(signed_accel, 0.0),
+            "brake": max(-signed_accel, 0.0),
+            "translation": {
+                "mode": CONTROL_SEMANTICS_TARGET_SPEED,
+                "current_speed": float(current_speed),
+                "target_speed": raw_accel,
+                "speed_error": speed_error,
+                "target_speed_error_gain": DEFAULT_TARGET_SPEED_ERROR_GAIN,
+                "target_speed_deadband": DEFAULT_TARGET_SPEED_ERROR_DEADBAND,
             },
         }
 

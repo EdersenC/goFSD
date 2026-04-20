@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import io
 import json
 import threading
 import tomllib
@@ -14,8 +13,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import torch
-from PIL import Image
-from torchvision import transforms
 
 from control_client import (
     INPUT_MODE_MODEL_RAW,
@@ -25,10 +22,12 @@ from control_client import (
 from control_translation import (
     CONTROL_SEMANTICS_CONTROLLER_INPUT,
     CONTROL_SEMANTICS_SPEED_DELTA,
+    CONTROL_SEMANTICS_TARGET_SPEED,
     translate_control_prediction,
 )
 from control_client import build_control_command
 from heads import HeadSpec, head_layout_metadata, head_specs_metadata, resolve_checkpoint_head_specs
+from image_io import load_rgb_tensor_from_bytes, load_rgb_tensor_from_path
 from inference import (
     DEFAULT_CONFIG_PATH,
     build_model,
@@ -159,6 +158,8 @@ def control_target_sources(head_specs: list[dict[str, Any]] | None) -> dict[str,
         name = str(item.get("name", "")).strip()
         if not name:
             continue
+        if not bool(item.get("used_for_control", False)):
+            continue
         target_source = str(item.get("target_source", "")).strip()
         if target_source:
             sources[name] = target_source
@@ -167,13 +168,16 @@ def control_target_sources(head_specs: list[dict[str, Any]] | None) -> dict[str,
 
 def control_semantics_from_sources(sources: Mapping[str, str]) -> str:
     steer_source = str(sources.get("steer", "")).lower()
+    future_speed_source = str(sources.get("future_speed", "")).lower()
     delta_speed_source = str(sources.get("delta_speed", "")).lower()
     accel_source = str(sources.get("accel", "")).lower()
     if "steerinput" in steer_source and ("accelinput" in accel_source or "deltaspeedinput" in delta_speed_source):
         return CONTROL_SEMANTICS_CONTROLLER_INPUT
+    if "label.future_speed" in future_speed_source or "future_speed" in future_speed_source:
+        return CONTROL_SEMANTICS_TARGET_SPEED
     if "label.delta_speed" in delta_speed_source or "delta_speed" in delta_speed_source:
         return CONTROL_SEMANTICS_SPEED_DELTA
-    if steer_source or accel_source or delta_speed_source:
+    if steer_source or accel_source or delta_speed_source or future_speed_source:
         return "vehicle_state"
     return CONTROL_SEMANTICS_CONTROLLER_INPUT
 
@@ -200,11 +204,6 @@ class ModelRuntime:
         self._image_size = (224, 224)
         self._frame_count = 3
         self._frame_stride = 2
-        self._transform = self._build_transform(self._image_size)
-
-    def _build_transform(self, image_size: tuple[int, int]) -> transforms.Compose:
-        del image_size
-        return transforms.ToTensor()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -382,30 +381,14 @@ class ModelRuntime:
         image_path = Path(normalize_windows_drive_path(raw_path))
         if not image_path.is_file():
             raise FileNotFoundError(f"frame image not found: {image_path}")
-        with Image.open(image_path) as image_file:
-            image = image_file.convert("RGB")
-        self._validate_image_size(image, source=str(image_path))
-        return self._transform(image)
+        return load_rgb_tensor_from_path(image_path, self._image_size)
 
     def _load_image_from_base64(self, raw_value: Any) -> torch.Tensor:
         if not isinstance(raw_value, str) or not raw_value.strip():
             raise ValueError("frames_base64 entries must be non-empty strings")
         payload = raw_value.split(",", 1)[-1]
         image_bytes = base64.b64decode(payload)
-        with Image.open(io.BytesIO(image_bytes)) as image_file:
-            image = image_file.convert("RGB")
-        self._validate_image_size(image, source="frames_base64")
-        return self._transform(image)
-
-    def _validate_image_size(self, image: Image.Image, *, source: str) -> None:
-        expected_width, expected_height = self._image_size
-        actual_width, actual_height = image.size
-        if (actual_width, actual_height) != (expected_width, expected_height):
-            raise ValueError(
-                f"frame image has unexpected size for {source}: "
-                f"expected {expected_width}x{expected_height}, "
-                f"found {actual_width}x{actual_height}"
-            )
+        return load_rgb_tensor_from_bytes(image_bytes, self._image_size, source="frames_base64")
 
     def _extract_current_speed(
         self,
@@ -457,9 +440,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result = self.server.runtime.predict(payload)
                 control_outputs = result.get("control_outputs", {})
                 steer = float(control_outputs.get("steer", 0.0))
-                delta_speed = float(control_outputs.get("delta_speed", 0.0))
                 control_semantics = str(result.get("control_semantics") or CONTROL_SEMANTICS_CONTROLLER_INPUT)
-                translated = translate_control_prediction(steer, delta_speed, control_semantics)
+                longitudinal_output = float(
+                    control_outputs.get("future_speed", control_outputs.get("delta_speed", 0.0))
+                )
+                raw_state_inputs = result.get("raw_state_inputs", {})
+                current_speed = None
+                if isinstance(raw_state_inputs, dict) and CURRENT_SPEED_KEY in raw_state_inputs:
+                    current_speed = float(raw_state_inputs[CURRENT_SPEED_KEY])
+                translated = translate_control_prediction(
+                    steer,
+                    longitudinal_output,
+                    control_semantics,
+                    current_speed=current_speed,
+                )
                 sequence = self._read_int(payload.get("sequence"))
                 timestamp_ms = self._read_int(payload.get("timestamp_ms"))
                 command = build_control_command(

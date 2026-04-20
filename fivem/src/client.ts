@@ -13,6 +13,7 @@ log("[client] loaded");
 const sceneManager = new SceneManager();
 const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDrivingSceneVariant[];
 const canonicalInnerCitySceneName = "inner-city-driving:default";
+const innerCitySceneBaseLabel = "Inner City Driving";
 
 type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes" | "startEgo" | "stopEgo";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
@@ -36,7 +37,12 @@ type ControlTelemetryUpdate = {
 const TELEMETRY_INTERVAL_MS = 67;
 
 function registerInnerCityScenes() {
-    sceneManager.addScene(canonicalInnerCitySceneName, innerCityDrivingScenes.default);
+    for (const variant of innerCitySceneNames) {
+        const sceneName = variant === "default"
+            ? canonicalInnerCitySceneName
+            : `inner-city-driving:${variant}`;
+        sceneManager.addScene(sceneName, innerCityDrivingScenes[variant]);
+    }
 }
 
 function humanizeSceneVariant(variant: string): string {
@@ -46,10 +52,12 @@ function humanizeSceneVariant(variant: string): string {
 }
 
 function buildAvailableScenes(): AvailableScene[] {
-    return [{
-        name: canonicalInnerCitySceneName,
-        label: "Inner City Driving"
-    }];
+    return innerCitySceneNames.map((variant) => ({
+        name: variant === "default"
+            ? canonicalInnerCitySceneName
+            : `inner-city-driving:${variant}`,
+        label: `${innerCitySceneBaseLabel} - ${humanizeSceneVariant(variant)}`
+    }));
 }
 
 function publishAvailableScenes() {

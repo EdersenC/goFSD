@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 import torch
-from PIL import Image
 from torch import Tensor
 from torch.utils.data import Dataset
-from torchvision import transforms
 
 from heads import HEAD_SPECS, HeadSpec, build_targets_from_label
+from image_io import load_rgb_tensor_from_path
 from state_inputs import StateInputConfig, build_state_inputs_from_label, training_state_input_config
 
 
@@ -109,7 +108,6 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
         self.trips: list[Trip] = self._load_trips()
         self.samples: list[dict[str, Any]] = self._load_samples()
-        self.transform: Callable[[Image.Image], Tensor] = transforms.ToTensor()
 
     def _resolve_run_paths(
         self,
@@ -180,17 +178,7 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
         return len(self.samples)
 
     def _load_frame_tensor(self, frame_path: Path) -> Tensor:
-        expected_width, expected_height = self.image_size
-        with Image.open(frame_path) as image_file:
-            image = image_file.convert("RGB")
-        actual_width, actual_height = image.size
-        if (actual_width, actual_height) != (expected_width, expected_height):
-            raise ValueError(
-                "Frame image has unexpected size: "
-                f"expected {expected_width}x{expected_height}, "
-                f"found {actual_width}x{actual_height} at {frame_path}"
-            )
-        return self.transform(image)
+        return load_rgb_tensor_from_path(frame_path, self.image_size)
 
     def __getitem__(self, index: int) -> tuple[Tensor, DatasetStateInputs, DatasetTargets]:
         sample = self.samples[index]

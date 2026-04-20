@@ -5,7 +5,7 @@ from typing import Any, Mapping
 import torch
 from torch import Tensor
 
-from heads import HEAD_SPECS_BY_NAME, HeadSpec, control_head_specs, get_control_outputs, normalize_head_tensor
+from heads import HEAD_SPECS, HEAD_SPECS_BY_NAME, HeadSpec, control_head_specs, get_control_outputs, normalize_head_tensor
 from target_transforms import (
     DeltaSpeedTargetTransform,
     denormalize_delta_speed_tensor,
@@ -20,7 +20,7 @@ def control_tensor_from_output(
     delta_speed_transform: DeltaSpeedTargetTransform | None = None,
 ) -> Tensor:
     mapping = require_output_mapping(output)
-    resolved_head_specs = tuple(HEAD_SPECS_BY_NAME.values()) if head_specs is None else head_specs
+    resolved_head_specs = HEAD_SPECS if head_specs is None else head_specs
     resolved_delta_speed_transform = (
         legacy_delta_speed_target_transform() if delta_speed_transform is None else delta_speed_transform
     )
@@ -44,7 +44,7 @@ def single_prediction_from_output(
     delta_speed_transform: DeltaSpeedTargetTransform | None = None,
 ) -> dict[str, float | list[float]]:
     mapping = require_output_mapping(output)
-    resolved_head_specs = tuple(HEAD_SPECS_BY_NAME.values()) if head_specs is None else head_specs
+    resolved_head_specs = HEAD_SPECS if head_specs is None else head_specs
     keys = tuple(spec.name for spec in resolved_head_specs if spec.name in mapping)
     return single_tensor_mapping(mapping, keys=keys, delta_speed_transform=delta_speed_transform)
 
@@ -55,7 +55,7 @@ def single_control_prediction_from_output(
     head_specs: tuple[HeadSpec, ...] | None = None,
     delta_speed_transform: DeltaSpeedTargetTransform | None = None,
 ) -> dict[str, float | list[float]]:
-    resolved_head_specs = tuple(HEAD_SPECS_BY_NAME.values()) if head_specs is None else head_specs
+    resolved_head_specs = HEAD_SPECS if head_specs is None else head_specs
     return single_tensor_mapping(
         get_control_outputs(require_output_mapping(output), head_specs=resolved_head_specs),
         delta_speed_transform=delta_speed_transform,

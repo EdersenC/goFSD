@@ -5,8 +5,101 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from heads import HEAD_SPECS, HeadSpec
-from state_inputs import CURRENT_SPEED_KEY, StateInputConfig
+try:
+    from ..heads import HEAD_SPECS, HeadSpec
+    from ..state_inputs import CURRENT_SPEED_KEY, StateInputConfig
+except ImportError:
+    from heads import HEAD_SPECS, HeadSpec
+    from state_inputs import CURRENT_SPEED_KEY, StateInputConfig
+
+
+class ConvNormAct(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        kernel_size: int,
+        stride: int = 1,
+        padding: int | None = None,
+        activate: bool = True,
+    ) -> None:
+        super().__init__()
+        resolved_padding = kernel_size // 2 if padding is None else padding
+        self.conv = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=resolved_padding,
+            bias=False,
+        )
+        self.norm = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True) if activate else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.norm(x)
+        x = self.relu(x)
+        return x
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        stride: int = 1,
+    ) -> None:
+        super().__init__()
+        self.conv1 = ConvNormAct(in_channels, out_channels, kernel_size=3, stride=stride)
+        self.conv2 = ConvNormAct(out_channels, out_channels, kernel_size=3, activate=False)
+        if stride != 1 or in_channels != out_channels:
+            self.projection = ConvNormAct(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                stride=stride,
+                padding=0,
+                activate=False,
+            )
+        else:
+            self.projection = nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = self.projection(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        return self.relu(x + residual)
+
+
+class ResidualStage(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        block_count: int,
+        downsample_first: bool,
+    ) -> None:
+        super().__init__()
+        if block_count < 1:
+            raise ValueError("block_count must be > 0")
+        blocks: list[nn.Module] = [
+            ResidualBlock(
+                in_channels,
+                out_channels,
+                stride=2 if downsample_first else 1,
+            )
+        ]
+        for _ in range(1, block_count):
+            blocks.append(ResidualBlock(out_channels, out_channels))
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(x)
 
 
 class HeadBranch(nn.Module):
@@ -38,27 +131,21 @@ class DrivingCNN(nn.Module):
         self.head_specs = head_specs
         self.state_input_config = state_input_config or StateInputConfig()
 
-        self.conv1 = nn.Conv2d(in_channels=self.input_channels, out_channels=64, kernel_size=5, stride=2, padding=2)
-        self.relu1 = nn.ReLU()
+        self.stem = ConvNormAct(
+            in_channels=self.input_channels,
+            out_channels=64,
+            kernel_size=7,
+            stride=2,
+            padding=3,
+        )
+        self.stem_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.stage1 = ResidualStage(64, 64, block_count=2, downsample_first=False)
+        self.stage2 = ResidualStage(64, 128, block_count=2, downsample_first=True)
+        self.stage3 = ResidualStage(128, 256, block_count=2, downsample_first=True)
 
-        self.conv2 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=5, stride=2, padding=2)
-        self.relu2 = nn.ReLU()
-
-        self.conv3 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
-        self.relu3 = nn.ReLU()
-
-        self.conv4 = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=1)
-        self.relu4 = nn.ReLU()
-
-        self.conv5 = nn.Conv2d(in_channels=256, out_channels=384, kernel_size=3, stride=1, padding=1)
-        self.relu5 = nn.ReLU()
-
-        self.conv6 = nn.Conv2d(in_channels=384, out_channels=384, kernel_size=3, stride=1, padding=1)
-        self.relu6 = nn.ReLU()
-
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool = nn.AdaptiveAvgPool2d((2, 2))
         self.flatten = nn.Flatten()
-        self.shared_fc = nn.Linear(in_features=384, out_features=256)
+        self.shared_fc = nn.Linear(in_features=256 * 2 * 2, out_features=256)
         self.shared_relu = nn.ReLU()
         if self.state_input_config.current_speed_enabled:
             self.current_speed_encoder = nn.Sequential(
@@ -75,23 +162,11 @@ class DrivingCNN(nn.Module):
             self.heads[spec.name] = HeadBranch(spec.output_dim, in_features=in_features)
 
     def forward(self, x: torch.Tensor, current_speed: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
-        x = self.conv1(x)
-        x = self.relu1(x)
-
-        x = self.conv2(x)
-        x = self.relu2(x)
-
-        x = self.conv3(x)
-        x = self.relu3(x)
-
-        x = self.conv4(x)
-        x = self.relu4(x)
-
-        x = self.conv5(x)
-        x = self.relu5(x)
-
-        x = self.conv6(x)
-        x = self.relu6(x)
+        x = self.stem(x)
+        x = self.stem_pool(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
 
         x = self.pool(x)
         x = self.flatten(x)
@@ -120,3 +195,8 @@ class DrivingCNN(nn.Module):
                 head_output = head_output.squeeze(-1)
             outputs[spec.name] = head_output
         return outputs
+
+    @property
+    def conv1(self) -> nn.Conv2d:
+        # Preserve the legacy inspection path without registering the same module twice.
+        return self.stem.conv

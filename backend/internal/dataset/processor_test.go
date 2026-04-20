@@ -90,14 +90,20 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	if samples[0].Label["acceleration"] != nil {
 		t.Fatalf("expected raw acceleration to be dropped, label=%+v", samples[0].Label)
 	}
-	if samples[0].Label["delta_speed"] != 1.5 {
+	if samples[0].Label["delta_speed"] != 0.75 {
 		t.Fatalf("unexpected delta_speed: %+v", samples[0].Label)
 	}
-	if samples[0].Label["delta_speed_target"] != 0.75 {
+	if samples[0].Label["delta_speed_target"] != 0.375 {
 		t.Fatalf("unexpected delta_speed_target: %+v", samples[0].Label)
 	}
 	if samples[0].Label["future_speed"] != 6.0 {
 		t.Fatalf("unexpected future_speed: %+v", samples[0].Label)
+	}
+	if samples[0].Label["future_speed_target"] != 5.25 {
+		t.Fatalf("unexpected future_speed_target: %+v", samples[0].Label)
+	}
+	if samples[0].Label["future_steer"] != 0.32 {
+		t.Fatalf("unexpected future_steer: %+v", samples[0].Label)
 	}
 }
 
@@ -315,7 +321,24 @@ func TestShouldSkipDatasetOnlyProcessing(t *testing.T) {
 	}
 }
 
-func TestBuildTrainingLabelDropsAccelerationAndAddsDeltaSpeed(t *testing.T) {
+func TestSmoothedFutureSpeedUsesAvailableNeighbors(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.2, Label: map[string]any{"currentSpeed": 4.0}},
+		{RelativeSeconds: 0.4, Label: map[string]any{"currentSpeed": 6.0}},
+		{RelativeSeconds: 0.6, Label: map[string]any{"currentSpeed": 8.0}},
+		{RelativeSeconds: 0.8, Label: map[string]any{"currentSpeed": 10.0}},
+	}
+
+	got, ok := smoothedFutureSpeed(labels, 1, 2)
+	if !ok {
+		t.Fatal("expected smoothedFutureSpeed to succeed")
+	}
+	if got != 7.0 {
+		t.Fatalf("unexpected smoothed future speed: got=%v want=7.0", got)
+	}
+}
+
+func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 	current := map[string]any{
 		"time":         400.0,
 		"Steering":     0.1,
@@ -329,7 +352,7 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsDeltaSpeed(t *testing.T) {
 		"acceleration": 0.5,
 	}
 
-	derived, ok := buildTrainingLabel(current, future, 2.0, true)
+	derived, ok := buildTrainingLabel(current, future, 5.25, 2.0, true)
 	if !ok {
 		t.Fatal("expected training label to be derived")
 	}
@@ -339,14 +362,20 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsDeltaSpeed(t *testing.T) {
 	if derived["currentSpeed"] != 4.0 {
 		t.Fatalf("unexpected currentSpeed in derived label: %+v", derived)
 	}
-	if derived["delta_speed"] != 2.0 {
+	if derived["delta_speed"] != 1.25 {
 		t.Fatalf("unexpected delta_speed in derived label: %+v", derived)
 	}
-	if derived["delta_speed_target"] != 1.0 {
+	if derived["delta_speed_target"] != 0.625 {
 		t.Fatalf("unexpected delta_speed_target in derived label: %+v", derived)
 	}
 	if derived["future_speed"] != 6.5 {
 		t.Fatalf("unexpected future_speed in derived label: %+v", derived)
+	}
+	if derived["future_speed_target"] != 5.25 {
+		t.Fatalf("unexpected future_speed_target in derived label: %+v", derived)
+	}
+	if derived["future_steer"] != 0.2 {
+		t.Fatalf("unexpected future_steer in derived label: %+v", derived)
 	}
 }
 
@@ -528,14 +557,20 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &sample); err != nil {
 		t.Fatalf("parse dataset sample: %v", err)
 	}
-	if sample.Label["delta_speed"] != 2.0 {
+	if sample.Label["delta_speed"] != 1.0 {
 		t.Fatalf("unexpected delta_speed in rewritten dataset: %+v", sample.Label)
 	}
-	if sample.Label["delta_speed_target"] != 1.0 {
+	if sample.Label["delta_speed_target"] != 0.5 {
 		t.Fatalf("unexpected delta_speed_target in rewritten dataset: %+v", sample.Label)
 	}
 	if sample.Label["future_speed"] != 6.0 {
 		t.Fatalf("unexpected future_speed in rewritten dataset: %+v", sample.Label)
+	}
+	if sample.Label["future_speed_target"] != 5.0 {
+		t.Fatalf("unexpected future_speed_target in rewritten dataset: %+v", sample.Label)
+	}
+	if sample.Label["future_steer"] != 0.2 {
+		t.Fatalf("unexpected future_steer in rewritten dataset: %+v", sample.Label)
 	}
 	if sample.Label["acceleration"] != nil {
 		t.Fatalf("expected rewritten dataset to omit acceleration: %+v", sample.Label)

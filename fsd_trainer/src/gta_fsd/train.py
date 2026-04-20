@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
+import os
+import sys
 import time
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +17,7 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset as TorchDataset, Subset
 
 from config import (
     DEFAULT_IMAGE_HEIGHT,
@@ -44,6 +48,12 @@ from target_transforms import (
 
 
 MetricPayload = dict[str, Any]
+
+
+try:
+    import psutil  # type: ignore[import-not-found]
+except ImportError:
+    psutil = None
 
 
 @dataclass(frozen=True)
@@ -79,11 +89,17 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class LoaderConfig:
-    batch_size: int
-    num_workers: int
-    pin_memory: bool
-    prefetch_factor: int
-    persistent_workers: bool
+    train_batch_size: int
+    train_num_workers: int
+    train_pin_memory: bool
+    train_prefetch_factor: int
+    train_persistent_workers: bool
+    val_batch_size: int
+    val_num_workers: int
+    val_pin_memory: bool
+    val_prefetch_factor: int
+    val_persistent_workers: bool
+    log_every_n_batches: int
     val_split: float
     cpu_batch_size: int
 
@@ -105,8 +121,7 @@ class TrainingContext:
     data_root: Path
     train_dataset: FsdDataset
     val_dataset: FsdDataset
-    train_loader: DataLoader[tuple[Tensor, DatasetTargets]]
-    val_loader: DataLoader[tuple[Tensor, DatasetTargets]]
+    val_subset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]
     selected_val_trip_count: int
     total_val_trip_count: int
     head_specs: tuple[HeadSpec, ...]
@@ -140,6 +155,25 @@ class EpochResult:
     train_epoch_time: float
     val_epoch_time: float
     avg_batch_time: float
+    avg_loader_wait_time: float
+    avg_h2d_time: float
+    avg_forward_backward_time: float
+    avg_optimizer_time: float
+    avg_iteration_time: float
+    memory_snapshots: dict[str, dict[str, float | None]]
+
+
+@dataclass(frozen=True)
+class BatchTiming:
+    loader_wait_s: float
+    h2d_s: float
+    forward_backward_s: float
+    optimizer_s: float
+    step_s: float
+
+    @property
+    def iteration_s(self) -> float:
+        return self.loader_wait_s + self.step_s
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "train_config.toml"
@@ -166,6 +200,12 @@ def load_config(path: Path) -> TrainConfig:
     data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
     train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
     val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
+
+    legacy_batch_size = loader_raw.get("batch_size", loader_raw["cpu_batch_size"])
+    legacy_num_workers = loader_raw.get("num_workers", 0)
+    legacy_pin_memory = loader_raw.get("pin_memory", False)
+    legacy_prefetch_factor = loader_raw.get("prefetch_factor", 1)
+    legacy_persistent_workers = loader_raw.get("persistent_workers", False)
 
     return TrainConfig(
         dataset=DatasetConfig(
@@ -195,11 +235,21 @@ def load_config(path: Path) -> TrainConfig:
             },
         ),
         loader=LoaderConfig(
-            batch_size=int(loader_raw["batch_size"]),
-            num_workers=int(loader_raw["num_workers"]),
-            pin_memory=bool(loader_raw["pin_memory"]),
-            prefetch_factor=int(loader_raw["prefetch_factor"]),
-            persistent_workers=bool(loader_raw["persistent_workers"]),
+            train_batch_size=int(loader_raw.get("train_batch_size", legacy_batch_size)),
+            train_num_workers=int(loader_raw.get("train_num_workers", legacy_num_workers)),
+            train_pin_memory=bool(loader_raw.get("train_pin_memory", legacy_pin_memory)),
+            train_prefetch_factor=int(loader_raw.get("train_prefetch_factor", legacy_prefetch_factor)),
+            train_persistent_workers=bool(
+                loader_raw.get("train_persistent_workers", legacy_persistent_workers)
+            ),
+            val_batch_size=int(loader_raw.get("val_batch_size", legacy_batch_size)),
+            val_num_workers=int(loader_raw.get("val_num_workers", legacy_num_workers)),
+            val_pin_memory=bool(loader_raw.get("val_pin_memory", legacy_pin_memory)),
+            val_prefetch_factor=int(loader_raw.get("val_prefetch_factor", legacy_prefetch_factor)),
+            val_persistent_workers=bool(
+                loader_raw.get("val_persistent_workers", legacy_persistent_workers)
+            ),
+            log_every_n_batches=max(1, int(loader_raw.get("log_every_n_batches", 10))),
             val_split=float(loader_raw["val_split"]),
             cpu_batch_size=int(loader_raw["cpu_batch_size"]),
         ),
@@ -262,6 +312,11 @@ def save_epoch_artifacts(
     train_epoch_time: float,
     val_epoch_time: float,
     avg_batch_time: float,
+    avg_loader_wait_time: float,
+    avg_h2d_time: float,
+    avg_forward_backward_time: float,
+    avg_optimizer_time: float,
+    avg_iteration_time: float,
     head_specs: tuple[HeadSpec, ...],
     state_input_config: StateInputConfig,
     delta_speed_transform: DeltaSpeedTargetTransform,
@@ -284,6 +339,11 @@ def save_epoch_artifacts(
         "train_epoch_s": train_epoch_time,
         "val_epoch_s": val_epoch_time,
         "avg_batch_s": avg_batch_time,
+        "avg_loader_wait_s": avg_loader_wait_time,
+        "avg_h2d_s": avg_h2d_time,
+        "avg_forward_backward_s": avg_forward_backward_time,
+        "avg_optimizer_s": avg_optimizer_time,
+        "avg_iteration_s": avg_iteration_time,
     }
     torch.save(checkpoint_payload, checkpoint_path)
     return {
@@ -302,6 +362,11 @@ def save_epoch_artifacts(
         "train_epoch_s": train_epoch_time,
         "val_epoch_s": val_epoch_time,
         "avg_batch_s": avg_batch_time,
+        "avg_loader_wait_s": avg_loader_wait_time,
+        "avg_h2d_s": avg_h2d_time,
+        "avg_forward_backward_s": avg_forward_backward_time,
+        "avg_optimizer_s": avg_optimizer_time,
+        "avg_iteration_s": avg_iteration_time,
     }
 
 
@@ -344,60 +409,38 @@ def probe_device(
         raise
 
 
-def build_loaders(
-    dataset: FsdDataset,
-    val_dataset: FsdDataset,
+def _build_phase_loader(
+    dataset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+    *,
     device: torch.device,
-    config: LoaderConfig,
-) -> tuple[
-    DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
-    DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
-    int,
-    int,
-]:
-    total_len = len(val_dataset)
-    if total_len <= 0:
-        raise ValueError("Validation dataset is empty")
-
-    val_subset, selected_val_trips, total_val_trips = build_validation_subset(val_dataset, config.val_split)
-
-    if device.type == "cuda":
-        prefetch_factor = config.prefetch_factor if config.num_workers > 0 else None
-        train_loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]] = DataLoader(
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
+    prefetch_factor: int,
+    persistent_workers: bool,
+    cpu_batch_size: int,
+) -> DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]]:
+    if device.type != "cuda":
+        return DataLoader(
             dataset=dataset,
-            batch_size=config.batch_size,
-            shuffle=True,
-            num_workers=config.num_workers,
-            pin_memory=config.pin_memory,
-            persistent_workers=config.persistent_workers and config.num_workers > 0,
-            prefetch_factor=prefetch_factor,
+            batch_size=cpu_batch_size,
+            shuffle=shuffle,
+            num_workers=0,
+            pin_memory=False,
         )
-        val_loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]] = DataLoader(
-            dataset=val_subset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            pin_memory=config.pin_memory,
-            persistent_workers=config.persistent_workers and config.num_workers > 0,
-            prefetch_factor=prefetch_factor,
-        )
-        return train_loader, val_loader, selected_val_trips, total_val_trips
 
-    train_loader = DataLoader(
+    resolved_num_workers = max(0, num_workers)
+    resolved_prefetch_factor = prefetch_factor if resolved_num_workers > 0 else None
+    return DataLoader(
         dataset=dataset,
-        batch_size=config.cpu_batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=False,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=resolved_num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers and resolved_num_workers > 0,
+        prefetch_factor=resolved_prefetch_factor,
     )
-    val_loader = DataLoader(
-        dataset=val_subset,
-        batch_size=config.cpu_batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-    )
-    return train_loader, val_loader, selected_val_trips, total_val_trips
 
 
 def build_validation_subset(
@@ -424,6 +467,106 @@ def build_validation_subset(
         subset_indices.extend(trip_indices[trip_index])
 
     return Subset(dataset, subset_indices), selected_trip_count, total_trip_count
+
+
+def _loader_dataset_len(dataset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]) -> int:
+    return len(dataset)
+
+
+def _process_rss_bytes() -> int | None:
+    if psutil is not None:
+        return int(psutil.Process(os.getpid()).memory_info().rss)
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t),
+                ]
+
+            counters = PROCESS_MEMORY_COUNTERS_EX()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            ok = ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb)
+            if ok:
+                return int(counters.WorkingSetSize)
+        except Exception:
+            return None
+        return None
+
+    if sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        except Exception:
+            return None
+    return None
+
+
+def _memory_snapshot(device: torch.device) -> dict[str, float | None]:
+    process_rss_bytes = _process_rss_bytes()
+    snapshot: dict[str, float | None] = {
+        "process_rss_mb": None if process_rss_bytes is None else process_rss_bytes / (1024.0 * 1024.0),
+        "cuda_allocated_mb": None,
+        "cuda_reserved_mb": None,
+        "cuda_max_allocated_mb": None,
+        "cuda_max_reserved_mb": None,
+    }
+    if device.type == "cuda":
+        snapshot.update({
+            "cuda_allocated_mb": torch.cuda.memory_allocated(device) / (1024.0 * 1024.0),
+            "cuda_reserved_mb": torch.cuda.memory_reserved(device) / (1024.0 * 1024.0),
+            "cuda_max_allocated_mb": torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0),
+            "cuda_max_reserved_mb": torch.cuda.max_memory_reserved(device) / (1024.0 * 1024.0),
+        })
+    return snapshot
+
+
+def _format_memory_snapshot(label: str, snapshot: dict[str, float | None]) -> str:
+    parts = [label]
+    for key in ("process_rss_mb", "cuda_allocated_mb", "cuda_reserved_mb", "cuda_max_allocated_mb", "cuda_max_reserved_mb"):
+        value = snapshot.get(key)
+        if value is not None:
+            parts.append(f"{key}={value:.1f}")
+    return " ".join(parts)
+
+
+def _shutdown_loader_iterator(
+    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None,
+) -> None:
+    if loader_iter is None:
+        return
+    shutdown = getattr(loader_iter, "_shutdown_workers", None)
+    if callable(shutdown):
+        shutdown()
+
+
+def _release_phase_resources(
+    device: torch.device,
+    *,
+    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None,
+    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None,
+) -> None:
+    _shutdown_loader_iterator(loader_iter)
+    del loader_iter
+    del loader
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def _empty_metric_totals(head_specs: tuple[HeadSpec, ...]) -> dict[str, Any]:
@@ -457,6 +600,30 @@ def _mean_or_zero(total: float, count: int) -> float:
 
 def _rmse_or_zero(total: float, count: int) -> float:
     return 0.0 if count <= 0 else float((total / count) ** 0.5)
+
+
+def _empty_timing_totals() -> dict[str, float]:
+    return {
+        "loader_wait_s": 0.0,
+        "h2d_s": 0.0,
+        "forward_backward_s": 0.0,
+        "optimizer_s": 0.0,
+        "step_s": 0.0,
+        "iteration_s": 0.0,
+    }
+
+
+def _update_timing_totals(totals: dict[str, float], timing: BatchTiming) -> None:
+    totals["loader_wait_s"] += timing.loader_wait_s
+    totals["h2d_s"] += timing.h2d_s
+    totals["forward_backward_s"] += timing.forward_backward_s
+    totals["optimizer_s"] += timing.optimizer_s
+    totals["step_s"] += timing.step_s
+    totals["iteration_s"] += timing.iteration_s
+
+
+def _mean_timing(total: float, batch_count: int) -> float:
+    return 0.0 if batch_count <= 0 else total / batch_count
 
 
 def _move_targets_to_device(
@@ -667,15 +834,18 @@ def train_batch(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
-) -> tuple[float, float, dict[str, Any]]:
-    batch_start = time.perf_counter()
+) -> tuple[float, BatchTiming, dict[str, Any]]:
+    step_start = time.perf_counter()
+    transfer_start = time.perf_counter()
     x_batch = x_batch.to(device, non_blocking=device.type == "cuda", memory_format=torch.channels_last)
     state_inputs = _move_state_inputs_to_device(state_inputs, device)
     y_batch = _move_targets_to_device(targets, device, head_specs)
+    h2d_time = time.perf_counter() - transfer_start
 
     optimizer.zero_grad(set_to_none=True)
 
     batch_totals = _empty_metric_totals(head_specs)
+    forward_backward_start = time.perf_counter()
     with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
         model_output = model(x_batch, current_speed=state_inputs.get(CURRENT_SPEED_KEY))
         loss = _compute_loss_and_update_totals(
@@ -688,13 +858,31 @@ def train_batch(
         )
 
     scaler.scale(loss).backward()
+    forward_backward_time = time.perf_counter() - forward_backward_start
+
+    optimizer_start = time.perf_counter()
     scaler.step(optimizer)
     scaler.update()
+    optimizer_time = time.perf_counter() - optimizer_start
 
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    timing = BatchTiming(
+        loader_wait_s=0.0,
+        h2d_s=h2d_time,
+        forward_backward_s=forward_backward_time,
+        optimizer_s=optimizer_time,
+        step_s=time.perf_counter() - step_start,
+    )
+    return float(loss.item()), timing, batch_totals
 
-    return float(loss.item()), time.perf_counter() - batch_start, batch_totals
+
+def format_batch_timing(timing: BatchTiming) -> str:
+    return (
+        f"wait_s={timing.loader_wait_s:.3f} "
+        f"batch_s={timing.step_s:.3f} "
+        f"h2d_s={timing.h2d_s:.3f} "
+        f"fwd_bwd_s={timing.forward_backward_s:.3f} "
+        f"opt_s={timing.optimizer_s:.3f}"
+    )
 
 
 def train_epoch(
@@ -705,47 +893,77 @@ def train_epoch(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
-) -> tuple[MetricPayload, float, float]:
+    log_every_n_batches: int,
+) -> tuple[MetricPayload, float, dict[str, float]]:
     epoch_start = time.perf_counter()
     model.train()
     totals = _empty_metric_totals(head_specs)
-    total_batch_time = 0.0
+    timing_totals = _empty_timing_totals()
+    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None
+    total_batches = len(loader)
 
-    for batch_index, (x_batch, state_inputs, targets) in enumerate(loader, start=1):
-        if batch_index == 1:
-            state_input_shapes = {name: tuple(value.shape) for name, value in state_inputs.items()}
-            target_shapes = {name: tuple(value.shape) for name, value in targets.items()}
-            print(
-                "first_train_batch "
-                f"x_shape={tuple(x_batch.shape)} "
-                f"state_input_shapes={state_input_shapes} "
-                f"target_shapes={target_shapes} "
-                f"dtype={x_batch.dtype}"
+    try:
+        loader_iter = iter(loader)
+        for batch_index in range(1, total_batches + 1):
+            wait_start = time.perf_counter()
+            x_batch, state_inputs, targets = next(loader_iter)
+            loader_wait_time = time.perf_counter() - wait_start
+            if batch_index == 1:
+                state_input_shapes = {name: tuple(value.shape) for name, value in state_inputs.items()}
+                target_shapes = {name: tuple(value.shape) for name, value in targets.items()}
+                print(
+                    "first_train_batch "
+                    f"x_shape={tuple(x_batch.shape)} "
+                    f"state_input_shapes={state_input_shapes} "
+                    f"target_shapes={target_shapes} "
+                    f"dtype={x_batch.dtype}"
+                )
+            batch_loss, batch_timing, batch_totals = train_batch(
+                x_batch,
+                state_inputs,
+                targets,
+                model,
+                optimizer,
+                scaler,
+                device,
+                head_specs,
+                delta_speed_transform,
             )
-        batch_loss, batch_time, batch_totals = train_batch(
-            x_batch,
-            state_inputs,
-            targets,
-            model,
-            optimizer,
-            scaler,
-            device,
-            head_specs,
-            delta_speed_transform,
-        )
-        total_batch_time += batch_time
-        _merge_metric_totals(totals, batch_totals)
-        print(
-            f"batch={batch_index}/{len(loader)} "
-            f"loss={batch_loss:.6f} "
-            f"batch_s={batch_time:.3f} "
-            f"weighted_heads={format_batch_weighted_losses(batch_totals, head_specs)}"
-        )
+            batch_timing = BatchTiming(
+                loader_wait_s=loader_wait_time,
+                h2d_s=batch_timing.h2d_s,
+                forward_backward_s=batch_timing.forward_backward_s,
+                optimizer_s=batch_timing.optimizer_s,
+                step_s=batch_timing.step_s,
+            )
+            _update_timing_totals(timing_totals, batch_timing)
+            _merge_metric_totals(totals, batch_totals)
+            should_log = (
+                batch_index == 1
+                or batch_index == total_batches
+                or batch_index % log_every_n_batches == 0
+            )
+            if should_log:
+                print(
+                    f"batch={batch_index}/{total_batches} "
+                    f"loss={batch_loss:.6f} "
+                    f"{format_batch_timing(batch_timing)} "
+                    f"weighted_heads={format_batch_weighted_losses(batch_totals, head_specs)}"
+                )
+    finally:
+        _shutdown_loader_iterator(loader_iter)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
     epoch_time = time.perf_counter() - epoch_start
     metrics = finalize_metrics(totals, head_specs)
-    avg_batch_time = total_batch_time / int(totals["batch_count"]) if int(totals["batch_count"]) > 0 else 0.0
-    return metrics, epoch_time, avg_batch_time
+    batch_count = int(totals["batch_count"])
+    avg_timings = {
+        key: _mean_timing(total, batch_count)
+        for key, total in timing_totals.items()
+    }
+    return metrics, epoch_time, avg_timings
 
 
 def _merge_metric_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -790,21 +1008,26 @@ def evaluate_epoch(
     model.eval()
     totals = _empty_metric_totals(head_specs)
 
-    with torch.no_grad():
-        for x_batch, state_inputs, targets in loader:
-            x_batch = x_batch.to(device, non_blocking=device.type == "cuda")
-            state_inputs = _move_state_inputs_to_device(state_inputs, device)
-            y_batch = _move_targets_to_device(targets, device, head_specs)
-            with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                model_output = model(x_batch, current_speed=state_inputs.get(CURRENT_SPEED_KEY))
-                _compute_loss_and_update_totals(
-                    model_output,
-                    y_batch,
-                    totals,
-                    sample_count=int(x_batch.shape[0]),
-                    head_specs=head_specs,
-                    delta_speed_transform=delta_speed_transform,
-                )
+    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None
+    try:
+        loader_iter = iter(loader)
+        with torch.no_grad():
+            for x_batch, state_inputs, targets in loader_iter:
+                x_batch = x_batch.to(device, non_blocking=device.type == "cuda", memory_format=torch.channels_last)
+                state_inputs = _move_state_inputs_to_device(state_inputs, device)
+                y_batch = _move_targets_to_device(targets, device, head_specs)
+                with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+                    model_output = model(x_batch, current_speed=state_inputs.get(CURRENT_SPEED_KEY))
+                    _compute_loss_and_update_totals(
+                        model_output,
+                        y_batch,
+                        totals,
+                        sample_count=int(x_batch.shape[0]),
+                        head_specs=head_specs,
+                        delta_speed_transform=delta_speed_transform,
+                    )
+    finally:
+        _shutdown_loader_iterator(loader_iter)
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -849,8 +1072,22 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
         "train_sample_shape": list(context.train_sample_shape),
         "train_state_input_shapes": {name: list(shape) for name, shape in context.train_state_input_shapes.items()},
         "train_target_shapes": {name: list(shape) for name, shape in context.train_target_shapes.items()},
-        "train_loader_samples": len(context.train_loader.dataset),
-        "validation_loader_samples": len(context.val_loader.dataset),
+        "train_loader_samples": len(context.train_dataset),
+        "validation_loader_samples": _loader_dataset_len(context.val_subset),
+        "loader": {
+            "train_batch_size": context.config.loader.train_batch_size,
+            "train_num_workers": context.config.loader.train_num_workers,
+            "train_pin_memory": context.config.loader.train_pin_memory,
+            "train_prefetch_factor": context.config.loader.train_prefetch_factor,
+            "train_persistent_workers": context.config.loader.train_persistent_workers,
+            "val_batch_size": context.config.loader.val_batch_size,
+            "val_num_workers": context.config.loader.val_num_workers,
+            "val_pin_memory": context.config.loader.val_pin_memory,
+            "val_prefetch_factor": context.config.loader.val_prefetch_factor,
+            "val_persistent_workers": context.config.loader.val_persistent_workers,
+            "cpu_batch_size": context.config.loader.cpu_batch_size,
+            "log_every_n_batches": context.config.loader.log_every_n_batches,
+        },
         "epochs_total": context.config.training.epochs,
         "early_stopping": {
             "metric": context.config.training.early_stopping_metric,
@@ -916,11 +1153,9 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
-    train_loader, val_loader, selected_val_trip_count, total_val_trip_count = build_loaders(
-        train_dataset,
+    val_subset, selected_val_trip_count, total_val_trip_count = build_validation_subset(
         val_dataset,
-        device,
-        config.loader,
+        config.loader.val_split,
     )
     run_dir, run_metrics_path = prepare_output_paths(Path(config.output.base_dir))
     optimizer = torch.optim.Adam(model.parameters(), lr=config.training.learning_rate)
@@ -934,8 +1169,7 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         data_root=data_root,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        train_loader=train_loader,
-        val_loader=val_loader,
+        val_subset=val_subset,
         selected_val_trip_count=selected_val_trip_count,
         total_val_trip_count=total_val_trip_count,
         head_specs=head_specs,
@@ -965,29 +1199,77 @@ def create_early_stopping(config: TrainingConfig, head_specs: tuple[HeadSpec, ..
 
 
 def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
-    train_metrics, train_epoch_time, avg_batch_time = train_epoch(
-        context.train_loader,
-        context.optimizer,
-        context.model,
-        context.scaler,
-        context.device,
-        context.head_specs,
-        context.delta_speed_transform,
+    memory_snapshots: dict[str, dict[str, float | None]] = {}
+    memory_snapshots["train_start"] = _memory_snapshot(context.device)
+    print(_format_memory_snapshot("memory train_start", memory_snapshots["train_start"]))
+
+    train_loader = _build_phase_loader(
+        context.train_dataset,
+        device=context.device,
+        batch_size=context.config.loader.train_batch_size,
+        shuffle=True,
+        num_workers=context.config.loader.train_num_workers,
+        pin_memory=context.config.loader.train_pin_memory,
+        prefetch_factor=context.config.loader.train_prefetch_factor,
+        persistent_workers=context.config.loader.train_persistent_workers,
+        cpu_batch_size=context.config.loader.cpu_batch_size,
     )
-    val_metrics, val_epoch_time = evaluate_epoch(
-        context.val_loader,
-        context.model,
-        context.device,
-        context.head_specs,
-        context.delta_speed_transform,
+    try:
+        train_metrics, train_epoch_time, avg_timings = train_epoch(
+            train_loader,
+            context.optimizer,
+            context.model,
+            context.scaler,
+            context.device,
+            context.head_specs,
+            context.delta_speed_transform,
+            context.config.loader.log_every_n_batches,
+        )
+    finally:
+        _release_phase_resources(context.device, loader=train_loader)
+
+    memory_snapshots["train_end"] = _memory_snapshot(context.device)
+    print(_format_memory_snapshot("memory train_end", memory_snapshots["train_end"]))
+    memory_snapshots["val_start"] = _memory_snapshot(context.device)
+    print(_format_memory_snapshot("memory val_start", memory_snapshots["val_start"]))
+
+    val_loader = _build_phase_loader(
+        context.val_subset,
+        device=context.device,
+        batch_size=context.config.loader.val_batch_size,
+        shuffle=False,
+        num_workers=context.config.loader.val_num_workers,
+        pin_memory=context.config.loader.val_pin_memory,
+        prefetch_factor=context.config.loader.val_prefetch_factor,
+        persistent_workers=context.config.loader.val_persistent_workers,
+        cpu_batch_size=context.config.loader.cpu_batch_size,
     )
+    try:
+        val_metrics, val_epoch_time = evaluate_epoch(
+            val_loader,
+            context.model,
+            context.device,
+            context.head_specs,
+            context.delta_speed_transform,
+        )
+    finally:
+        _release_phase_resources(context.device, loader=val_loader)
+
+    memory_snapshots["val_end"] = _memory_snapshot(context.device)
+    print(_format_memory_snapshot("memory val_end", memory_snapshots["val_end"]))
     return EpochResult(
         epoch_index=epoch_index,
         train_metrics=train_metrics,
         val_metrics=val_metrics,
         train_epoch_time=train_epoch_time,
         val_epoch_time=val_epoch_time,
-        avg_batch_time=avg_batch_time,
+        avg_batch_time=avg_timings["step_s"],
+        avg_loader_wait_time=avg_timings["loader_wait_s"],
+        avg_h2d_time=avg_timings["h2d_s"],
+        avg_forward_backward_time=avg_timings["forward_backward_s"],
+        avg_optimizer_time=avg_timings["optimizer_s"],
+        avg_iteration_time=avg_timings["iteration_s"],
+        memory_snapshots=memory_snapshots,
     )
 
 
@@ -1027,6 +1309,11 @@ def record_epoch(
         train_epoch_time=epoch_result.train_epoch_time,
         val_epoch_time=epoch_result.val_epoch_time,
         avg_batch_time=epoch_result.avg_batch_time,
+        avg_loader_wait_time=epoch_result.avg_loader_wait_time,
+        avg_h2d_time=epoch_result.avg_h2d_time,
+        avg_forward_backward_time=epoch_result.avg_forward_backward_time,
+        avg_optimizer_time=epoch_result.avg_optimizer_time,
+        avg_iteration_time=epoch_result.avg_iteration_time,
         head_specs=context.head_specs,
         state_input_config=context.state_input_config,
         delta_speed_transform=context.delta_speed_transform,
@@ -1035,6 +1322,7 @@ def record_epoch(
     epoch_artifact["early_stopping_metric"] = early_stopping_state.metric_name
     epoch_artifact["early_stopping_value"] = monitored_value
     epoch_artifact["bad_epochs_in_a_row"] = early_stopping_state.bad_epoch_count
+    epoch_artifact["memory_snapshots"] = epoch_result.memory_snapshots
 
     epochs_list = run_summary["epochs"]
     assert isinstance(epochs_list, list)
@@ -1112,6 +1400,11 @@ def print_epoch_summary(
         f"train_epoch_s={epoch_result.train_epoch_time:.3f}",
         f"val_epoch_s={epoch_result.val_epoch_time:.3f}",
         f"avg_batch_s={epoch_result.avg_batch_time:.3f}",
+        f"avg_wait_s={epoch_result.avg_loader_wait_time:.3f}",
+        f"avg_h2d_s={epoch_result.avg_h2d_time:.3f}",
+        f"avg_fwd_bwd_s={epoch_result.avg_forward_backward_time:.3f}",
+        f"avg_opt_s={epoch_result.avg_optimizer_time:.3f}",
+        f"avg_iteration_s={epoch_result.avg_iteration_time:.3f}",
         f"elapsed_s={elapsed_s:.3f}",
         f"elapsed_hms={_format_elapsed_hms(elapsed_s)}",
         f"[{', '.join(status_parts)}]",
@@ -1132,7 +1425,7 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
         f"val_samples={len(context.val_dataset)} "
         f"val_trips={context.val_dataset.trip_count} "
         f"selected_val_trips={context.selected_val_trip_count}/{context.total_val_trip_count} "
-        f"(train={len(context.train_loader.dataset)}, val={len(context.val_loader.dataset)}) "
+        f"(train={len(context.train_dataset)}, val={_loader_dataset_len(context.val_subset)}) "
         f"run_dir={context.run_dir}"
     )
     print(

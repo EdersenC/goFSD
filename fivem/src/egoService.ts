@@ -167,6 +167,15 @@ export interface Ego {
     waypoints?: Route[]
 }
 
+type Vector3 = [number, number, number]
+
+const VehicleNodeFlags = {
+    OffRoad: 1 << 0,
+    Highway: 1 << 6,
+    Junction: 1 << 7,
+    TrafficLight: 1 << 8,
+} as const;
+
 export interface VehicleData {
     time: number
     currentSpeed: number
@@ -177,6 +186,52 @@ export interface VehicleData {
     yaw: number
     coords: [number, number, number]
     gps: [number, number, number]
+    velocityWorldX?: number
+    velocityWorldY?: number
+    velocityWorldZ?: number
+    velocityForward?: number
+    velocityLateral?: number
+    velocityVertical?: number
+    yawRate?: number
+    gear?: number
+    rpm?: number
+    engineHealth?: number
+    bodyHealth?: number
+    routeGpsValid?: boolean
+    routeDistance?: number
+    routeHeadingError?: number
+    routeForwardDelta?: number
+    routeLateralDelta?: number
+    roadNodeDistance?: number
+    roadNodeHeading?: number
+    roadNodeDensity?: number
+    roadLaneCountForward?: number
+    roadLaneCountBackward?: number
+    roadEdgeSpan?: number
+    isOnRoad?: boolean
+    isOffroadNode?: boolean
+    isInJunction?: boolean
+    hasTrafficLightNode?: boolean
+    isHighway?: boolean
+    nearbyVehicleCount30m?: number
+    nearbyPedCount20m?: number
+    hasLeadVehicle?: boolean
+    leadVehicleDistance?: number
+    leadVehicleRelativeSpeed?: number
+    leadVehicleTTC?: number
+    leadVehicleHeadingDelta?: number
+    streetNameHash?: number
+    crossingRoadHash?: number
+    isStoppedAtTrafficLights?: boolean
+    eventCollision?: boolean
+    eventOffroad?: boolean
+    eventWrongWay?: boolean
+    eventReversing?: boolean
+    eventHandbrake?: boolean
+    timeSinceSyncMs?: number
+    timeSinceChunkStartMs?: number
+    dataPointIndex?: number
+    chunkIndex?: number
 }
 
 export interface WaypointCompleted {
@@ -207,6 +262,7 @@ export class EgoService {
     public RunId: string = ''
     private baseEnvironment: Environment | null = null;
     private tripChunkIndex = 0;
+    private tripDataPointIndex = 0;
     private activeTripContext: {
         sceneId: string
         sceneVariant: string
@@ -237,6 +293,7 @@ export class EgoService {
         this.stopRequested = false;
         this.stopReason = "";
         this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
         this.activeTripContext = null;
         this.stopManagedLoops();
         if (this.oldEgo) {
@@ -282,6 +339,7 @@ export class EgoService {
         this.oldEgo = null;
         this.activeTripContext = null;
         this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
         SetPlayerInvincible(PlayerId(), false);
         this.makePlayerUnaware(PlayerPedId(), false);
     }
@@ -355,6 +413,7 @@ export class EgoService {
 
             try {
                 this.tripChunkIndex = 0;
+                this.tripDataPointIndex = 0;
                 const tripProfile = buildDeterministicTripProfile(
                     this.RunId,
                     sceneInfo.sceneId,
@@ -591,21 +650,30 @@ export class EgoService {
         const Steering = GetVehicleWheelSteeringAngle(id, 0);
         const yaw = GetEntityHeading(id)
         const time = GetGameTimer();
-        const coords = GetEntityCoords(id, false) as unknown as [number, number, number];
-        const gpsRouteResult = GetPosAlongGpsTypeRoute(true, 1, 0) as unknown;
-        // @ts-ignore
-        const gps = gpsRouteResult[1] as unknown as [number, number, number];
-
-
-
-
-        // if (ego.vehicle.VehicleData) {
-        //     const lastData = ego.vehicle.VehicleData[ego.vehicle.VehicleData.length - 1];
-        //     if (lastData?.isStopped && isStopped) {
-        //         return
-        //     }
-        // }
-
+        const coords = this.toVector3(GetEntityCoords(id, false)) ?? [0, 0, 0];
+        const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
+        const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
+        const velocityWorld = this.toVector3(GetEntityVelocity(id)) ?? [0, 0, 0];
+        const velocityLocal = this.toVector3(GetEntitySpeedVector(id, true)) ?? [0, 0, 0];
+        const rotationVelocity = this.toVector3(GetEntityRotationVelocity(id)) ?? [0, 0, 0];
+        const gear = GetVehicleCurrentGear(id);
+        const rpm = GetVehicleCurrentRpm(id);
+        const engineHealth = GetVehicleEngineHealth(id);
+        const bodyHealth = GetVehicleBodyHealth(id);
+        const handbrake = GetVehicleHandbrake(id);
+        const stoppedAtTrafficLights = IsVehicleStoppedAtTrafficLights(id);
+        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        const nearbyActors = this.collectNearbyActorSummary(id, coords, yaw, currentSpeed);
+        const [streetNameHash, crossingRoadHash] = GetStreetNameAtCoord(coords[0], coords[1], coords[2]);
+        const timeSinceSyncMs = this.activeTripContext ? Math.max(0, time - this.activeTripContext.syncTime) : undefined;
+        const timeSinceChunkStartMs = this.activeTripContext ? Math.max(0, time - this.activeTripContext.chunkStartTime) : undefined;
+        const eventCollision = HasEntityCollidedWithAnything(id);
+        const eventOffroad = !routeContext.isOnRoad || routeContext.isOffroadNode;
+        const eventWrongWay = routeContext.roadNodeDistance !== undefined
+            && routeContext.roadNodeDistance <= 12
+            && routeContext.roadNodeHeading !== undefined
+            && Math.abs(this.headingDeltaDegrees(yaw, routeContext.roadNodeHeading)) >= 110;
+        const eventReversing = velocityLocal[1] < -0.75;
 
         const data: VehicleData = {
             time,
@@ -616,20 +684,277 @@ export class EgoService {
             Steering,
             yaw,
             coords,
-            gps
+            gps,
+            velocityWorldX: velocityWorld[0],
+            velocityWorldY: velocityWorld[1],
+            velocityWorldZ: velocityWorld[2],
+            velocityForward: velocityLocal[1],
+            velocityLateral: velocityLocal[0],
+            velocityVertical: velocityLocal[2],
+            yawRate: rotationVelocity[2],
+            gear,
+            rpm,
+            engineHealth,
+            bodyHealth,
+            routeGpsValid: routeContext.routeGpsValid,
+            routeDistance: routeContext.routeDistance,
+            routeHeadingError: routeContext.routeHeadingError,
+            routeForwardDelta: routeContext.routeForwardDelta,
+            routeLateralDelta: routeContext.routeLateralDelta,
+            roadNodeDistance: routeContext.roadNodeDistance,
+            roadNodeHeading: routeContext.roadNodeHeading,
+            roadNodeDensity: routeContext.roadNodeDensity,
+            roadLaneCountForward: routeContext.roadLaneCountForward,
+            roadLaneCountBackward: routeContext.roadLaneCountBackward,
+            roadEdgeSpan: routeContext.roadEdgeSpan,
+            isOnRoad: routeContext.isOnRoad,
+            isOffroadNode: routeContext.isOffroadNode,
+            isInJunction: routeContext.isInJunction,
+            hasTrafficLightNode: routeContext.hasTrafficLightNode,
+            isHighway: routeContext.isHighway,
+            nearbyVehicleCount30m: nearbyActors.nearbyVehicleCount30m,
+            nearbyPedCount20m: nearbyActors.nearbyPedCount20m,
+            hasLeadVehicle: nearbyActors.hasLeadVehicle,
+            leadVehicleDistance: nearbyActors.leadVehicleDistance,
+            leadVehicleRelativeSpeed: nearbyActors.leadVehicleRelativeSpeed,
+            leadVehicleTTC: nearbyActors.leadVehicleTTC,
+            leadVehicleHeadingDelta: nearbyActors.leadVehicleHeadingDelta,
+            streetNameHash,
+            crossingRoadHash,
+            isStoppedAtTrafficLights: stoppedAtTrafficLights,
+            eventCollision,
+            eventOffroad,
+            eventWrongWay,
+            eventReversing,
+            eventHandbrake: handbrake,
+            timeSinceSyncMs,
+            timeSinceChunkStartMs,
+            dataPointIndex: this.tripDataPointIndex,
+            chunkIndex: this.tripChunkIndex
         };
-
 
         if (!ego.vehicle.VehicleData) {
             ego.vehicle.VehicleData = [];
         }
         ego.vehicle.VehicleData.push(data)
+        this.tripDataPointIndex += 1;
 
         if (ego.vehicle.VehicleData.length >= EgoService.MAX_TRIP_VEHICLE_DATA_POINTS) {
             this.emitTripChunk(ego, GetGameTimer(), false);
         }
+    }
 
-        console.log('Collected ego data:', data);
+    private collectRouteContext(id: number, coords: Vector3, heading: number, gpsRouteFound: boolean, gps: Vector3) {
+        const isOnRoad = IsPointOnRoad(coords[0], coords[1], coords[2], id);
+        const context: {
+            routeGpsValid: boolean
+            routeDistance?: number
+            routeHeadingError?: number
+            routeForwardDelta?: number
+            routeLateralDelta?: number
+            roadNodeDistance?: number
+            roadNodeHeading?: number
+            roadNodeDensity?: number
+            roadLaneCountForward?: number
+            roadLaneCountBackward?: number
+            roadEdgeSpan?: number
+            isOnRoad: boolean
+            isOffroadNode: boolean
+            isInJunction: boolean
+            hasTrafficLightNode: boolean
+            isHighway: boolean
+        } = {
+            routeGpsValid: false,
+            isOnRoad,
+            isOffroadNode: false,
+            isInJunction: false,
+            hasTrafficLightNode: false,
+            isHighway: false,
+        };
+
+        if (gpsRouteFound && this.isFiniteVector3(gps)) {
+            const delta = this.subtractVectors(gps, coords);
+            const deltaHeading = this.vectorHeadingDegrees(delta);
+            const forward = this.headingForwardVector(heading);
+            const right = this.headingRightVector(heading);
+            context.routeGpsValid = true;
+            context.routeDistance = this.vectorLength(delta);
+            context.routeHeadingError = this.headingDeltaDegrees(deltaHeading, heading);
+            context.routeForwardDelta = this.dotProduct(delta, forward);
+            context.routeLateralDelta = this.dotProduct(delta, right);
+        }
+
+        const [nodeFound, nodeCoordsRaw, nodeHeading] = GetClosestVehicleNodeWithHeading(coords[0], coords[1], coords[2], 1, 3, 0);
+        const nodeCoords = this.toVector3(nodeCoordsRaw);
+        if (nodeFound && nodeCoords) {
+            context.roadNodeDistance = this.distanceBetween(coords, nodeCoords);
+            context.roadNodeHeading = nodeHeading;
+        }
+
+        const [propertiesFound, nodeDensity, nodeFlags] = GetVehicleNodeProperties(coords[0], coords[1], coords[2]);
+        if (propertiesFound) {
+            context.roadNodeDensity = nodeDensity;
+            context.isOffroadNode = (nodeFlags & VehicleNodeFlags.OffRoad) !== 0;
+            context.isInJunction = (nodeFlags & VehicleNodeFlags.Junction) !== 0;
+            context.hasTrafficLightNode = (nodeFlags & VehicleNodeFlags.TrafficLight) !== 0;
+            context.isHighway = (nodeFlags & VehicleNodeFlags.Highway) !== 0;
+        }
+
+        const [roadFound, roadEdgeA, roadEdgeB, laneCountForward, laneCountBackward] = GetClosestRoad(coords[0], coords[1], coords[2], 1.5, 0, false);
+        const roadEdgeAVector = this.toVector3(roadEdgeA);
+        const roadEdgeBVector = this.toVector3(roadEdgeB);
+        if (roadFound && roadEdgeAVector && roadEdgeBVector) {
+            context.roadLaneCountForward = laneCountForward;
+            context.roadLaneCountBackward = laneCountBackward;
+            context.roadEdgeSpan = this.distanceBetween(roadEdgeAVector, roadEdgeBVector);
+        }
+
+        return context;
+    }
+
+    private collectNearbyActorSummary(id: number, coords: Vector3, heading: number, egoSpeed: number) {
+        const vehicles = ((GetGamePool("CVehicle") as number[]) ?? []) as number[];
+        const peds = ((GetGamePool("CPed") as number[]) ?? []) as number[];
+        let nearbyVehicleCount30m = 0;
+        let nearbyPedCount20m = 0;
+        let bestLeadDistance = Number.POSITIVE_INFINITY;
+        let leadVehicleDistance: number | undefined;
+        let leadVehicleRelativeSpeed: number | undefined;
+        let leadVehicleTTC: number | undefined;
+        let leadVehicleHeadingDelta: number | undefined;
+        let hasLeadVehicle = false;
+        const forward = this.headingForwardVector(heading);
+        const right = this.headingRightVector(heading);
+
+        for (const vehicleId of vehicles) {
+            if (vehicleId === id || !isValidEntity(vehicleId)) {
+                continue;
+            }
+            const vehicleCoords = this.toVector3(GetEntityCoords(vehicleId, false));
+            if (!vehicleCoords) {
+                continue;
+            }
+            const offset = this.subtractVectors(vehicleCoords, coords);
+            const distance = this.vectorLength(offset);
+            if (distance <= 30) {
+                nearbyVehicleCount30m += 1;
+            }
+            if (distance < 2 || distance > 50) {
+                continue;
+            }
+
+            const forwardDistance = this.dotProduct(offset, forward);
+            const lateralDistance = Math.abs(this.dotProduct(offset, right));
+            if (forwardDistance <= 0 || lateralDistance > Math.max(4.5, forwardDistance * 0.4)) {
+                continue;
+            }
+            if (distance >= bestLeadDistance) {
+                continue;
+            }
+
+            const candidateSpeed = GetEntitySpeed(vehicleId);
+            const relativeSpeed = Math.max(0, egoSpeed - candidateSpeed);
+            bestLeadDistance = distance;
+            hasLeadVehicle = true;
+            leadVehicleDistance = distance;
+            leadVehicleRelativeSpeed = relativeSpeed;
+            leadVehicleTTC = relativeSpeed > 0.25 ? distance / relativeSpeed : undefined;
+            leadVehicleHeadingDelta = Math.abs(this.headingDeltaDegrees(heading, GetEntityHeading(vehicleId)));
+        }
+
+        const playerPed = PlayerPedId();
+        for (const pedId of peds) {
+            if (pedId === playerPed || !isValidEntity(pedId) || IsPedInVehicle(pedId, id, false)) {
+                continue;
+            }
+            const pedCoords = this.toVector3(GetEntityCoords(pedId, false));
+            if (!pedCoords) {
+                continue;
+            }
+            if (this.distanceBetween(coords, pedCoords) <= 20) {
+                nearbyPedCount20m += 1;
+            }
+        }
+
+        return {
+            nearbyVehicleCount30m,
+            nearbyPedCount20m,
+            hasLeadVehicle,
+            leadVehicleDistance,
+            leadVehicleRelativeSpeed,
+            leadVehicleTTC,
+            leadVehicleHeadingDelta,
+        };
+    }
+
+    private toVector3(value: unknown): Vector3 | null {
+        if (!Array.isArray(value) || value.length < 3) {
+            return null;
+        }
+        const x = Number(value[0]);
+        const y = Number(value[1]);
+        const z = Number(value[2]);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+            return null;
+        }
+        return [x, y, z];
+    }
+
+    private isFiniteVector3(value: Vector3 | null): value is Vector3 {
+        return !!value
+            && Number.isFinite(value[0])
+            && Number.isFinite(value[1])
+            && Number.isFinite(value[2]);
+    }
+
+    private subtractVectors(a: Vector3, b: Vector3): Vector3 {
+        return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    }
+
+    private vectorLength(value: Vector3): number {
+        return Math.sqrt((value[0] * value[0]) + (value[1] * value[1]) + (value[2] * value[2]));
+    }
+
+    private distanceBetween(a: Vector3, b: Vector3): number {
+        return this.vectorLength(this.subtractVectors(a, b));
+    }
+
+    private dotProduct(a: Vector3, b: Vector3): number {
+        return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2]);
+    }
+
+    private headingForwardVector(heading: number): Vector3 {
+        const radians = heading * (Math.PI / 180);
+        return [Math.sin(radians), Math.cos(radians), 0];
+    }
+
+    private headingRightVector(heading: number): Vector3 {
+        const radians = heading * (Math.PI / 180);
+        return [Math.cos(radians), -Math.sin(radians), 0];
+    }
+
+    private vectorHeadingDegrees(value: Vector3): number {
+        const radians = Math.atan2(value[0], value[1]);
+        return this.normalizeHeadingDegrees(radians * (180 / Math.PI));
+    }
+
+    private normalizeHeadingDegrees(heading: number): number {
+        let normalized = heading % 360;
+        if (normalized < 0) {
+            normalized += 360;
+        }
+        return normalized;
+    }
+
+    private headingDeltaDegrees(targetHeading: number, sourceHeading: number): number {
+        let delta = this.normalizeHeadingDegrees(targetHeading) - this.normalizeHeadingDegrees(sourceHeading);
+        while (delta > 180) {
+            delta -= 360;
+        }
+        while (delta < -180) {
+            delta += 360;
+        }
+        return delta;
     }
 
 

@@ -101,31 +101,31 @@ CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=1.0,
-        target_source="label.Steering",
-        target_builder=scalar_target("Steering"),
+        target_source="label.future_steer",
+        target_builder=scalar_target("future_steer"),
         used_for_control=True,
     ),
     HeadSpec(
-        name="delta_speed",
+        name="future_speed",
         kind="control",
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=1.0,
-        target_source=f"label.{DELTA_SPEED_TARGET_LABEL_KEY}",
-        target_builder=scalar_target(DELTA_SPEED_TARGET_LABEL_KEY),
+        target_source="label.future_speed_target",
+        target_builder=scalar_target("future_speed_target"),
         used_for_control=True,
     ),
 )
 
 AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
     HeadSpec(
-        name="future_speed",
+        name="delta_speed",
         kind="aux",
         output_dim=1,
         loss_type="smooth_l1",
-        loss_weight=0.35,
-        target_source="label.future_speed",
-        target_builder=scalar_target("future_speed"),
+        loss_weight=0.2,
+        target_source=f"label.{DELTA_SPEED_TARGET_LABEL_KEY}",
+        target_builder=scalar_target(DELTA_SPEED_TARGET_LABEL_KEY),
         used_for_control=False,
     ),
     HeadSpec(
@@ -164,8 +164,8 @@ ALL_HEAD_SPECS: tuple[HeadSpec, ...] = CONTROL_HEAD_SPECS + AUX_HEAD_SPECS
 ALL_HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in ALL_HEAD_SPECS}
 ACTIVE_HEAD_SPECS: tuple[HeadSpec, ...] = (
     ALL_HEAD_SPECS_BY_NAME["steer"],
-    ALL_HEAD_SPECS_BY_NAME["delta_speed"],
     ALL_HEAD_SPECS_BY_NAME["future_speed"],
+    ALL_HEAD_SPECS_BY_NAME["delta_speed"],
 )
 HEAD_SPECS: tuple[HeadSpec, ...] = ACTIVE_HEAD_SPECS
 HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in HEAD_SPECS}
@@ -218,14 +218,19 @@ def resolve_head_specs_from_metadata(raw_specs: Any) -> tuple[HeadSpec, ...]:
         spec = ALL_HEAD_SPECS_BY_NAME.get(name)
         if spec is None:
             raise ValueError(f"unknown head in metadata: {name}")
-        if "kind" in item and item.get("kind") != spec.kind:
-            raise ValueError(f"head metadata kind mismatch for '{name}'")
         if "output_dim" in item and int(item.get("output_dim")) != spec.output_dim:
             raise ValueError(f"head metadata output_dim mismatch for '{name}'")
-        if "used_for_control" in item and bool(item.get("used_for_control")) != spec.used_for_control:
-            raise ValueError(f"head metadata used_for_control mismatch for '{name}'")
+        resolved_kind = spec.kind
+        if "kind" in item:
+            raw_kind = str(item.get("kind", "")).strip().lower()
+            if raw_kind not in {"control", "aux"}:
+                raise ValueError(f"head metadata kind mismatch for '{name}'")
+            resolved_kind = raw_kind
+        resolved_used_for_control = spec.used_for_control
+        if "used_for_control" in item:
+            resolved_used_for_control = bool(item.get("used_for_control"))
         seen.add(name)
-        resolved.append(spec)
+        resolved.append(replace(spec, kind=resolved_kind, used_for_control=resolved_used_for_control))
     return tuple(resolved)
 
 

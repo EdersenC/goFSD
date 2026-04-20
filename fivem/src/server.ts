@@ -12,6 +12,24 @@ type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "is
     vehicleData: WaypointCompleted["vehicleData"]
 };
 
+type TripTelemetrySummary = {
+    sampleCount: number
+    collisionEventCount: number
+    offroadEventCount: number
+    wrongWayEventCount: number
+    reversingEventCount: number
+    handbrakeEventCount: number
+    junctionSampleCount: number
+    trafficLightStopSampleCount: number
+    leadVehicleSampleCount: number
+    routeGpsValidSampleCount: number
+    routeGpsMissingSampleCount: number
+    onRoadSampleCount: number
+    highwaySampleCount: number
+    avgNearbyVehicleCount30m: number
+    avgNearbyPedCount20m: number
+};
+
 type CaptureRequest = {
     requestId: string
     runId: string
@@ -238,8 +256,19 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
         }
     }
 
+    if (!fs.existsSync(runFile)) {
+        try {
+            fs.writeFileSync(runFile, "");
+            console.log(`[server] created scene manifest ${runFile}`);
+        } catch (err) {
+            console.error(`[server] failed to create scene manifest ${runFile}:`, err);
+            return;
+        }
+    }
+
     const previousTripKey = activeTripByStream.get(streamKey);
     if (previousTripKey && previousTripKey !== tripKey) {
+        console.log(`[server] flushing previous trip ${previousTripKey} before accepting trip ${tripKey}`);
         flushTrip(previousTripKey, runStorage, manifestFile, fs, dataRoot);
     }
 
@@ -267,6 +296,7 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     }
 
     if (data.isTripComplete) {
+        console.log(`[server] received final chunk for trip ${tripKey}; flushing to ${runFile}`);
         flushTrip(tripKey, runStorage, manifestFile, fs, dataRoot);
         activeTripByStream.delete(streamKey);
     }
@@ -278,6 +308,106 @@ function buildTripStreamKey(runId: string, sceneId: string, sceneVariant: string
 
 function buildTripKey(runId: string, sceneId: string, sceneVariant: string, tripIndex: number): string {
     return `${buildTripStreamKey(runId, sceneId, sceneVariant)}:${tripIndex}`;
+}
+
+function coerceBoolean(value: unknown): boolean {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (typeof value === "number") {
+        return value !== 0;
+    }
+    return false;
+}
+
+function coerceNumber(value: unknown): number | undefined {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function buildTripTelemetrySummary(vehicleData: WaypointCompleted["vehicleData"]): TripTelemetrySummary {
+    let collisionEventCount = 0;
+    let offroadEventCount = 0;
+    let wrongWayEventCount = 0;
+    let reversingEventCount = 0;
+    let handbrakeEventCount = 0;
+    let junctionSampleCount = 0;
+    let trafficLightStopSampleCount = 0;
+    let leadVehicleSampleCount = 0;
+    let routeGpsValidSampleCount = 0;
+    let routeGpsMissingSampleCount = 0;
+    let onRoadSampleCount = 0;
+    let highwaySampleCount = 0;
+    let nearbyVehicleTotal = 0;
+    let nearbyPedTotal = 0;
+    let nearbyVehicleSamples = 0;
+    let nearbyPedSamples = 0;
+
+    for (const point of vehicleData) {
+        if (coerceBoolean(point.eventCollision)) {
+            collisionEventCount++;
+        }
+        if (coerceBoolean(point.eventOffroad)) {
+            offroadEventCount++;
+        }
+        if (coerceBoolean(point.eventWrongWay)) {
+            wrongWayEventCount++;
+        }
+        if (coerceBoolean(point.eventReversing)) {
+            reversingEventCount++;
+        }
+        if (coerceBoolean(point.eventHandbrake)) {
+            handbrakeEventCount++;
+        }
+        if (coerceBoolean(point.isInJunction)) {
+            junctionSampleCount++;
+        }
+        if (coerceBoolean(point.isStoppedAtTrafficLights)) {
+            trafficLightStopSampleCount++;
+        }
+        if (coerceBoolean(point.hasLeadVehicle)) {
+            leadVehicleSampleCount++;
+        }
+        if (coerceBoolean(point.routeGpsValid)) {
+            routeGpsValidSampleCount++;
+        } else {
+            routeGpsMissingSampleCount++;
+        }
+        if (coerceBoolean(point.isOnRoad)) {
+            onRoadSampleCount++;
+        }
+        if (coerceBoolean(point.isHighway)) {
+            highwaySampleCount++;
+        }
+
+        const nearbyVehicleCount = coerceNumber(point.nearbyVehicleCount30m);
+        if (nearbyVehicleCount !== undefined) {
+            nearbyVehicleTotal += nearbyVehicleCount;
+            nearbyVehicleSamples++;
+        }
+        const nearbyPedCount = coerceNumber(point.nearbyPedCount20m);
+        if (nearbyPedCount !== undefined) {
+            nearbyPedTotal += nearbyPedCount;
+            nearbyPedSamples++;
+        }
+    }
+
+    return {
+        sampleCount: vehicleData.length,
+        collisionEventCount,
+        offroadEventCount,
+        wrongWayEventCount,
+        reversingEventCount,
+        handbrakeEventCount,
+        junctionSampleCount,
+        trafficLightStopSampleCount,
+        leadVehicleSampleCount,
+        routeGpsValidSampleCount,
+        routeGpsMissingSampleCount,
+        onRoadSampleCount,
+        highwaySampleCount,
+        avgNearbyVehicleCount30m: nearbyVehicleSamples > 0 ? nearbyVehicleTotal / nearbyVehicleSamples : 0,
+        avgNearbyPedCount20m: nearbyPedSamples > 0 ? nearbyPedTotal / nearbyPedSamples : 0,
+    };
 }
 
 function sanitizePathSegment(value: string): string {
@@ -356,8 +486,7 @@ function buildRunStoragePaths(dataRoot: string, sceneId: string, sceneVariant: s
     const sceneDir = path.join(runsDir, sceneFolder);
     const runDirRelative = `runs/${runTiming.runFolder}`;
     const sceneDirRelative = `runs/${runTiming.runFolder}/${sceneFolder}`;
-    const runFile = path.join(runsDir, "run.jsonl");
-
+    const runFile = path.join(sceneDir, "run.jsonl");
     return {
         runsDir,
         sceneDir,
@@ -588,6 +717,9 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
         fs.mkdirSync(tripStorage.tripDir, { recursive: true });
     }
 
+    console.log(`[server] flush start trip=${tripKey} runFile=${runFile} tripDir=${tripStorage.tripDir} samples=${trip.vehicleData.length}`);
+
+    const telemetrySummary = buildTripTelemetrySummary(trip.vehicleData);
     const tripMetadata = {
         runId: trip.runId,
         runFolder: runStorage.runTiming.runFolder,
@@ -612,6 +744,8 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
+        telemetrySchemaVersion: 2,
+        telemetrySummary,
         videoFile: tripStorage.videoFile,
         logFile: tripStorage.logFile
     };
@@ -643,6 +777,8 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
+        telemetrySchemaVersion: 2,
+        telemetrySummary,
         file: runFile,
         tripDir: tripStorage.tripDir,
         videoFile: tripStorage.videoFile,
@@ -652,7 +788,7 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
 
     fs.appendFileSync(manifestFile, manifestLine);
     pendingTrips.delete(tripKey);
-    console.log(`Stored trip ${trip.tripIndex} for run ${trip.runId} with ${trip.vehicleData.length} data points`);
+    console.log(`[server] flush success trip=${tripKey} stored tripIndex=${trip.tripIndex} run=${trip.runId} samples=${trip.vehicleData.length} runFile=${runFile}`);
 }
 
 function pathBasename(targetPath: string): string {

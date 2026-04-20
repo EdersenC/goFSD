@@ -32,6 +32,7 @@ const (
 	defaultFlashFrameLimit          = 90
 	defaultStoppedSampleBurst       = 3
 	defaultStoppedSampleSpacing     = 2.0
+	futureTargetSmoothingRadius     = 2
 )
 
 var (
@@ -316,8 +317,8 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 
 	if !fileExists(videoPath) || !fileExists(metadataPath) || !fileExists(runFilePath) {
 		status.State = "failed"
-		status.Error = fmt.Sprintf("%v: expected video.mkv, metadata.json, and run.jsonl", ErrMissingTripFiles)
-		return fmt.Errorf("%w: expected video.mkv, metadata.json, and run.jsonl", ErrMissingTripFiles)
+		status.Error = fmt.Sprintf("%v: expected video.mkv, metadata.json, and run.jsonl at %s", ErrMissingTripFiles, runFilePath)
+		return fmt.Errorf("%w: expected video.mkv, metadata.json, and run.jsonl at %s", ErrMissingTripFiles, runFilePath)
 	}
 
 	metadata, err := loadTripMetadata(metadataPath)
@@ -628,18 +629,23 @@ func buildDatasetSamples(
 
 		centerFrame := frames[center]
 		relativeSeconds := centerFrame.PTS - anchorPTS
-		label, ok := nearestLabel(labels, relativeSeconds, toleranceSeconds)
+		label, _, ok := nearestLabelWithIndex(labels, relativeSeconds, toleranceSeconds)
 		if !ok {
 			continue
 		}
 		futureRelativeSeconds := frames[futureCenter].PTS - anchorPTS
-		futureLabel, ok := nearestLabel(labels, futureRelativeSeconds, toleranceSeconds)
+		futureLabel, futureLabelIndex, ok := nearestLabelWithIndex(labels, futureRelativeSeconds, toleranceSeconds)
+		if !ok {
+			continue
+		}
+		futureSpeedTarget, ok := smoothedFutureSpeed(labels, futureLabelIndex, futureTargetSmoothingRadius)
 		if !ok {
 			continue
 		}
 		derivedLabel, ok := buildTrainingLabel(
 			label.Label,
 			futureLabel.Label,
+			futureSpeedTarget,
 			deltaSpeedClip,
 			deltaSpeedNormalize,
 		)
@@ -658,12 +664,22 @@ func buildDatasetSamples(
 	return samples
 }
 
-func buildTrainingLabel(current map[string]any, future map[string]any, deltaSpeedClip float64, deltaSpeedNormalize bool) (map[string]any, bool) {
+func buildTrainingLabel(
+	current map[string]any,
+	future map[string]any,
+	futureSpeedTarget float64,
+	deltaSpeedClip float64,
+	deltaSpeedNormalize bool,
+) (map[string]any, bool) {
 	currentSpeed, ok := numberField(current["currentSpeed"])
 	if !ok {
 		return nil, false
 	}
 	futureSpeed, ok := numberField(future["currentSpeed"])
+	if !ok {
+		return nil, false
+	}
+	futureSteer, ok := numberField(future["Steering"])
 	if !ok {
 		return nil, false
 	}
@@ -675,7 +691,7 @@ func buildTrainingLabel(current map[string]any, future map[string]any, deltaSpee
 		}
 		derived[key] = value
 	}
-	deltaSpeed := futureSpeed - currentSpeed
+	deltaSpeed := futureSpeedTarget - currentSpeed
 	clippedDeltaSpeed := clampFloat64(deltaSpeed, -deltaSpeedClip, deltaSpeedClip)
 	deltaSpeedTarget := clippedDeltaSpeed
 	if deltaSpeedNormalize {
@@ -684,7 +700,38 @@ func buildTrainingLabel(current map[string]any, future map[string]any, deltaSpee
 	derived["delta_speed"] = clippedDeltaSpeed
 	derived["delta_speed_target"] = deltaSpeedTarget
 	derived["future_speed"] = futureSpeed
+	derived["future_speed_target"] = futureSpeedTarget
+	derived["future_steer"] = futureSteer
 	return derived, true
+}
+
+func smoothedFutureSpeed(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
+	if centerIndex < 0 || centerIndex >= len(labels) {
+		return 0, false
+	}
+	startIndex := centerIndex - radius
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	endIndex := centerIndex + radius
+	if endIndex >= len(labels) {
+		endIndex = len(labels) - 1
+	}
+
+	var sum float64
+	count := 0
+	for index := startIndex; index <= endIndex; index++ {
+		speed, ok := numberField(labels[index].Label["currentSpeed"])
+		if !ok {
+			continue
+		}
+		sum += speed
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return sum / float64(count), true
 }
 
 func clampFloat64(value float64, minimum float64, maximum float64) float64 {
@@ -767,29 +814,61 @@ func isStoppedLabelValue(value any) bool {
 	}
 }
 
+func booleanField(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case float64:
+		return typed != 0, true
+	case float32:
+		return typed != 0, true
+	case int:
+		return typed != 0, true
+	case int64:
+		return typed != 0, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return false, false
+		}
+		return parsed != 0, true
+	default:
+		return false, false
+	}
+}
+
 func nearestLabel(labels []timedLabel, target float64, toleranceSeconds float64) (timedLabel, bool) {
+	label, _, ok := nearestLabelWithIndex(labels, target, toleranceSeconds)
+	return label, ok
+}
+
+func nearestLabelWithIndex(labels []timedLabel, target float64, toleranceSeconds float64) (timedLabel, int, bool) {
 	if len(labels) == 0 {
-		return timedLabel{}, false
+		return timedLabel{}, -1, false
 	}
 	idx := sort.Search(len(labels), func(i int) bool {
 		return labels[i].RelativeSeconds >= target
 	})
 
-	candidates := make([]timedLabel, 0, 2)
+	type candidateLabel struct {
+		label timedLabel
+		index int
+	}
+	candidates := make([]candidateLabel, 0, 2)
 	if idx < len(labels) {
-		candidates = append(candidates, labels[idx])
+		candidates = append(candidates, candidateLabel{label: labels[idx], index: idx})
 	}
 	if idx > 0 {
-		candidates = append(candidates, labels[idx-1])
+		candidates = append(candidates, candidateLabel{label: labels[idx-1], index: idx - 1})
 	}
 	if len(candidates) == 0 {
-		return timedLabel{}, false
+		return timedLabel{}, -1, false
 	}
 
 	best := candidates[0]
-	bestDelta := math.Abs(best.RelativeSeconds - target)
+	bestDelta := math.Abs(best.label.RelativeSeconds - target)
 	for _, candidate := range candidates[1:] {
-		delta := math.Abs(candidate.RelativeSeconds - target)
+		delta := math.Abs(candidate.label.RelativeSeconds - target)
 		if delta < bestDelta {
 			best = candidate
 			bestDelta = delta
@@ -797,9 +876,9 @@ func nearestLabel(labels []timedLabel, target float64, toleranceSeconds float64)
 	}
 
 	if bestDelta > toleranceSeconds {
-		return timedLabel{}, false
+		return timedLabel{}, -1, false
 	}
-	return best, true
+	return best.label, best.index, true
 }
 
 func writeDatasetFile(path string, samples []DatasetSample) error {

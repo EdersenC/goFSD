@@ -26,3 +26,6 @@ coverage/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Local trainer package shadow dir
+fsd_trainer/src/gta_fsd/fsd_trainer/
