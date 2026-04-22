@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/jpeg"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
 )
 
@@ -56,23 +58,45 @@ type InferenceModelLoadRequest struct {
 }
 
 type InferencePrediction struct {
-	Steering           float64           `json:"steering"`
-	DeltaSpeed         float64           `json:"deltaSpeed"`
-	CurrentSpeed       float64           `json:"currentSpeed"`
-	TelemetryAgeMs     int64             `json:"telemetryAgeMs"`
-	ControlSemantics   string            `json:"controlSemantics,omitempty"`
-	CapturedAt         string            `json:"capturedAt"`
-	PredictedAt        string            `json:"predictedAt"`
-	FrameIndex         int               `json:"frameIndex"`
-	Sequence           int               `json:"sequence"`
-	SourceFPS          int               `json:"sourceFps"`
-	InferenceHz        int               `json:"inferenceHz"`
-	ModelServerURL     string            `json:"modelServerUrl"`
-	Checkpoint         string            `json:"checkpoint,omitempty"`
-	ModelDevice        string            `json:"modelDevice,omitempty"`
-	ControlSources     map[string]string `json:"controlSources,omitempty"`
-	WindowFrameIndices []int             `json:"windowFrameIndices"`
-	WindowFrameHashes  []string          `json:"windowFrameHashes"`
+	Steering           float64                  `json:"steering"`
+	FutureYawDelta     float64                  `json:"futureYawDelta"`
+	FutureYaw          float64                  `json:"futureYaw"`
+	FutureSpeed        float64                  `json:"futureSpeed"`
+	DeltaSpeed         float64                  `json:"deltaSpeed"`
+	MoveIntentProb     float64                  `json:"moveIntentProb"`
+	HasMoveIntent      bool                     `json:"hasMoveIntent"`
+	MoveIntentActive   bool                     `json:"moveIntentActive"`
+	CurrentSpeed       float64                  `json:"currentSpeed"`
+	CurrentYaw         float64                  `json:"currentYaw"`
+	RouteForwardDelta  float64                  `json:"routeForwardDelta"`
+	TelemetryAgeMs     int64                    `json:"telemetryAgeMs"`
+	ControlSemantics   string                   `json:"controlSemantics,omitempty"`
+	LongitudinalMode   string                   `json:"longitudinalMode,omitempty"`
+	HeadingErrorDeg    float64                  `json:"headingErrorDeg"`
+	TargetSpeed        float64                  `json:"targetSpeed"`
+	SpeedError         float64                  `json:"speedError"`
+	DeltaTrim          float64                  `json:"deltaTrim"`
+	SignedLongitudinal float64                  `json:"signedLongitudinal"`
+	CommandPreview     *InferenceCommandPreview `json:"commandPreview,omitempty"`
+	CapturedAt         string                   `json:"capturedAt"`
+	PredictedAt        string                   `json:"predictedAt"`
+	FrameIndex         int                      `json:"frameIndex"`
+	Sequence           int                      `json:"sequence"`
+	SourceFPS          int                      `json:"sourceFps"`
+	InferenceHz        int                      `json:"inferenceHz"`
+	ModelServerURL     string                   `json:"modelServerUrl"`
+	Checkpoint         string                   `json:"checkpoint,omitempty"`
+	ModelDevice        string                   `json:"modelDevice,omitempty"`
+	ControlSources     map[string]string        `json:"controlSources,omitempty"`
+	WindowFrameIndices []int                    `json:"windowFrameIndices"`
+	WindowFrameHashes  []string                 `json:"windowFrameHashes"`
+}
+
+type InferenceCommandPreview struct {
+	Steer     float64 `json:"steer"`
+	Throttle  float64 `json:"throttle"`
+	Brake     float64 `json:"brake"`
+	InputMode string  `json:"inputMode"`
 }
 
 type InferenceStatus struct {
@@ -129,21 +153,36 @@ type bufferedInferenceFrame struct {
 	image      *image.RGBA
 }
 
+type actuatorSubmitter interface {
+	Submit(req actuator.CommandRequest) (actuator.State, error)
+}
+
+type rawControlPrediction struct {
+	FutureYawDelta    float64
+	HasFutureYawDelta bool
+	FutureSpeed       float64
+	HasFutureSpeed    bool
+	DeltaSpeed        float64
+	HasDeltaSpeed     bool
+	MoveIntentProb    float64
+	HasMoveIntent     bool
+}
+
 type pythonPredictResponse struct {
 	Checkpoint           string            `json:"checkpoint"`
 	Device               string            `json:"device"`
 	ControlSemantics     string            `json:"control_semantics"`
 	ControlTargetSources map[string]string `json:"control_target_sources"`
 	Prediction           struct {
-		Steering       *float64 `json:"steering"`
-		LegacySteering *float64 `json:"Steering"`
+		FutureYawDelta *float64 `json:"future_yaw_delta"`
+		FutureSpeed    *float64 `json:"future_speed"`
 		DeltaSpeed     *float64 `json:"delta_speed"`
-		Acceleration   *float64 `json:"acceleration"`
 	} `json:"prediction"`
 	ControlOutputs struct {
-		Steer      *float64 `json:"steer"`
-		DeltaSpeed *float64 `json:"delta_speed"`
-		Accel      *float64 `json:"accel"`
+		FutureYawDelta *float64 `json:"future_yaw_delta"`
+		FutureSpeed    *float64 `json:"future_speed"`
+		DeltaSpeed     *float64 `json:"delta_speed"`
+		MoveIntentProb *float64 `json:"move_intent_prob"`
 	} `json:"control_outputs"`
 }
 
@@ -163,16 +202,27 @@ type Inferencer struct {
 	config              InferenceConfig
 	modelServerURL      string
 	autoLoad            bool
+	loadedCheckpoint    string
+	loadedModelDevice   string
 	sourceID            string
 	telemetry           *control.Store
+	actuator            actuatorSubmitter
 	telemetryStaleAfter time.Duration
 	status              InferenceStatus
 	active              *inferenceSession
+	moveIntentActive    bool
+	moveIntentLatched   bool
+	lastSteerCommand    float64
+	hasLastSteerCommand bool
 }
 
-func NewInferencer(cfg InferenceConfig, telemetry *control.Store) *Inferencer {
+func NewInferencer(cfg InferenceConfig, telemetry *control.Store, actuatorSinks ...actuatorSubmitter) *Inferencer {
 	if cfg.ModelServerURL == "" {
 		cfg = DefaultInferenceConfig()
+	}
+	var actuatorSink actuatorSubmitter
+	if len(actuatorSinks) > 0 {
+		actuatorSink = actuatorSinks[0]
 	}
 	inf := &Inferencer{
 		ffmpegBin: envOrDefault("FFMPEG_BIN", defaultFFmpegBin),
@@ -189,6 +239,7 @@ func NewInferencer(cfg InferenceConfig, telemetry *control.Store) *Inferencer {
 		autoLoad:            cfg.AutoLoad,
 		sourceID:            cfg.SourceID,
 		telemetry:           telemetry,
+		actuator:            actuatorSink,
 		telemetryStaleAfter: defaultTelemetryStaleAfter,
 		status: InferenceStatus{
 			State:          "idle",
@@ -267,6 +318,7 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		DebugFramesLimit: defaultDebugFrameDumpLimit,
 	}
 	i.status = status
+	i.resetControlStateLocked()
 	i.mu.Unlock()
 
 	spec := monitorCaptureSpec(monitor)
@@ -382,7 +434,26 @@ func (i *Inferencer) LoadModel(ctx context.Context, req InferenceModelLoadReques
 	if device != "" {
 		payload["device"] = device
 	}
-	return i.postRemoteModelLoad(ctx, modelServerURL, payload)
+	parsed, err := i.postRemoteModelLoad(ctx, modelServerURL, payload)
+	if err != nil {
+		return nil, err
+	}
+
+	i.mu.Lock()
+	i.modelServerURL = modelServerURL
+	if checkpoint, ok := parsed["checkpoint"].(string); ok {
+		i.loadedCheckpoint = strings.TrimSpace(checkpoint)
+	} else if checkpoint := strings.TrimSpace(req.Checkpoint); checkpoint != "" {
+		i.loadedCheckpoint = checkpoint
+	}
+	if resolvedDevice, ok := parsed["device"].(string); ok && strings.TrimSpace(resolvedDevice) != "" {
+		i.loadedModelDevice = strings.TrimSpace(resolvedDevice)
+	} else if device != "" {
+		i.loadedModelDevice = device
+	}
+	i.mu.Unlock()
+
+	return parsed, nil
 }
 
 func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
@@ -439,6 +510,7 @@ func (i *Inferencer) waitForInference(session *inferenceSession) {
 	active := i.active
 	if active != nil && active == session {
 		i.active = nil
+		i.resetControlStateLocked()
 		if i.status.State == "stopping" {
 			i.status.State = "idle"
 			i.status.StoppedAt = i.nowFunc().UTC().Format(time.RFC3339Nano)
@@ -550,6 +622,17 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 			}
 			i.mu.Lock()
 			i.status.LastPrediction = prediction
+			i.mu.Unlock()
+			command, err := i.commandFromPrediction(prediction)
+			if err != nil {
+				i.recordPredictionError(err)
+				continue
+			}
+			if err := i.submitPredictionCommand(command); err != nil {
+				i.recordPredictionError(err)
+				continue
+			}
+			i.mu.Lock()
 			i.status.PredictionsSent++
 			i.status.LastError = ""
 			i.mu.Unlock()
@@ -558,7 +641,7 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 }
 
 func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL string, window predictionWindow) (*InferencePrediction, error) {
-	currentSpeed, telemetryAge, err := i.liveCurrentSpeed()
+	currentSpeed, currentYaw, routeForwardDelta, telemetryAge, err := i.liveControlTelemetry()
 	if err != nil {
 		return nil, err
 	}
@@ -574,10 +657,11 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"frames_base64": framesBase64,
-		"current_speed": currentSpeed,
-		"sequence":      window.sequenceNumber,
-		"timestamp_ms":  i.nowFunc().UTC().UnixMilli(),
+		"frames_base64":       framesBase64,
+		"current_speed":       currentSpeed,
+		"route_forward_delta": routeForwardDelta,
+		"sequence":            window.sequenceNumber,
+		"timestamp_ms":        i.nowFunc().UTC().UnixMilli(),
 	})
 	if err != nil {
 		return nil, err
@@ -606,67 +690,76 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
-	steering, deltaSpeed, err := parsed.controlPrediction()
+	rawPrediction, err := parsed.rawControlPrediction()
 	if err != nil {
 		return nil, err
 	}
-
-	return &InferencePrediction{
-		Steering:           steering,
-		DeltaSpeed:         deltaSpeed,
-		CurrentSpeed:       currentSpeed,
-		TelemetryAgeMs:     telemetryAge.Milliseconds(),
-		ControlSemantics:   parsed.ControlSemantics,
-		CapturedAt:         window.capturedAt.Format(time.RFC3339Nano),
-		PredictedAt:        i.nowFunc().UTC().Format(time.RFC3339Nano),
-		FrameIndex:         window.frameIndex,
-		Sequence:           window.sequenceNumber,
-		SourceFPS:          i.config.FPS,
-		InferenceHz:        i.config.FPS / i.config.DispatchStride,
-		ModelServerURL:     modelServerURL,
-		Checkpoint:         parsed.Checkpoint,
-		ModelDevice:        parsed.Device,
-		ControlSources:     cloneStringMap(parsed.ControlTargetSources),
-		WindowFrameIndices: append([]int(nil), window.frameIndices...),
-		WindowFrameHashes:  append([]string(nil), frameHashes...),
-	}, nil
+	return i.buildPrediction(
+		parsed,
+		rawPrediction,
+		currentSpeed,
+		currentYaw,
+		routeForwardDelta,
+		telemetryAge,
+		modelServerURL,
+		window,
+		frameHashes,
+	), nil
 }
 
-func (i *Inferencer) liveCurrentSpeed() (float64, time.Duration, error) {
+func (i *Inferencer) liveControlTelemetry() (float64, float64, float64, time.Duration, error) {
 	if i.telemetry == nil {
-		return 0, 0, errors.New("inference telemetry store is not configured")
+		return 0, 0, 0, 0, errors.New("inference telemetry store is not configured")
 	}
 	telemetry, updatedAt := i.telemetry.LatestTelemetrySnapshot()
 	if telemetry == nil || updatedAt.IsZero() {
-		return 0, 0, errors.New("live currentSpeed telemetry is unavailable")
+		return 0, 0, 0, 0, errors.New("live control telemetry is unavailable")
 	}
 	age := i.nowFunc().Sub(updatedAt)
 	if age > i.telemetryStaleAfter {
-		return 0, age, fmt.Errorf("live currentSpeed telemetry is stale: age=%s", age)
+		return 0, 0, 0, age, fmt.Errorf("live control telemetry is stale: age=%s", age)
 	}
-	return telemetry.CurrentSpeed, age, nil
+	return telemetry.CurrentSpeed, telemetry.CurrentYaw, telemetry.RouteForwardDelta, age, nil
 }
 
-func (r pythonPredictResponse) controlPrediction() (float64, float64, error) {
-	if r.ControlOutputs.Steer != nil && r.ControlOutputs.DeltaSpeed != nil {
-		return *r.ControlOutputs.Steer, *r.ControlOutputs.DeltaSpeed, nil
+func (r pythonPredictResponse) rawControlPrediction() (rawControlPrediction, error) {
+	futureYawDelta := firstFloat(
+		r.ControlOutputs.FutureYawDelta,
+		r.Prediction.FutureYawDelta,
+	)
+	if futureYawDelta == nil {
+		return rawControlPrediction{}, fmt.Errorf("python predict response missing future_yaw_delta output")
 	}
-	if r.ControlOutputs.Steer != nil && r.ControlOutputs.Accel != nil {
-		return *r.ControlOutputs.Steer, *r.ControlOutputs.Accel, nil
+
+	futureSpeed := firstFloat(
+		r.ControlOutputs.FutureSpeed,
+		r.Prediction.FutureSpeed,
+	)
+	deltaSpeed := firstFloat(
+		r.ControlOutputs.DeltaSpeed,
+		r.Prediction.DeltaSpeed,
+	)
+	if futureSpeed == nil && deltaSpeed == nil {
+		return rawControlPrediction{}, fmt.Errorf("python predict response missing control outputs")
 	}
-	if r.Prediction.Steering != nil && r.Prediction.DeltaSpeed != nil {
-		return *r.Prediction.Steering, *r.Prediction.DeltaSpeed, nil
+
+	prediction := rawControlPrediction{
+		FutureYawDelta:    *futureYawDelta,
+		HasFutureYawDelta: true,
 	}
-	if r.Prediction.Steering != nil && r.Prediction.Acceleration != nil {
-		return *r.Prediction.Steering, *r.Prediction.Acceleration, nil
+	if futureSpeed != nil {
+		prediction.FutureSpeed = *futureSpeed
+		prediction.HasFutureSpeed = true
 	}
-	if r.Prediction.LegacySteering != nil && r.Prediction.DeltaSpeed != nil {
-		return *r.Prediction.LegacySteering, *r.Prediction.DeltaSpeed, nil
+	if deltaSpeed != nil {
+		prediction.DeltaSpeed = *deltaSpeed
+		prediction.HasDeltaSpeed = true
 	}
-	if r.Prediction.LegacySteering != nil && r.Prediction.Acceleration != nil {
-		return *r.Prediction.LegacySteering, *r.Prediction.Acceleration, nil
+	if r.ControlOutputs.MoveIntentProb != nil {
+		prediction.MoveIntentProb = clamp(*r.ControlOutputs.MoveIntentProb, 0.0, 1.0)
+		prediction.HasMoveIntent = true
 	}
-	return 0, 0, fmt.Errorf("python predict response missing control outputs")
+	return prediction, nil
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -721,11 +814,38 @@ func (i *Inferencer) loadRemoteModel(ctx context.Context, modelServerURL string)
 	if i.config.ConfigPath != "" {
 		payload["config"] = i.config.ConfigPath
 	}
-	if strings.TrimSpace(i.config.ModelDevice) != "" {
-		payload["device"] = i.config.ModelDevice
+
+	i.mu.Lock()
+	loadedCheckpoint := strings.TrimSpace(i.loadedCheckpoint)
+	loadedModelDevice := strings.TrimSpace(i.loadedModelDevice)
+	i.mu.Unlock()
+
+	if loadedCheckpoint != "" {
+		payload["checkpoint"] = loadedCheckpoint
 	}
-	_, err := i.postRemoteModelLoad(ctx, modelServerURL, payload)
-	return err
+
+	device := loadedModelDevice
+	if device == "" {
+		device = strings.TrimSpace(i.config.ModelDevice)
+	}
+	if device != "" {
+		payload["device"] = device
+	}
+	parsed, err := i.postRemoteModelLoad(ctx, modelServerURL, payload)
+	if err != nil {
+		return err
+	}
+
+	i.mu.Lock()
+	i.modelServerURL = modelServerURL
+	if checkpoint, ok := parsed["checkpoint"].(string); ok && strings.TrimSpace(checkpoint) != "" {
+		i.loadedCheckpoint = strings.TrimSpace(checkpoint)
+	}
+	if resolvedDevice, ok := parsed["device"].(string); ok && strings.TrimSpace(resolvedDevice) != "" {
+		i.loadedModelDevice = strings.TrimSpace(resolvedDevice)
+	}
+	i.mu.Unlock()
+	return nil
 }
 
 func (i *Inferencer) postRemoteModelLoad(ctx context.Context, modelServerURL string, payload map[string]any) (map[string]any, error) {
@@ -866,6 +986,10 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 	out := status
 	if status.LastPrediction != nil {
 		copyPrediction := *status.LastPrediction
+		if status.LastPrediction.CommandPreview != nil {
+			copyPreview := *status.LastPrediction.CommandPreview
+			copyPrediction.CommandPreview = &copyPreview
+		}
 		copyPrediction.ControlSources = cloneStringMap(status.LastPrediction.ControlSources)
 		copyPrediction.WindowFrameIndices = append([]int(nil), status.LastPrediction.WindowFrameIndices...)
 		copyPrediction.WindowFrameHashes = append([]string(nil), status.LastPrediction.WindowFrameHashes...)
@@ -893,4 +1017,287 @@ func parseBoolEnv(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func firstFloat(values ...*float64) *float64 {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func (i *Inferencer) buildPrediction(
+	parsed pythonPredictResponse,
+	raw rawControlPrediction,
+	currentSpeed float64,
+	currentYaw float64,
+	routeForwardDelta float64,
+	telemetryAge time.Duration,
+	modelServerURL string,
+	window predictionWindow,
+	frameHashes []string,
+) *InferencePrediction {
+	controlSemantics := strings.TrimSpace(parsed.ControlSemantics)
+	if controlSemantics == "" {
+		controlSemantics = inferControlSemantics(raw)
+	}
+	prediction := &InferencePrediction{
+		FutureYawDelta:     raw.FutureYawDelta,
+		FutureYaw:          normalizeHeadingDegrees(currentYaw + raw.FutureYawDelta),
+		CurrentSpeed:       currentSpeed,
+		CurrentYaw:         currentYaw,
+		RouteForwardDelta:  routeForwardDelta,
+		TelemetryAgeMs:     telemetryAge.Milliseconds(),
+		ControlSemantics:   controlSemantics,
+		CapturedAt:         window.capturedAt.Format(time.RFC3339Nano),
+		PredictedAt:        i.nowFunc().UTC().Format(time.RFC3339Nano),
+		FrameIndex:         window.frameIndex,
+		Sequence:           window.sequenceNumber,
+		SourceFPS:          i.config.FPS,
+		InferenceHz:        i.config.FPS / i.config.DispatchStride,
+		ModelServerURL:     modelServerURL,
+		Checkpoint:         parsed.Checkpoint,
+		ModelDevice:        parsed.Device,
+		ControlSources:     cloneStringMap(parsed.ControlTargetSources),
+		WindowFrameIndices: append([]int(nil), window.frameIndices...),
+		WindowFrameHashes:  append([]string(nil), frameHashes...),
+	}
+	if raw.HasFutureSpeed {
+		prediction.FutureSpeed = raw.FutureSpeed
+	}
+	if raw.HasDeltaSpeed {
+		prediction.DeltaSpeed = raw.DeltaSpeed
+	}
+	if raw.HasMoveIntent {
+		prediction.MoveIntentProb = raw.MoveIntentProb
+		prediction.HasMoveIntent = true
+	}
+	return prediction
+}
+
+func inferControlSemantics(raw rawControlPrediction) string {
+	switch {
+	case raw.HasFutureSpeed:
+		return "target_speed"
+	case raw.HasDeltaSpeed:
+		return "speed_delta"
+	default:
+		return ""
+	}
+}
+
+func (i *Inferencer) commandFromPrediction(prediction *InferencePrediction) (actuator.CommandRequest, error) {
+	if prediction == nil {
+		return actuator.CommandRequest{}, errors.New("inference prediction is not available")
+	}
+	if math.IsNaN(prediction.FutureYawDelta) || math.IsInf(prediction.FutureYawDelta, 0) {
+		return actuator.CommandRequest{}, errors.New("prediction is missing a finite future yaw delta")
+	}
+	if math.IsNaN(prediction.CurrentYaw) || math.IsInf(prediction.CurrentYaw, 0) {
+		return actuator.CommandRequest{}, errors.New("prediction is missing a finite current yaw")
+	}
+
+	headingError := prediction.FutureYawDelta
+	desiredSteer := i.previewSteerCommand(prediction)
+	steer := i.shapeSteerCommand(desiredSteer)
+	targetSpeed := 0.0
+	speedError := 0.0
+	deltaTrim := 0.0
+	signedLongitudinal := 0.0
+	mode := "delta_speed"
+	moveIntentActive, moveIntentAvailable := i.resolveMoveIntentActive(prediction)
+	prediction.MoveIntentActive = moveIntentAvailable && moveIntentActive
+
+	switch {
+	case prediction.FutureSpeed != 0 || prediction.ControlSemantics == "target_speed":
+		mode = "future_speed"
+		targetSpeed = math.Min(math.Max(prediction.FutureSpeed, 0.0), i.maxTargetSpeedMetersPerSecond())
+		speedError = targetSpeed - prediction.CurrentSpeed
+		speedComponent := speedError * i.config.TargetSpeedErrorGain
+		if math.Abs(prediction.DeltaSpeed) >= i.config.DeltaSpeedDeadband {
+			deltaTrim = prediction.DeltaSpeed * i.config.DeltaSpeedTrimGain
+		}
+		signedLongitudinal = clamp(speedComponent+deltaTrim, -1.0, 1.0)
+		if math.Abs(signedLongitudinal) < i.config.TargetSpeedDeadband {
+			signedLongitudinal = 0.0
+		}
+		if signedLongitudinal > 0 {
+			if moveIntentAvailable && prediction.CurrentSpeed <= i.config.MoveIntentHoldSpeedMax && !moveIntentActive {
+				signedLongitudinal = 0.0
+			} else if prediction.CurrentSpeed <= i.config.LaunchSpeedThreshold &&
+				targetSpeed >= prediction.CurrentSpeed+i.config.LaunchTargetSpeedMargin {
+				signedLongitudinal = math.Max(signedLongitudinal, i.config.LaunchThrottleMin)
+			}
+		}
+	case prediction.DeltaSpeed != 0 || prediction.ControlSemantics == "speed_delta":
+		mode = "delta_speed"
+		if math.Abs(prediction.DeltaSpeed) >= i.config.DeltaSpeedDeadband {
+			signedLongitudinal = clamp(prediction.DeltaSpeed, -1.0, 1.0)
+		}
+		if signedLongitudinal > 0 && prediction.CurrentSpeed >= i.maxTargetSpeedMetersPerSecond() {
+			signedLongitudinal = 0.0
+		}
+	default:
+		return actuator.CommandRequest{}, errors.New("prediction is missing future_speed and delta_speed outputs")
+	}
+
+	preview := &InferenceCommandPreview{
+		Steer:     steer,
+		Throttle:  math.Max(signedLongitudinal, 0.0),
+		Brake:     math.Max(-signedLongitudinal, 0.0),
+		InputMode: actuator.InputModeNormalized,
+	}
+	prediction.Steering = steer
+	prediction.HeadingErrorDeg = headingError
+	prediction.LongitudinalMode = mode
+	prediction.TargetSpeed = targetSpeed
+	prediction.SpeedError = speedError
+	prediction.DeltaTrim = deltaTrim
+	prediction.SignedLongitudinal = signedLongitudinal
+	prediction.CommandPreview = preview
+
+	return actuator.CommandRequest{
+		Steer:       preview.Steer,
+		Throttle:    preview.Throttle,
+		Brake:       preview.Brake,
+		InputMode:   actuator.InputModeNormalized,
+		Handbrake:   false,
+		Enabled:     boolPtr(true),
+		Sequence:    int64(prediction.Sequence),
+		TimestampMs: i.nowFunc().UTC().UnixMilli(),
+	}, nil
+}
+
+func (i *Inferencer) resolveMoveIntentActive(prediction *InferencePrediction) (bool, bool) {
+	if prediction == nil || !prediction.HasMoveIntent {
+		return false, false
+	}
+	probability := clamp(prediction.MoveIntentProb, 0.0, 1.0)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	switch {
+	case !i.moveIntentLatched:
+		i.moveIntentActive = probability >= i.config.MoveIntentOnThreshold
+		i.moveIntentLatched = true
+	case probability >= i.config.MoveIntentOnThreshold:
+		i.moveIntentActive = true
+	case probability <= i.config.MoveIntentOffThreshold:
+		i.moveIntentActive = false
+	}
+	return i.moveIntentActive, true
+}
+
+func (i *Inferencer) shapeSteerCommand(desiredSteer float64) float64 {
+	desiredSteer = clamp(desiredSteer, -1.0, 1.0)
+	stepSeconds := i.inferenceStepSeconds()
+	maxDelta := i.config.SteerCommandRatePerSec * stepSeconds
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.hasLastSteerCommand || maxDelta <= 0 {
+		i.lastSteerCommand = desiredSteer
+		i.hasLastSteerCommand = true
+		return desiredSteer
+	}
+	blendedSteer := i.lastSteerCommand + (desiredSteer-i.lastSteerCommand)*i.config.SteerResponseBlend
+	nextSteer := moveTowards(i.lastSteerCommand, blendedSteer, maxDelta)
+	i.lastSteerCommand = nextSteer
+	return nextSteer
+}
+
+func (i *Inferencer) previewSteerCommand(prediction *InferencePrediction) float64 {
+	if prediction == nil {
+		return 0
+	}
+	headingError := prediction.FutureYawDelta
+	if math.Abs(headingError) < i.config.HeadingErrorDeadbandDeg {
+		return 0
+	}
+	normalizedHeading := clamp(headingError/i.config.HeadingErrorFullLockDeg, -1.0, 1.0)
+	turnDemand := math.Copysign(math.Sqrt(math.Abs(normalizedHeading)), normalizedHeading)
+	currentSpeed := math.Max(prediction.CurrentSpeed, 0.0)
+	speedRatio := clamp(currentSpeed/i.config.SteerGainFadeSpeedMPS, 0.0, 1.0)
+	steerGain := lerp(i.config.LowSpeedSteerGain, i.config.HighSpeedSteerGain, speedRatio)
+	return clamp(turnDemand*steerGain, -1.0, 1.0)
+}
+
+func (i *Inferencer) inferenceStepSeconds() float64 {
+	if i.config.FPS <= 0 {
+		return 0
+	}
+	dispatchStride := i.config.DispatchStride
+	if dispatchStride <= 0 {
+		dispatchStride = 1
+	}
+	return float64(dispatchStride) / float64(i.config.FPS)
+}
+
+func (i *Inferencer) maxTargetSpeedMetersPerSecond() float64 {
+	return math.Max(i.config.MaxTargetSpeedKPH, 0.0) / 3.6
+}
+
+func (i *Inferencer) resetControlStateLocked() {
+	i.moveIntentActive = false
+	i.moveIntentLatched = false
+	i.lastSteerCommand = 0
+	i.hasLastSteerCommand = false
+}
+
+func moveTowards(current float64, target float64, maxDelta float64) float64 {
+	if maxDelta <= 0 {
+		return target
+	}
+	if target > current {
+		return math.Min(current+maxDelta, target)
+	}
+	if target < current {
+		return math.Max(current-maxDelta, target)
+	}
+	return target
+}
+
+func lerp(start float64, end float64, t float64) float64 {
+	return start + (end-start)*t
+}
+
+func (i *Inferencer) submitPredictionCommand(command actuator.CommandRequest) error {
+	if i.actuator == nil {
+		return errors.New("inference actuator is not configured")
+	}
+	_, err := i.actuator.Submit(command)
+	return err
+}
+
+func clamp(value float64, minimum float64, maximum float64) float64 {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func normalizeHeadingDegrees(value float64) float64 {
+	normalized := math.Mod(value, 360.0)
+	if normalized < 0 {
+		normalized += 360.0
+	}
+	return normalized
+}
+
+func signedHeadingDeltaDegrees(target float64, source float64) float64 {
+	delta := normalizeHeadingDegrees(target) - normalizeHeadingDegrees(source)
+	for delta > 180.0 {
+		delta -= 360.0
+	}
+	for delta < -180.0 {
+		delta += 360.0
+	}
+	return delta
 }

@@ -26,6 +26,7 @@ import (
 var webAssets embed.FS
 
 func main() {
+	const backendBuildID = "2026-04-21-capture-failfast-v1"
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "process-runs":
@@ -52,6 +53,7 @@ func main() {
 	if inferenceConfig.ConfigPath != "" {
 		log.Printf("loaded backend inference config from %s", inferenceConfig.ConfigPath)
 	}
+	log.Printf("backend build=%s capture_stop_output_validation=enabled", backendBuildID)
 	actuatorConfig, err := actuator.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("failed to load backend actuator config: %v", err)
@@ -63,8 +65,8 @@ func main() {
 
 	svc := capture.NewService()
 	controlStore := control.NewStore()
-	inferencer := capture.NewInferencer(inferenceConfig, controlStore)
 	actuatorService := actuator.NewService(actuatorConfig, configPath)
+	inferencer := capture.NewInferencer(inferenceConfig, controlStore, actuatorService)
 	if err := actuatorService.Start(); err != nil {
 		log.Fatalf("failed to start virtual controller actuator: %v", err)
 	}
@@ -103,6 +105,8 @@ func main() {
 
 		writeEmbeddedFile(w, "web/app.ts", "text/javascript; charset=utf-8")
 	})
+
+	registerDataInspectorHandlers(mux, filepath.Join(defaultBackendDataRoot(), "runs"))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -482,7 +486,35 @@ func main() {
 			return
 		}
 
-		res, err := svc.Stop(r.Context())
+		var req struct {
+			RunID           string `json:"runId"`
+			TripIndex       int    `json:"tripIndex"`
+			SceneID         string `json:"sceneId"`
+			SceneVariant    string `json:"sceneVariant"`
+			SceneName       string `json:"sceneName"`
+			SkipPostProcess bool   `json:"skipPostProcess"`
+			AbortOnly       bool   `json:"abortOnly"`
+		}
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("capture stop request run=%s scene=%s variant=%s trip=%d legacy_skip_post_process=%t",
+			req.RunID,
+			req.SceneID,
+			req.SceneVariant,
+			req.TripIndex,
+			req.SkipPostProcess,
+		)
+
+		var res capture.StopResult
+		var err error
+		if req.AbortOnly {
+			log.Printf("capture abort request run=%s scene=%s variant=%s trip=%d", req.RunID, req.SceneID, req.SceneVariant, req.TripIndex)
+			res, err = svc.ForceStop(r.Context())
+		} else {
+			res, err = svc.Stop(r.Context())
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, capture.ErrNotRunning):
@@ -497,11 +529,28 @@ func main() {
 		processingPath := filepath.Join(tripDir, "processing.json")
 		postProcessStatus := "queued"
 		postProcessError := ""
-		if _, err := processor.Queue(tripDir); err != nil {
+		log.Printf("capture stop success run=%s scene=%s variant=%s trip=%d output=%s bytes=%d",
+			req.RunID,
+			req.SceneID,
+			req.SceneVariant,
+			req.TripIndex,
+			res.OutputFile,
+			res.OutputBytes,
+		)
+		if req.AbortOnly {
+			postProcessStatus = "aborted"
+			postProcessError = "capture aborted after hard failure; post-processing skipped"
+		} else if _, err := processor.Queue(tripDir); err != nil {
 			postProcessStatus = "failed"
 			postProcessError = err.Error()
 		} else {
 			go func(targetTripDir string) {
+				readinessCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+				defer cancel()
+				if err := datasetproc.WaitForTripReadiness(readinessCtx, targetTripDir, 500*time.Millisecond); err != nil {
+					log.Printf("post-processing readiness failed for %s: %v", targetTripDir, err)
+					return
+				}
 				if err := processor.ProcessTrip(context.Background(), targetTripDir); err != nil {
 					log.Printf("post-processing failed for %s: %v", targetTripDir, err)
 				}
@@ -513,6 +562,7 @@ func main() {
 			"sessionId":         res.SessionID,
 			"outputFile":        res.OutputFile,
 			"logFile":           res.LogFile,
+			"outputBytes":       res.OutputBytes,
 			"postProcessStatus": postProcessStatus,
 			"processingFile":    processingPath,
 			"postProcessError":  postProcessError,

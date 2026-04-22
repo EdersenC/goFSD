@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -14,19 +15,19 @@ from typing import Any, Mapping
 
 import torch
 
-from control_client import (
-    INPUT_MODE_MODEL_RAW,
-    load_actuator_config,
-    post_control_command,
-)
 from control_translation import (
     CONTROL_SEMANTICS_CONTROLLER_INPUT,
     CONTROL_SEMANTICS_SPEED_DELTA,
     CONTROL_SEMANTICS_TARGET_SPEED,
-    translate_control_prediction,
 )
-from control_client import build_control_command
-from heads import HeadSpec, head_layout_metadata, head_specs_metadata, resolve_checkpoint_head_specs
+from heads import (
+    FUTURE_YAW_DELTA_HEAD_NAME,
+    HeadSpec,
+    control_head_specs,
+    head_layout_metadata,
+    head_specs_metadata,
+    resolve_checkpoint_head_specs,
+)
 from image_io import load_rgb_tensor_from_bytes, load_rgb_tensor_from_path
 from inference import (
     DEFAULT_CONFIG_PATH,
@@ -42,8 +43,10 @@ from inference import (
 from model_output import single_control_prediction_from_output, single_prediction_from_output
 from state_inputs import (
     CURRENT_SPEED_KEY,
+    ROUTE_FORWARD_DELTA_KEY,
     StateInputConfig,
     normalize_current_speed_value,
+    normalize_route_forward_delta_value,
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
@@ -52,6 +55,14 @@ from target_transforms import (
     legacy_delta_speed_target_transform,
     resolve_checkpoint_delta_speed_target_transform,
 )
+
+
+def sigmoid_probability(value: float) -> float:
+    if value >= 0:
+        exponent = math.exp(-value)
+        return 1.0 / (1.0 + exponent)
+    exponent = math.exp(value)
+    return exponent / (1.0 + exponent)
 
 
 @dataclass(frozen=True)
@@ -167,17 +178,17 @@ def control_target_sources(head_specs: list[dict[str, Any]] | None) -> dict[str,
 
 
 def control_semantics_from_sources(sources: Mapping[str, str]) -> str:
-    steer_source = str(sources.get("steer", "")).lower()
+    lateral_source = str(sources.get(FUTURE_YAW_DELTA_HEAD_NAME, "")).lower()
     future_speed_source = str(sources.get("future_speed", "")).lower()
     delta_speed_source = str(sources.get("delta_speed", "")).lower()
     accel_source = str(sources.get("accel", "")).lower()
-    if "steerinput" in steer_source and ("accelinput" in accel_source or "deltaspeedinput" in delta_speed_source):
+    if "steerinput" in lateral_source and ("accelinput" in accel_source or "deltaspeedinput" in delta_speed_source):
         return CONTROL_SEMANTICS_CONTROLLER_INPUT
     if "label.future_speed" in future_speed_source or "future_speed" in future_speed_source:
         return CONTROL_SEMANTICS_TARGET_SPEED
     if "label.delta_speed" in delta_speed_source or "delta_speed" in delta_speed_source:
         return CONTROL_SEMANTICS_SPEED_DELTA
-    if steer_source or accel_source or delta_speed_source or future_speed_source:
+    if lateral_source or accel_source or delta_speed_source or future_speed_source:
         return "vehicle_state"
     return CONTROL_SEMANTICS_CONTROLLER_INPUT
 
@@ -258,7 +269,6 @@ class ModelRuntime:
             self._image_size = image_size
             self._frame_count = frame_count
             self._frame_stride = frame_stride
-            self._transform = self._build_transform(image_size)
 
         target_sources = control_target_sources(head_specs_metadata_payload)
         return {
@@ -319,26 +329,44 @@ class ModelRuntime:
         frames = self._extract_frames(payload)
         x = torch.cat(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
         current_speed_raw, current_speed = self._extract_current_speed(payload, state_input_config)
+        route_forward_delta_raw, route_forward_delta = self._extract_route_forward_delta(payload, state_input_config)
         if current_speed is not None:
             current_speed = current_speed.to(device, non_blocking=device.type == "cuda")
+        if route_forward_delta is not None:
+            route_forward_delta = route_forward_delta.to(device, non_blocking=device.type == "cuda")
 
         with torch.no_grad():
-            output = model(x, current_speed=current_speed)
+            output = model(
+                x,
+                current_speed=current_speed,
+                route_forward_delta=route_forward_delta,
+            )
+
+        outputs = single_prediction_from_output(
+            output,
+            head_specs=head_specs,
+            delta_speed_transform=delta_speed_transform,
+        )
+        control_outputs = single_control_prediction_from_output(
+            output,
+            head_specs=head_specs,
+            delta_speed_transform=delta_speed_transform,
+        )
+        for spec in control_head_specs(head_specs):
+            if spec.name in outputs:
+                control_outputs[spec.name] = outputs[spec.name]
+        if "delta_speed" in outputs:
+            control_outputs["delta_speed"] = outputs["delta_speed"]
+        if "move_intent" in outputs:
+            move_intent_logit = float(outputs["move_intent"])
+            control_outputs["move_intent_prob"] = sigmoid_probability(move_intent_logit)
 
         target_sources = control_target_sources(head_specs_metadata_payload)
         response = {
             "checkpoint": str(checkpoint_path),
             "device": str(device),
-            "outputs": single_prediction_from_output(
-                output,
-                head_specs=head_specs,
-                delta_speed_transform=delta_speed_transform,
-            ),
-            "control_outputs": single_control_prediction_from_output(
-                output,
-                head_specs=head_specs,
-                delta_speed_transform=delta_speed_transform,
-            ),
+            "outputs": outputs,
+            "control_outputs": control_outputs,
             "state_inputs": state_inputs_metadata(state_input_config),
             "delta_speed_target_transform": delta_speed_transform.metadata(),
             "control_target_sources": target_sources,
@@ -349,11 +377,17 @@ class ModelRuntime:
                 "input_channels": frame_count * 3,
             },
         }
+        raw_state_inputs: dict[str, float] = {}
+        normalized_state_inputs: dict[str, float] = {}
         if current_speed_raw is not None and current_speed is not None:
-            response["raw_state_inputs"] = {CURRENT_SPEED_KEY: current_speed_raw}
-            response["normalized_state_inputs"] = {
-                CURRENT_SPEED_KEY: float(current_speed.squeeze(0).item()),
-            }
+            raw_state_inputs[CURRENT_SPEED_KEY] = current_speed_raw
+            normalized_state_inputs[CURRENT_SPEED_KEY] = float(current_speed.squeeze(0).item())
+        if route_forward_delta_raw is not None and route_forward_delta is not None:
+            raw_state_inputs[ROUTE_FORWARD_DELTA_KEY] = route_forward_delta_raw
+            normalized_state_inputs[ROUTE_FORWARD_DELTA_KEY] = float(route_forward_delta.squeeze(0).item())
+        if raw_state_inputs:
+            response["raw_state_inputs"] = raw_state_inputs
+            response["normalized_state_inputs"] = normalized_state_inputs
         return response
 
     def _extract_frames(self, payload: dict[str, Any]) -> list[torch.Tensor]:
@@ -403,13 +437,25 @@ class ModelRuntime:
         normalized = normalize_current_speed_value(raw_value, config.current_speed_cap)
         return float(raw_value), torch.tensor([normalized], dtype=torch.float32)
 
+    def _extract_route_forward_delta(
+        self,
+        payload: dict[str, Any],
+        config: StateInputConfig,
+    ) -> tuple[float | None, torch.Tensor | None]:
+        if not config.route_forward_delta_enabled:
+            return None, None
+        if ROUTE_FORWARD_DELTA_KEY not in payload:
+            raise ValueError(f"request must include {ROUTE_FORWARD_DELTA_KEY} for this checkpoint")
+        raw_value = payload[ROUTE_FORWARD_DELTA_KEY]
+        normalized = normalize_route_forward_delta_value(raw_value, config.route_forward_delta_cap)
+        return float(raw_value), torch.tensor([normalized], dtype=torch.float32)
+
 
 class ModelServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], handler_cls: type[BaseHTTPRequestHandler], *, config_path: Path):
         super().__init__(server_address, handler_cls)
         self.runtime = ModelRuntime()
         self.config_path = config_path
-        self.actuator = load_actuator_config(config_path)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -438,44 +484,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/predict":
                 result = self.server.runtime.predict(payload)
-                control_outputs = result.get("control_outputs", {})
-                steer = float(control_outputs.get("steer", 0.0))
-                control_semantics = str(result.get("control_semantics") or CONTROL_SEMANTICS_CONTROLLER_INPUT)
-                longitudinal_output = float(
-                    control_outputs.get("future_speed", control_outputs.get("delta_speed", 0.0))
-                )
-                raw_state_inputs = result.get("raw_state_inputs", {})
-                current_speed = None
-                if isinstance(raw_state_inputs, dict) and CURRENT_SPEED_KEY in raw_state_inputs:
-                    current_speed = float(raw_state_inputs[CURRENT_SPEED_KEY])
-                translated = translate_control_prediction(
-                    steer,
-                    longitudinal_output,
-                    control_semantics,
-                    current_speed=current_speed,
-                )
-                sequence = self._read_int(payload.get("sequence"))
-                timestamp_ms = self._read_int(payload.get("timestamp_ms"))
-                command = build_control_command(
-                    steering=float(translated["steering"]),
-                    acceleration=float(translated["acceleration"]),
-                    input_mode=str(translated["input_mode"] or INPUT_MODE_MODEL_RAW),
-                    sequence=sequence,
-                    timestamp_ms=timestamp_ms,
-                )
-                result["translated_control"] = translated
-                print(json.dumps({
-                    "event": "predict_to_actuator",
-                    "sequence": sequence,
-                    "timestamp_ms": timestamp_ms,
-                    "checkpoint": result.get("checkpoint"),
-                    "control_semantics": control_semantics,
-                    "outputs": result.get("outputs", {}),
-                    "control_outputs": control_outputs,
-                    "translated_control": translated,
-                    "actuator_command": command,
-                }, separators=(",", ":")), flush=True)
-                post_control_command(self.server.actuator, command)
                 self._write_json(HTTPStatus.OK, result)
                 return
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})

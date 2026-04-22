@@ -21,7 +21,8 @@ const (
 
 var trackedLabelFields = map[string]string{
 	"steer":               "Steering",
-	"future_steer":        "future_steer",
+	"future_yaw_delta":    "future_yaw_delta",
+	"future_horizon_s":    "future_horizon_seconds",
 	"delta_speed":         "delta_speed",
 	"delta_speed_target":  "delta_speed_target",
 	"future_speed":        "future_speed",
@@ -30,7 +31,7 @@ var trackedLabelFields = map[string]string{
 	"velocity_forward":    "velocityForward",
 	"velocity_lateral":    "velocityLateral",
 	"velocity_vertical":   "velocityVertical",
-	"yaw_rate":            "yawRate",
+	"yaw_rate":            "yaw_rate",
 	"gear":                "gear",
 	"rpm":                 "rpm",
 	"engine_health":       "engineHealth",
@@ -56,6 +57,7 @@ var trackedLabelFields = map[string]string{
 }
 
 var trackedBooleanFields = map[string]string{
+	"move_intent":              "move_intent",
 	"route_gps_valid":          "routeGpsValid",
 	"on_road":                  "isOnRoad",
 	"offroad_node":             "isOffroadNode",
@@ -156,10 +158,12 @@ type TripDatasetReport struct {
 	TripDir            string                    `json:"trip_dir"`
 	ProcessingState    string                    `json:"processing_state"`
 	ProcessingError    string                    `json:"processing_error,omitempty"`
+	ProcessingWarning  string                    `json:"processing_warning,omitempty"`
 	FrameCount         int                       `json:"frame_count"`
 	SampleCount        int                       `json:"sample_count"`
 	MissingDataset     bool                      `json:"missing_dataset"`
 	ZeroSamples        bool                      `json:"zero_samples"`
+	ZeroSampleReasons  map[string]int            `json:"zero_sample_reasons,omitempty"`
 	TripSeed           string                    `json:"trip_seed,omitempty"`
 	WeatherType        string                    `json:"weather_type,omitempty"`
 	TimeOfDay          string                    `json:"time_of_day,omitempty"`
@@ -771,6 +775,16 @@ func buildTripDatasetReport(ctx tripContext, deltaSpeedClip float64) (TripDatase
 	if len(samples) == 0 {
 		warnings = append(warnings, "zero_samples")
 	}
+	if len(status.ZeroSampleReasons) > 0 {
+		reasonKeys := make([]string, 0, len(status.ZeroSampleReasons))
+		for key := range status.ZeroSampleReasons {
+			reasonKeys = append(reasonKeys, key)
+		}
+		sort.Strings(reasonKeys)
+		for _, key := range reasonKeys {
+			warnings = append(warnings, fmt.Sprintf("zero_sample_reason:%s", key))
+		}
+	}
 	for _, label := range flatLabels {
 		warnings = append(warnings, fmt.Sprintf("flat_label:%s", label))
 	}
@@ -784,10 +798,12 @@ func buildTripDatasetReport(ctx tripContext, deltaSpeedClip float64) (TripDatase
 		TripDir:            ctx.tripDir,
 		ProcessingState:    processingState,
 		ProcessingError:    strings.TrimSpace(status.Error),
+		ProcessingWarning:  strings.TrimSpace(status.Warning),
 		FrameCount:         frameCount,
 		SampleCount:        len(samples),
 		MissingDataset:     missingDataset,
 		ZeroSamples:        len(samples) == 0,
+		ZeroSampleReasons:  status.ZeroSampleReasons,
 		TripSeed:           strings.TrimSpace(metadata.TripSeed),
 		WeatherType:        strings.TrimSpace(metadata.WeatherType),
 		TimeOfDay:          strings.TrimSpace(metadata.TimeOfDay),

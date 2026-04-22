@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,47 @@ func TestLoadRunTripRecord(t *testing.T) {
 	}
 }
 
+func TestWaitForTripReadinessWaitsForManifestRow(t *testing.T) {
+	tmp := t.TempDir()
+	sceneDir := filepath.Join(tmp, "run-a", "scene-a_default")
+	tripDir := filepath.Join(sceneDir, "trip-000")
+	if err := os.MkdirAll(tripDir, 0o755); err != nil {
+		t.Fatalf("mkdir trip dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tripDir, "video.mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		writeJSONFile(t, filepath.Join(tripDir, "metadata.json"), tripMetadata{
+			RunID:     "run-a",
+			TripIndex: 0,
+		})
+
+		runFile := filepath.Join(sceneDir, "run.jsonl")
+		file, err := os.Create(runFile)
+		if err != nil {
+			t.Errorf("create run manifest: %v", err)
+			return
+		}
+		defer file.Close()
+
+		if err := json.NewEncoder(file).Encode(runTripRecord{
+			RunID:     "run-a",
+			TripIndex: 0,
+		}); err != nil {
+			t.Errorf("encode run record: %v", err)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := WaitForTripReadiness(ctx, tripDir, 10*time.Millisecond); err != nil {
+		t.Fatalf("WaitForTripReadiness: %v", err)
+	}
+}
+
 func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	frames := AttachImagePaths([]VideoFrame{
 		{Index: 0, PTS: 0.0},
@@ -67,8 +109,8 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 		{Index: 6, PTS: 0.6},
 	}, "frames")
 	labels := []timedLabel{
-		{RelativeSeconds: 0.19, Label: map[string]any{"time": 190.0, "Steering": 0.12, "currentSpeed": 4.5, "acceleration": 0.25}},
-		{RelativeSeconds: 0.41, Label: map[string]any{"time": 410.0, "Steering": 0.32, "currentSpeed": 6.0, "acceleration": 0.5}},
+		{RelativeSeconds: 0.19, Label: map[string]any{"time": 190.0, "Steering": 0.12, "currentSpeed": 4.5, "acceleration": 0.25, "yaw": 14.0, "yawRate": -1.0, "routeForwardDelta": 0.25}},
+		{RelativeSeconds: 0.41, Label: map[string]any{"time": 410.0, "Steering": 0.32, "currentSpeed": 6.0, "acceleration": 0.5, "yaw": 32.0, "yawRate": 1.0, "routeForwardDelta": 0.75}},
 	}
 
 	samples := buildDatasetSamples(frames, labels, 0.0, 3, 2, 2, 100*time.Millisecond, 2.0, true)
@@ -102,8 +144,136 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	if samples[0].Label["future_speed_target"] != 5.25 {
 		t.Fatalf("unexpected future_speed_target: %+v", samples[0].Label)
 	}
-	if samples[0].Label["future_steer"] != 0.32 {
-		t.Fatalf("unexpected future_steer: %+v", samples[0].Label)
+	if samples[0].Label["future_yaw_delta"] != 9.0 {
+		t.Fatalf("unexpected future_yaw_delta: %+v", samples[0].Label)
+	}
+	if math.Abs(samples[0].Label["future_horizon_seconds"].(float64)-0.22) > 1e-6 {
+		t.Fatalf("unexpected future_horizon_seconds: %+v", samples[0].Label)
+	}
+	if samples[0].Label["yaw_rate"] != 0.0 {
+		t.Fatalf("unexpected yaw_rate: %+v", samples[0].Label)
+	}
+	if samples[0].Label["routeForwardDelta"] != 0.5 {
+		t.Fatalf("unexpected routeForwardDelta: %+v", samples[0].Label)
+	}
+	if samples[0].Label["move_intent"] != true {
+		t.Fatalf("unexpected move_intent: %+v", samples[0].Label)
+	}
+}
+
+func TestBuildTrainingLabelSuppressesMoveIntentAtTrafficLights(t *testing.T) {
+	label, ok := buildTrainingLabel(
+		map[string]any{
+			"currentSpeed":             0.0,
+			"isStoppedAtTrafficLights": true,
+			"routeGpsValid":            true,
+			"yaw":                      0.0,
+		},
+		map[string]any{
+			"currentSpeed": 2.0,
+			"Steering":     0.1,
+		},
+		2.0,
+		2.0,
+		10.0,
+		0.0,
+		0.0,
+		1.0,
+		2.0,
+		true,
+	)
+	if !ok {
+		t.Fatal("expected training label")
+	}
+	if label["move_intent"] != false {
+		t.Fatalf("expected move_intent=false, got %+v", label)
+	}
+}
+
+func TestBuildTrainingLabelSuppressesMoveIntentForCloseLeadVehicle(t *testing.T) {
+	label, ok := buildTrainingLabel(
+		map[string]any{
+			"currentSpeed":             0.2,
+			"routeGpsValid":            true,
+			"hasLeadVehicle":           true,
+			"leadVehicleDistance":      8.0,
+			"leadVehicleRelativeSpeed": 0.1,
+			"yaw":                      0.0,
+		},
+		map[string]any{
+			"currentSpeed": 3.0,
+			"Steering":     0.1,
+		},
+		3.0,
+		3.0,
+		10.0,
+		0.0,
+		0.0,
+		1.0,
+		2.0,
+		true,
+	)
+	if !ok {
+		t.Fatal("expected training label")
+	}
+	if label["move_intent"] != false {
+		t.Fatalf("expected move_intent=false, got %+v", label)
+	}
+}
+
+func TestBuildTrainingLabelFallsBackToImitationMoveIntentWithoutRouteGPS(t *testing.T) {
+	label, ok := buildTrainingLabel(
+		map[string]any{
+			"currentSpeed":  0.0,
+			"routeGpsValid": false,
+			"yaw":           0.0,
+		},
+		map[string]any{
+			"currentSpeed": 2.0,
+			"Steering":     0.1,
+		},
+		1.0,
+		2.0,
+		10.0,
+		0.0,
+		0.0,
+		1.0,
+		2.0,
+		true,
+	)
+	if !ok {
+		t.Fatal("expected training label")
+	}
+	if label["move_intent"] != true {
+		t.Fatalf("expected move_intent=true, got %+v", label)
+	}
+}
+
+func TestBuildTrainingLabelSuppressesSingleFutureSpeedSpikeInMoveIntent(t *testing.T) {
+	label, ok := buildTrainingLabel(
+		map[string]any{
+			"currentSpeed":  0.0,
+			"routeGpsValid": true,
+			"yaw":           0.0,
+		},
+		map[string]any{
+			"currentSpeed": 3.0,
+			"Steering":     0.1,
+		},
+		3.0,
+		1.0,
+		10.0,
+		0.0,
+		0.0,
+		1.0,
+		2.0,
+		true,
+	)
+	if !ok {
+		t.Fatal("expected training label")
+	}
+	if label["move_intent"] != false {
+		t.Fatalf("expected move_intent=false for unsustained future spike, got %+v", label)
 	}
 }
 
@@ -122,8 +292,8 @@ func TestBuildDatasetSamplesSupportsConfigurableWindowSize(t *testing.T) {
 		{Index: 10, PTS: 1.0},
 	}, "frames")
 	labels := []timedLabel{
-		{RelativeSeconds: 0.41, Label: map[string]any{"time": 410.0, "Steering": 0.32, "currentSpeed": 6.0}},
-		{RelativeSeconds: 0.61, Label: map[string]any{"time": 610.0, "Steering": 0.22, "currentSpeed": 7.0}},
+		{RelativeSeconds: 0.41, Label: map[string]any{"time": 410.0, "Steering": 0.32, "currentSpeed": 6.0, "yaw": 32.0, "yawRate": 0.5, "routeForwardDelta": 0.5}},
+		{RelativeSeconds: 0.61, Label: map[string]any{"time": 610.0, "Steering": 0.22, "currentSpeed": 7.0, "yaw": 44.0, "yawRate": 1.5, "routeForwardDelta": 0.75}},
 	}
 
 	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 2, 100*time.Millisecond, 2.0, true)
@@ -151,9 +321,9 @@ func TestBuildDatasetSamplesUsesIndependentSampleStride(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 	labels := []timedLabel{
-		{RelativeSeconds: 0.4, Label: map[string]any{"time": 400.0, "Steering": 0.1, "currentSpeed": 4.0}},
-		{RelativeSeconds: 1.4, Label: map[string]any{"time": 1400.0, "Steering": 0.2, "currentSpeed": 6.0}},
-		{RelativeSeconds: 2.4, Label: map[string]any{"time": 2400.0, "Steering": 0.3, "currentSpeed": 9.0}},
+		{RelativeSeconds: 0.4, Label: map[string]any{"time": 400.0, "Steering": 0.1, "currentSpeed": 4.0, "yaw": 10.0, "yawRate": 0.25, "routeForwardDelta": 0.25}},
+		{RelativeSeconds: 1.4, Label: map[string]any{"time": 1400.0, "Steering": 0.2, "currentSpeed": 6.0, "yaw": 20.0, "yawRate": 0.5, "routeForwardDelta": 0.5}},
+		{RelativeSeconds: 2.4, Label: map[string]any{"time": 2400.0, "Steering": 0.3, "currentSpeed": 9.0, "yaw": 30.0, "yawRate": 0.75, "routeForwardDelta": 0.75}},
 	}
 
 	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 10, 100*time.Millisecond, 2.0, true)
@@ -338,21 +508,115 @@ func TestSmoothedFutureSpeedUsesAvailableNeighbors(t *testing.T) {
 	}
 }
 
+func TestSmoothedFutureYawWrapsAcrossZeroDegrees(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.2, Label: map[string]any{"yaw": 359.0}},
+		{RelativeSeconds: 0.4, Label: map[string]any{"yaw": 1.0}},
+		{RelativeSeconds: 0.6, Label: map[string]any{"yaw": 3.0}},
+	}
+
+	got, ok := smoothedFutureYaw(labels, 1, 1)
+	if !ok {
+		t.Fatal("expected smoothedFutureYaw to succeed")
+	}
+	if math.Abs(got-1.0) > 1e-6 {
+		t.Fatalf("unexpected smoothed future yaw: got=%v want=1.0", got)
+	}
+}
+
+func TestWrapHeadingDeltaDegreesWrapsAcrossZero(t *testing.T) {
+	if got := wrapHeadingDeltaDegrees(359.0 - 1.0); math.Abs(got+2.0) > 1e-6 {
+		t.Fatalf("unexpected wrapped heading delta: got=%v want=-2.0", got)
+	}
+	if got := wrapHeadingDeltaDegrees(1.0 - 359.0); math.Abs(got-2.0) > 1e-6 {
+		t.Fatalf("unexpected wrapped heading delta: got=%v want=2.0", got)
+	}
+}
+
+func TestSmoothedYawRateUsesAvailableNeighbors(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.2, Label: map[string]any{"yawRate": -3.0}},
+		{RelativeSeconds: 0.4, Label: map[string]any{"yawRate": 0.0}},
+		{RelativeSeconds: 0.6, Label: map[string]any{"yawRate": 6.0}},
+	}
+
+	got, ok := smoothedYawRate(labels, 1, 1)
+	if !ok {
+		t.Fatal("expected smoothedYawRate to succeed")
+	}
+	if math.Abs(got-1.0) > 1e-6 {
+		t.Fatalf("unexpected smoothed yaw rate: got=%v want=1.0", got)
+	}
+}
+
+func TestSmoothedYawRateDerivesFromYawWhenRawFieldIsMissing(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.2, Label: map[string]any{"yaw": 359.0}},
+		{RelativeSeconds: 0.4, Label: map[string]any{"yaw": 1.0}},
+		{RelativeSeconds: 0.6, Label: map[string]any{"yaw": 3.0}},
+	}
+
+	got, ok := smoothedYawRate(labels, 1, 0)
+	if !ok {
+		t.Fatal("expected smoothedYawRate to derive from yaw")
+	}
+	want := degreesToRadians(4.0) / 0.4
+	if math.Abs(got-want) > 1e-6 {
+		t.Fatalf("unexpected derived yaw rate: got=%v want=%v", got, want)
+	}
+}
+
+func TestBuildDatasetSamplesWithStatsTracksMissingFutureYawTargets(t *testing.T) {
+	frames := AttachImagePaths([]VideoFrame{
+		{Index: 0, PTS: 0.0},
+		{Index: 1, PTS: 0.1},
+		{Index: 2, PTS: 0.2},
+		{Index: 3, PTS: 0.3},
+		{Index: 4, PTS: 0.4},
+		{Index: 5, PTS: 0.5},
+		{Index: 6, PTS: 0.6},
+	}, "frames")
+	labels := []timedLabel{
+		{RelativeSeconds: 0.19, Label: map[string]any{"time": 190.0, "Steering": 0.12, "currentSpeed": 4.5}},
+		{RelativeSeconds: 0.41, Label: map[string]any{"time": 410.0, "Steering": 0.32, "currentSpeed": 6.0}},
+	}
+
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 2, 100*time.Millisecond, 2.0, true)
+	if len(samples) != 0 {
+		t.Fatalf("expected no samples, got=%d", len(samples))
+	}
+	if stats.MissingFutureYawTargetCount != 1 {
+		t.Fatalf("unexpected missing future-yaw count: %+v", stats)
+	}
+	if stats.GeneratedSampleCount != 0 {
+		t.Fatalf("unexpected generated sample count: %+v", stats)
+	}
+	reasons := stats.zeroSampleReasons()
+	if reasons["missing_future_yaw_target"] != 1 {
+		t.Fatalf("unexpected zero sample reasons: %+v", reasons)
+	}
+}
+
 func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 	current := map[string]any{
-		"time":         400.0,
-		"Steering":     0.1,
-		"currentSpeed": 4.0,
-		"acceleration": 0.25,
+		"time":              400.0,
+		"Steering":          0.1,
+		"currentSpeed":      4.0,
+		"acceleration":      0.25,
+		"yaw":               12.0,
+		"yawRate":           0.5,
+		"routeForwardDelta": 0.25,
 	}
 	future := map[string]any{
 		"time":         1400.0,
 		"Steering":     0.2,
 		"currentSpeed": 6.5,
 		"acceleration": 0.5,
+		"yaw":          18.0,
+		"yawRate":      1.25,
 	}
 
-	derived, ok := buildTrainingLabel(current, future, 5.25, 2.0, true)
+	derived, ok := buildTrainingLabel(current, future, 5.25, 5.25, 18.0, 1.25, 0.75, 1.0, 2.0, true)
 	if !ok {
 		t.Fatal("expected training label to be derived")
 	}
@@ -374,8 +638,31 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 	if derived["future_speed_target"] != 5.25 {
 		t.Fatalf("unexpected future_speed_target in derived label: %+v", derived)
 	}
-	if derived["future_steer"] != 0.2 {
-		t.Fatalf("unexpected future_steer in derived label: %+v", derived)
+	if derived["routeForwardDelta"] != 0.75 {
+		t.Fatalf("unexpected routeForwardDelta in derived label: %+v", derived)
+	}
+	if derived["future_yaw_delta"] != 6.0 {
+		t.Fatalf("unexpected future_yaw_delta in derived label: %+v", derived)
+	}
+	if derived["future_horizon_seconds"] != 1.0 {
+		t.Fatalf("unexpected future_horizon_seconds in derived label: %+v", derived)
+	}
+	if derived["yaw_rate"] != 1.25 {
+		t.Fatalf("unexpected yaw_rate in derived label: %+v", derived)
+	}
+}
+
+func TestResolvedRouteForwardDeltaFallsBackToCoordsGpsAndYaw(t *testing.T) {
+	value, ok := resolvedRouteForwardDelta(map[string]any{
+		"coords": []any{0.0, 0.0, 0.0},
+		"gps":    []any{0.0, 5.0, 0.0},
+		"yaw":    0.0,
+	})
+	if !ok {
+		t.Fatal("expected derived routeForwardDelta")
+	}
+	if math.Abs(value-5.0) > 1e-6 {
+		t.Fatalf("unexpected derived routeForwardDelta: got=%f want=5.0", value)
 	}
 }
 
@@ -443,7 +730,7 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tripDir, "video.mkv"), []byte("stub"), 0o644); err != nil {
 		t.Fatalf("write video: %v", err)
 	}
-	runBody := `{"runId":"run-a","tripIndex":0,"vehicleData":[{"time":200,"Steering":0.1,"currentSpeed":8.0,"isStopped":false},{"time":400,"Steering":0.2,"currentSpeed":7.0,"isStopped":true},{"time":600,"Steering":0.2,"currentSpeed":6.0,"isStopped":true},{"time":800,"Steering":0.2,"currentSpeed":5.0,"isStopped":1},{"time":1000,"Steering":0.2,"currentSpeed":4.0,"isStopped":true},{"time":1200,"Steering":0.2,"currentSpeed":3.0,"isStopped":true},{"time":1400,"Steering":0.3,"currentSpeed":2.0,"isStopped":false}]}`
+	runBody := `{"runId":"run-a","tripIndex":0,"vehicleData":[{"time":200,"Steering":0.1,"currentSpeed":8.0,"isStopped":false,"yaw":10.0,"yawRate":0.1,"routeForwardDelta":0.25},{"time":400,"Steering":0.2,"currentSpeed":7.0,"isStopped":true,"yaw":15.0,"yawRate":0.1,"routeForwardDelta":0.5},{"time":600,"Steering":0.2,"currentSpeed":6.0,"isStopped":true,"yaw":20.0,"yawRate":0.1,"routeForwardDelta":0.25},{"time":800,"Steering":0.2,"currentSpeed":5.0,"isStopped":1,"yaw":25.0,"yawRate":0.1,"routeForwardDelta":0.1},{"time":1000,"Steering":0.2,"currentSpeed":4.0,"isStopped":true,"yaw":30.0,"yawRate":0.1,"routeForwardDelta":0.0},{"time":1200,"Steering":0.2,"currentSpeed":3.0,"isStopped":true,"yaw":35.0,"yawRate":0.1,"routeForwardDelta":-0.1},{"time":1400,"Steering":0.3,"currentSpeed":2.0,"isStopped":false,"yaw":40.0,"yawRate":0.1,"routeForwardDelta":-0.2}]}`
 	if err := os.WriteFile(filepath.Join(tmp, "run.jsonl"), []byte(runBody+"\n"), 0o644); err != nil {
 		t.Fatalf("write run.jsonl: %v", err)
 	}
@@ -519,7 +806,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tripDir, "video.mkv"), []byte("stub"), 0o644); err != nil {
 		t.Fatalf("write video: %v", err)
 	}
-	runBody := `{"runId":"run-a","tripIndex":0,"vehicleData":[{"time":200,"Steering":0.1,"currentSpeed":4.0,"acceleration":0.2},{"time":400,"Steering":0.2,"currentSpeed":6.0,"acceleration":0.4}]}`
+	runBody := `{"runId":"run-a","tripIndex":0,"vehicleData":[{"time":200,"Steering":0.1,"currentSpeed":4.0,"acceleration":0.2,"yaw":10.0,"yawRate":0.25,"routeForwardDelta":0.25},{"time":400,"Steering":0.2,"currentSpeed":6.0,"acceleration":0.4,"yaw":20.0,"yawRate":0.5,"routeForwardDelta":0.5}]}`
 	if err := os.WriteFile(filepath.Join(tmp, "run.jsonl"), []byte(runBody+"\n"), 0o644); err != nil {
 		t.Fatalf("write run.jsonl: %v", err)
 	}
@@ -569,8 +856,11 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 	if sample.Label["future_speed_target"] != 5.0 {
 		t.Fatalf("unexpected future_speed_target in rewritten dataset: %+v", sample.Label)
 	}
-	if sample.Label["future_steer"] != 0.2 {
-		t.Fatalf("unexpected future_steer in rewritten dataset: %+v", sample.Label)
+	if math.Abs(sample.Label["future_yaw_delta"].(float64)-5.0) > 1e-6 {
+		t.Fatalf("unexpected future_yaw_delta in rewritten dataset: %+v", sample.Label)
+	}
+	if math.Abs(sample.Label["future_horizon_seconds"].(float64)-0.2) > 1e-6 {
+		t.Fatalf("unexpected future_horizon_seconds in rewritten dataset: %+v", sample.Label)
 	}
 	if sample.Label["acceleration"] != nil {
 		t.Fatalf("expected rewritten dataset to omit acceleration: %+v", sample.Label)

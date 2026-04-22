@@ -45,27 +45,29 @@ const TIME_OPTIONS: TimeOption[] = [
 ];
 
 const VEHICLE_MODEL_OPTIONS: string[] = [
-    VehicleModel.Adder,
-    VehicleModel.Zentorno,
-    VehicleModel.T20,
-    VehicleModel.Osiris,
+    // VehicleModel.Adder,
     VehicleModel.TurismoR,
-    VehicleModel.EntityXF,
-    VehicleModel.Cheetah,
-    VehicleModel.Infernus,
-    VehicleModel.Comet2,
-    VehicleModel.NineF,
-    VehicleModel.Banshee,
-    VehicleModel.Buffalo,
-    VehicleModel.Sultan,
-    VehicleModel.Elegy2,
-    VehicleModel.F620,
-    VehicleModel.Dominator,
-    VehicleModel.Gauntlet,
-    VehicleModel.Futo,
-    VehicleModel.Dubsta,
-    VehicleModel.Baller2
+    VehicleModel.Zentorno,
+    // VehicleModel.Comet2,
+    // VehicleModel.T20,
+    // VehicleModel.Osiris,
+    // VehicleModel.TurismoR,
+    // VehicleModel.EntityXF,
+    // VehicleModel.Cheetah,
+    // VehicleModel.Infernus,
+    // VehicleModel.NineF,
+    // VehicleModel.Banshee,
+    // VehicleModel.Buffalo,
+    // VehicleModel.Sultan,
+    // VehicleModel.Elegy2,
+    // VehicleModel.F620,
+    // VehicleModel.Dominator,
+    // VehicleModel.Gauntlet,
+    // VehicleModel.Futo,
+    // VehicleModel.Dubsta,
+    // VehicleModel.Baller2
 ];
+
 
 const VEHICLE_COLOR_OPTIONS: VehicleColorOption[] = [
     {name: "Black", value: VehicleColor.Black},

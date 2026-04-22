@@ -1,4 +1,5 @@
-export type CaptureAction = "start" | "stop";
+export type CaptureAction = "start" | "stop" | "abort";
+type CaptureRequestAction = CaptureAction | "finalizeTrip";
 
 export type CaptureRequest = {
     requestId: string
@@ -17,15 +18,36 @@ export type CaptureResponse = {
     logFile?: string
 }
 
+export type TripFinalizeResponse = {
+    requestId: string
+    success: boolean
+    error?: string
+    runId?: string
+    sceneId?: string
+    sceneVariant?: string
+    tripIndex?: number
+    tripKey?: string
+    tripDir?: string
+    runFile?: string
+    metadataFile?: string
+    sampleCount?: number
+}
+
 type PendingCaptureRequest = {
-    action: CaptureAction
-    resolve: (response: CaptureResponse) => void
+    action: CaptureRequestAction
+    resolve: (response: CaptureResponse | TripFinalizeResponse) => void
     reject: (error: Error) => void
     timeoutHandle: ReturnType<typeof setTimeout>
 }
 
 const pendingCaptureRequests = new Map<string, PendingCaptureRequest>();
 const captureRequestTimeoutMs = 20_000;
+const requestEventByAction: Record<CaptureRequestAction, string> = {
+    start: "capture:startRequest",
+    stop: "capture:stopRequest",
+    abort: "capture:abortRequest",
+    finalizeTrip: "capture:finalizeTripRequest"
+};
 
 onNet("capture:startResponse", (response: CaptureResponse) => {
     resolveCaptureRequest("start", response);
@@ -35,7 +57,18 @@ onNet("capture:stopResponse", (response: CaptureResponse) => {
     resolveCaptureRequest("stop", response);
 });
 
-function resolveCaptureRequest(action: CaptureAction, response: CaptureResponse) {
+onNet("capture:abortResponse", (response: CaptureResponse) => {
+    resolveCaptureRequest("abort", response);
+});
+
+onNet("capture:finalizeTripResponse", (response: TripFinalizeResponse) => {
+    resolveCaptureRequest("finalizeTrip", response);
+});
+
+function resolveCaptureRequest(
+    action: CaptureRequestAction,
+    response: CaptureResponse | TripFinalizeResponse
+) {
     if (!response || typeof response.requestId !== "string") {
         return;
     }
@@ -57,18 +90,21 @@ function resolveCaptureRequest(action: CaptureAction, response: CaptureResponse)
     pending.reject(new Error(errorMessage));
 }
 
-function createRequestId(action: CaptureAction): string {
+function createRequestId(action: CaptureRequestAction): string {
     return `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function requestCapture(action: CaptureAction, payload: Omit<CaptureRequest, "requestId">): Promise<CaptureResponse> {
+function requestCaptureLike<TResponse extends CaptureResponse | TripFinalizeResponse>(
+    action: CaptureRequestAction,
+    payload: Omit<CaptureRequest, "requestId">
+): Promise<TResponse> {
     const requestId = createRequestId(action);
     const request: CaptureRequest = {
         requestId,
         ...payload
     };
 
-    return new Promise<CaptureResponse>((resolve, reject) => {
+    return new Promise<TResponse>((resolve, reject) => {
         const timeoutHandle = setTimeout(() => {
             pendingCaptureRequests.delete(requestId);
             reject(new Error(`capture ${action} timed out after ${captureRequestTimeoutMs}ms`));
@@ -81,7 +117,19 @@ export function requestCapture(action: CaptureAction, payload: Omit<CaptureReque
             timeoutHandle
         });
 
-        const eventName = action === "start" ? "capture:startRequest" : "capture:stopRequest";
-        emitNet(eventName, request);
+        emitNet(requestEventByAction[action], request);
     });
+}
+
+export function requestCapture(
+    action: CaptureAction,
+    payload: Omit<CaptureRequest, "requestId">
+): Promise<CaptureResponse> {
+    return requestCaptureLike<CaptureResponse>(action, payload);
+}
+
+export function requestTripFinalize(
+    payload: Omit<CaptureRequest, "requestId">
+): Promise<TripFinalizeResponse> {
+    return requestCaptureLike<TripFinalizeResponse>("finalizeTrip", payload);
 }

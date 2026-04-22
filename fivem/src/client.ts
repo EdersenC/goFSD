@@ -6,7 +6,8 @@ import {
     type InnerCityDrivingSceneVariant
 } from "./datasets/inner-city-driving";
 
-log("[client] loaded");
+const CLIENT_BUILD_ID = "2026-04-21-capture-failfast-v1";
+log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
 
@@ -31,6 +32,8 @@ type AvailableScene = {
 
 type ControlTelemetryUpdate = {
     currentSpeed: number
+    currentYaw: number
+    routeForwardDelta: number
     timestampMs: number
 }
 
@@ -127,6 +130,7 @@ function requestEndAllScenes() {
 }
 
 registerInnerCityScenes();
+log("[client] registering control client session");
 emitNet("control:registerClient");
 reportControlStatus("idle");
 publishAvailableScenes();
@@ -138,12 +142,16 @@ setTick(() => {
         return;
     }
     const currentSpeed = sceneManager.currentEgoSpeed();
-    if (currentSpeed === null) {
+    const currentYaw = sceneManager.currentEgoYaw();
+    const routeForwardDelta = sceneManager.currentEgoRouteForwardDelta();
+    if (currentSpeed === null || currentYaw === null || routeForwardDelta === null) {
         return;
     }
     lastTelemetrySentAt = now;
     publishTelemetry({
         currentSpeed,
+        currentYaw,
+        routeForwardDelta,
         timestampMs: Date.now(),
     });
 });

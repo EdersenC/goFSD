@@ -67,7 +67,7 @@ func TestResolveTargetAppliesRawModelScalingBeforeControllerGains(t *testing.T) 
 	tuning.SteerInputGain = 3
 	tuning.ThrottleInputGain = 2
 
-	target, stale, enabled := resolveTarget(&commandEnvelope{
+	target, stale, enabled, timedOut := resolveTarget(&commandEnvelope{
 		controlState: controlState{
 			Steer:    0.05,
 			Throttle: 0.1,
@@ -76,10 +76,13 @@ func TestResolveTargetAppliesRawModelScalingBeforeControllerGains(t *testing.T) 
 		InputMode:  InputModeModelRaw,
 		Enabled:    true,
 		ReceivedAt: now.Format(time.RFC3339Nano),
-	}, tuning, time.Second, now)
+	}, tuning, time.Second, true, now)
 
 	if stale {
 		t.Fatal("expected target to stay fresh")
+	}
+	if timedOut {
+		t.Fatal("expected target to stay active")
 	}
 	if !enabled {
 		t.Fatal("expected target to stay enabled")
@@ -126,8 +129,100 @@ func TestStepReturnsToNeutralWhenCommandGoesStale(t *testing.T) {
 	if !svc.applied.Stale {
 		t.Fatal("expected command to become stale")
 	}
+	if !svc.applied.TimedOut {
+		t.Fatal("expected stale command to enter timeout neutralization")
+	}
 	if svc.applied.Throttle >= 0.5 {
 		t.Fatalf("expected throttle to ramp down after timeout, got=%f", svc.applied.Throttle)
+	}
+}
+
+func TestStepHoldsLastCommandWhenConfigured(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HoldLastCommand = true
+	cfg.StaleTimeout = 100 * time.Millisecond
+	cfg.SteerRatePerSecond = 10
+	cfg.ThrottleRatePerSec = 10
+	cfg.BrakeRatePerSecond = 10
+	svc := NewService(cfg, "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	base := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	svc.lastTickAt = base
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{
+			Steer:    0.8,
+			Throttle: 0.5,
+		},
+		Enabled:    true,
+		ReceivedAt: base.Format(time.RFC3339Nano),
+	}
+
+	if err := svc.step(base.Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("warm step returned error: %v", err)
+	}
+	if err := svc.step(base.Add(250 * time.Millisecond)); err != nil {
+		t.Fatalf("stale hold step returned error: %v", err)
+	}
+	if !svc.applied.Stale {
+		t.Fatal("expected command to be marked stale while still held")
+	}
+	if svc.applied.TimedOut {
+		t.Fatal("expected legacy hold mode to avoid timeout neutralization")
+	}
+	if svc.applied.Throttle != 0.5 {
+		t.Fatalf("expected throttle to stay held at 0.5, got=%f", svc.applied.Throttle)
+	}
+	if !svc.applied.Enabled {
+		t.Fatal("expected held command to remain enabled")
+	}
+}
+
+func TestDefaultConfigTimesOutToNeutralInsteadOfHoldingForever(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.HoldLastCommand {
+		t.Fatal("expected timeout-to-neutral to be the default actuator behavior")
+	}
+}
+
+func TestStepKeepsHoldingReachedTargetBetweenUpdates(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.StaleTimeout = time.Second
+	cfg.SteerRatePerSecond = 10
+	cfg.ThrottleRatePerSec = 10
+	cfg.BrakeRatePerSecond = 10
+	svc := NewService(cfg, "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	base := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	svc.lastTickAt = base
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{
+			Steer:    0.3,
+			Throttle: 0.2,
+		},
+		Enabled:    true,
+		ReceivedAt: base.Format(time.RFC3339Nano),
+	}
+
+	if err := svc.step(base.Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("first step returned error: %v", err)
+	}
+	firstApplied := svc.applied
+	if !firstApplied.Holding {
+		t.Fatal("expected target to be held once reached")
+	}
+
+	if err := svc.step(base.Add(200 * time.Millisecond)); err != nil {
+		t.Fatalf("second step returned error: %v", err)
+	}
+	if !controlStateEqual(svc.applied.controlState, firstApplied.controlState) {
+		t.Fatalf("expected controller state to remain latched between updates, got=%+v want=%+v", svc.applied.controlState, firstApplied.controlState)
+	}
+	if svc.applied.Holding != firstApplied.Holding || svc.applied.TimedOut != firstApplied.TimedOut || svc.applied.Enabled != firstApplied.Enabled || svc.applied.Stale != firstApplied.Stale {
+		t.Fatalf("expected latched flags to remain stable between updates, got=%+v want=%+v", svc.applied, firstApplied)
 	}
 }
 
@@ -382,5 +477,8 @@ brake_rate_per_second = 3.0
 		if !strings.Contains(contents, fragment) {
 			t.Fatalf("expected config to contain %q, got:\n%s", fragment, contents)
 		}
+	}
+	if strings.Contains(contents, "hold_last_command") {
+		t.Fatalf("expected SaveTuning to avoid re-introducing legacy hold_last_command, got:\n%s", contents)
 	}
 }

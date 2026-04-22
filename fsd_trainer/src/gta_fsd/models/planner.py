@@ -7,10 +7,22 @@ import torch.nn as nn
 
 try:
     from ..heads import HEAD_SPECS, HeadSpec
-    from ..state_inputs import CURRENT_SPEED_KEY, StateInputConfig
+    from ..state_inputs import (
+        CURRENT_SPEED_KEY,
+        ROUTE_FORWARD_DELTA_KEY,
+        StateInputConfig,
+        current_speed_fused_head_names,
+        route_forward_delta_fused_head_names,
+    )
 except ImportError:
     from heads import HEAD_SPECS, HeadSpec
-    from state_inputs import CURRENT_SPEED_KEY, StateInputConfig
+    from state_inputs import (
+        CURRENT_SPEED_KEY,
+        ROUTE_FORWARD_DELTA_KEY,
+        StateInputConfig,
+        current_speed_fused_head_names,
+        route_forward_delta_fused_head_names,
+    )
 
 
 class ConvNormAct(nn.Module):
@@ -130,6 +142,8 @@ class DrivingCNN(nn.Module):
         self.input_channels = frame_count * 3
         self.head_specs = head_specs
         self.state_input_config = state_input_config or StateInputConfig()
+        self.current_speed_fused_heads = frozenset(current_speed_fused_head_names(self.state_input_config))
+        self.route_forward_delta_fused_heads = frozenset(route_forward_delta_fused_head_names(self.state_input_config))
 
         self.stem = ConvNormAct(
             in_channels=self.input_channels,
@@ -154,14 +168,28 @@ class DrivingCNN(nn.Module):
             )
         else:
             self.current_speed_encoder = None
+        if self.state_input_config.route_forward_delta_enabled:
+            self.route_forward_delta_encoder = nn.Sequential(
+                nn.Linear(in_features=1, out_features=16),
+                nn.ReLU(),
+            )
+        else:
+            self.route_forward_delta_encoder = None
         self.heads = nn.ModuleDict()
         for spec in self.head_specs:
             in_features = 256
-            if spec.name in {"delta_speed", "future_speed"} and self.state_input_config.current_speed_enabled:
+            if spec.name in self.current_speed_fused_heads:
+                in_features += 16
+            if spec.name in self.route_forward_delta_fused_heads:
                 in_features += 16
             self.heads[spec.name] = HeadBranch(spec.output_dim, in_features=in_features)
 
-    def forward(self, x: torch.Tensor, current_speed: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        current_speed: torch.Tensor | None = None,
+        route_forward_delta: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         x = self.stem(x)
         x = self.stem_pool(x)
         x = self.stage1(x)
@@ -184,12 +212,27 @@ class DrivingCNN(nn.Module):
                     f"{CURRENT_SPEED_KEY} expected shape (batch,) or (batch, 1), got {tuple(speed.shape)}"
                 )
             encoded_current_speed = self.current_speed_encoder(speed)
+        encoded_route_forward_delta: torch.Tensor | None = None
+        if self.state_input_config.route_forward_delta_enabled:
+            if route_forward_delta is None:
+                raise ValueError(f"{ROUTE_FORWARD_DELTA_KEY} is required for this checkpoint")
+            route_delta = route_forward_delta.float()
+            if route_delta.ndim == 1:
+                route_delta = route_delta.unsqueeze(-1)
+            elif route_delta.ndim != 2 or route_delta.shape[-1] != 1:
+                raise ValueError(
+                    f"{ROUTE_FORWARD_DELTA_KEY} expected shape (batch,) or (batch, 1), "
+                    f"got {tuple(route_delta.shape)}"
+                )
+            encoded_route_forward_delta = self.route_forward_delta_encoder(route_delta)
 
         outputs: dict[str, torch.Tensor] = {}
         for spec in self.head_specs:
             head_input = x
-            if spec.name in {"delta_speed", "future_speed"} and encoded_current_speed is not None:
-                head_input = torch.cat((x, encoded_current_speed), dim=-1)
+            if spec.name in self.current_speed_fused_heads and encoded_current_speed is not None:
+                head_input = torch.cat((head_input, encoded_current_speed), dim=-1)
+            if spec.name in self.route_forward_delta_fused_heads and encoded_route_forward_delta is not None:
+                head_input = torch.cat((head_input, encoded_route_forward_delta), dim=-1)
             head_output = self.heads[spec.name](head_input)
             if spec.output_dim == 1:
                 head_output = head_output.squeeze(-1)

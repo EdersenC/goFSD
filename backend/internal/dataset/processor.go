@@ -33,6 +33,7 @@ const (
 	defaultStoppedSampleBurst       = 3
 	defaultStoppedSampleSpacing     = 2.0
 	futureTargetSmoothingRadius     = 2
+	moveIntentFutureWindowAhead     = 2
 )
 
 var (
@@ -51,16 +52,18 @@ type VideoFrame struct {
 }
 
 type ProcessingStatus struct {
-	State       string `json:"state"`
-	StartedAt   string `json:"startedAt,omitempty"`
-	CompletedAt string `json:"completedAt,omitempty"`
-	Error       string `json:"error,omitempty"`
-	FramesDir   string `json:"framesDir,omitempty"`
-	DatasetFile string `json:"datasetFile,omitempty"`
-	ImageWidth  int    `json:"imageWidth,omitempty"`
-	ImageHeight int    `json:"imageHeight,omitempty"`
-	FrameCount  int    `json:"frameCount,omitempty"`
-	SampleCount int    `json:"sampleCount,omitempty"`
+	State             string         `json:"state"`
+	StartedAt         string         `json:"startedAt,omitempty"`
+	CompletedAt       string         `json:"completedAt,omitempty"`
+	Error             string         `json:"error,omitempty"`
+	Warning           string         `json:"warning,omitempty"`
+	FramesDir         string         `json:"framesDir,omitempty"`
+	DatasetFile       string         `json:"datasetFile,omitempty"`
+	ImageWidth        int            `json:"imageWidth,omitempty"`
+	ImageHeight       int            `json:"imageHeight,omitempty"`
+	FrameCount        int            `json:"frameCount,omitempty"`
+	SampleCount       int            `json:"sampleCount"`
+	ZeroSampleReasons map[string]int `json:"zeroSampleReasons,omitempty"`
 }
 
 type DatasetSample struct {
@@ -68,6 +71,50 @@ type DatasetSample struct {
 	AnchorGameTime float64        `json:"anchor_game_time"`
 	FramePaths     []string       `json:"frame_paths"`
 	Label          map[string]any `json:"label"`
+}
+
+type sampleBuildStats struct {
+	CandidateWindowCount          int
+	GeneratedSampleCount          int
+	MissingCurrentLabelCount      int
+	MissingFutureLabelCount       int
+	MissingRouteForwardDeltaCount int
+	MissingFutureSpeedTargetCount int
+	MissingFutureYawTargetCount   int
+	MissingYawRateTargetCount     int
+	InvalidFutureHorizonCount     int
+	InvalidDerivedLabelCount      int
+}
+
+func (s sampleBuildStats) zeroSampleReasons() map[string]int {
+	reasons := map[string]int{
+		"candidate_windows": s.CandidateWindowCount,
+	}
+	if s.MissingCurrentLabelCount > 0 {
+		reasons["missing_current_label"] = s.MissingCurrentLabelCount
+	}
+	if s.MissingFutureLabelCount > 0 {
+		reasons["missing_future_label"] = s.MissingFutureLabelCount
+	}
+	if s.MissingRouteForwardDeltaCount > 0 {
+		reasons["missing_route_forward_delta"] = s.MissingRouteForwardDeltaCount
+	}
+	if s.MissingFutureSpeedTargetCount > 0 {
+		reasons["missing_future_speed_target"] = s.MissingFutureSpeedTargetCount
+	}
+	if s.MissingFutureYawTargetCount > 0 {
+		reasons["missing_future_yaw_target"] = s.MissingFutureYawTargetCount
+	}
+	if s.MissingYawRateTargetCount > 0 {
+		reasons["missing_yaw_rate_target"] = s.MissingYawRateTargetCount
+	}
+	if s.InvalidFutureHorizonCount > 0 {
+		reasons["invalid_future_horizon"] = s.InvalidFutureHorizonCount
+	}
+	if s.InvalidDerivedLabelCount > 0 {
+		reasons["invalid_derived_label"] = s.InvalidDerivedLabelCount
+	}
+	return reasons
 }
 
 type Processor struct {
@@ -374,7 +421,7 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 	}
 
 	labels := buildTimedLabels(record.VehicleData, metadata.SyncTime)
-	samples := buildDatasetSamples(
+	samples, sampleStats := buildDatasetSamplesWithStats(
 		frames,
 		labels,
 		anchorPTS,
@@ -394,6 +441,10 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 
 	status.FrameCount = len(frames)
 	status.SampleCount = len(samples)
+	if len(samples) == 0 {
+		status.Warning = "no dataset samples generated"
+		status.ZeroSampleReasons = sampleStats.zeroSampleReasons()
+	}
 	return nil
 }
 
@@ -573,6 +624,57 @@ func loadRunTripRecord(path string, runID string, tripIndex int) (runTripRecord,
 	return runTripRecord{}, fmt.Errorf("%w: runId=%s tripIndex=%d", ErrTripRecordNotFound, runID, tripIndex)
 }
 
+func WaitForTripReadiness(ctx context.Context, tripDir string, pollInterval time.Duration) error {
+	if pollInterval <= 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+
+	tripPath, err := resolveTripDir(tripDir)
+	if err != nil {
+		return err
+	}
+
+	var lastErr error
+	for {
+		if err := checkTripReadiness(tripPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return fmt.Errorf("trip not ready before timeout: %w", lastErr)
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func checkTripReadiness(tripPath string) error {
+	videoPath := filepath.Join(tripPath, "video.mkv")
+	metadataPath := filepath.Join(tripPath, "metadata.json")
+	runFilePath := filepath.Join(filepath.Dir(tripPath), "run.jsonl")
+
+	if !fileExists(videoPath) || !fileExists(metadataPath) || !fileExists(runFilePath) {
+		return fmt.Errorf("%w: expected video.mkv, metadata.json, and run.jsonl at %s", ErrMissingTripFiles, runFilePath)
+	}
+
+	metadata, err := loadTripMetadata(metadataPath)
+	if err != nil {
+		return err
+	}
+
+	if _, err := loadRunTripRecord(runFilePath, metadata.RunID, metadata.TripIndex); err != nil {
+		return err
+	}
+	return nil
+}
+
 func buildTimedLabels(vehicleData []map[string]any, syncTime float64) []timedLabel {
 	labels := make([]timedLabel, 0, len(vehicleData))
 	for _, label := range vehicleData {
@@ -602,15 +704,41 @@ func buildDatasetSamples(
 	deltaSpeedClip float64,
 	deltaSpeedNormalize bool,
 ) []DatasetSample {
+	samples, _ := buildDatasetSamplesWithStats(
+		frames,
+		labels,
+		anchorPTS,
+		windowSize,
+		frameStride,
+		sampleStride,
+		tolerance,
+		deltaSpeedClip,
+		deltaSpeedNormalize,
+	)
+	return samples
+}
+
+func buildDatasetSamplesWithStats(
+	frames []VideoFrame,
+	labels []timedLabel,
+	anchorPTS float64,
+	windowSize int,
+	frameStride int,
+	sampleStride int,
+	tolerance time.Duration,
+	deltaSpeedClip float64,
+	deltaSpeedNormalize bool,
+) ([]DatasetSample, sampleBuildStats) {
+	var stats sampleBuildStats
 	if len(frames) == 0 || len(labels) == 0 || windowSize < 1 || windowSize%2 == 0 || frameStride < 1 || sampleStride < 1 {
-		return nil
+		return nil, stats
 	}
 
 	halfWindow := windowSize / 2
 	startIndex := halfWindow * frameStride
 	endIndex := len(frames) - 1 - (halfWindow * frameStride)
 	if startIndex > endIndex {
-		return nil
+		return nil, stats
 	}
 
 	toleranceSeconds := tolerance.Seconds()
@@ -620,6 +748,7 @@ func buildDatasetSamples(
 		if futureCenter > endIndex {
 			break
 		}
+		stats.CandidateWindowCount++
 
 		window := make([]string, 0, windowSize)
 		for offset := -halfWindow; offset <= halfWindow; offset++ {
@@ -629,27 +758,61 @@ func buildDatasetSamples(
 
 		centerFrame := frames[center]
 		relativeSeconds := centerFrame.PTS - anchorPTS
-		label, _, ok := nearestLabelWithIndex(labels, relativeSeconds, toleranceSeconds)
+		label, labelIndex, ok := nearestLabelWithIndex(labels, relativeSeconds, toleranceSeconds)
 		if !ok {
+			stats.MissingCurrentLabelCount++
 			continue
 		}
 		futureRelativeSeconds := frames[futureCenter].PTS - anchorPTS
 		futureLabel, futureLabelIndex, ok := nearestLabelWithIndex(labels, futureRelativeSeconds, toleranceSeconds)
 		if !ok {
+			stats.MissingFutureLabelCount++
 			continue
 		}
 		futureSpeedTarget, ok := smoothedFutureSpeed(labels, futureLabelIndex, futureTargetSmoothingRadius)
 		if !ok {
+			stats.MissingFutureSpeedTargetCount++
+			continue
+		}
+		moveIntentSpeedTarget, ok := forwardFutureSpeed(labels, futureLabelIndex, moveIntentFutureWindowAhead)
+		if !ok {
+			stats.MissingFutureSpeedTargetCount++
+			continue
+		}
+		futureYawTarget, ok := smoothedFutureYaw(labels, futureLabelIndex, futureTargetSmoothingRadius)
+		if !ok {
+			stats.MissingFutureYawTargetCount++
+			continue
+		}
+		yawRateTarget, ok := smoothedYawRate(labels, futureLabelIndex, futureTargetSmoothingRadius)
+		if !ok {
+			stats.MissingYawRateTargetCount++
+			continue
+		}
+		routeForwardDeltaTarget, ok := smoothedRouteForwardDelta(labels, labelIndex, futureTargetSmoothingRadius)
+		if !ok {
+			stats.MissingRouteForwardDeltaCount++
+			continue
+		}
+		futureHorizonSeconds := futureLabel.RelativeSeconds - label.RelativeSeconds
+		if !isFiniteFloat64(futureHorizonSeconds) || futureHorizonSeconds <= 0 {
+			stats.InvalidFutureHorizonCount++
 			continue
 		}
 		derivedLabel, ok := buildTrainingLabel(
 			label.Label,
 			futureLabel.Label,
 			futureSpeedTarget,
+			moveIntentSpeedTarget,
+			futureYawTarget,
+			yawRateTarget,
+			routeForwardDeltaTarget,
+			futureHorizonSeconds,
 			deltaSpeedClip,
 			deltaSpeedNormalize,
 		)
 		if !ok {
+			stats.InvalidDerivedLabelCount++
 			continue
 		}
 
@@ -659,15 +822,21 @@ func buildDatasetSamples(
 			FramePaths:     window,
 			Label:          derivedLabel,
 		})
+		stats.GeneratedSampleCount++
 	}
 
-	return samples
+	return samples, stats
 }
 
 func buildTrainingLabel(
 	current map[string]any,
 	future map[string]any,
 	futureSpeedTarget float64,
+	moveIntentSpeedTarget float64,
+	futureYawTarget float64,
+	yawRateTarget float64,
+	routeForwardDeltaTarget float64,
+	futureHorizonSeconds float64,
 	deltaSpeedClip float64,
 	deltaSpeedNormalize bool,
 ) (map[string]any, bool) {
@@ -679,8 +848,12 @@ func buildTrainingLabel(
 	if !ok {
 		return nil, false
 	}
-	futureSteer, ok := numberField(future["Steering"])
-	if !ok {
+	currentYaw, ok := numberField(current["yaw"])
+	if !ok || !isFiniteFloat64(currentYaw) || !isFiniteFloat64(futureYawTarget) {
+		return nil, false
+	}
+	if !isFiniteFloat64(yawRateTarget) || !isFiniteFloat64(routeForwardDeltaTarget) ||
+		!isFiniteFloat64(futureHorizonSeconds) || futureHorizonSeconds <= 0 {
 		return nil, false
 	}
 
@@ -701,8 +874,46 @@ func buildTrainingLabel(
 	derived["delta_speed_target"] = deltaSpeedTarget
 	derived["future_speed"] = futureSpeed
 	derived["future_speed_target"] = futureSpeedTarget
-	derived["future_steer"] = futureSteer
+	derived["future_yaw_delta"] = wrapHeadingDeltaDegrees(futureYawTarget - currentYaw)
+	derived["future_horizon_seconds"] = futureHorizonSeconds
+	derived["yaw_rate"] = yawRateTarget
+	derived["routeForwardDelta"] = routeForwardDeltaTarget
+	derived["move_intent"] = buildMoveIntentLabel(current, moveIntentSpeedTarget, currentSpeed)
 	return derived, true
+}
+
+func buildMoveIntentLabel(current map[string]any, moveIntentSpeedTarget float64, currentSpeed float64) bool {
+	routeGPSValid, hasRouteGPS := booleanField(current["routeGpsValid"])
+	stoppedAtTrafficLight, _ := booleanField(current["isStoppedAtTrafficLights"])
+	eventOffroad, _ := booleanField(current["eventOffroad"])
+	eventWrongWay, _ := booleanField(current["eventWrongWay"])
+	hasLeadVehicle, _ := booleanField(current["hasLeadVehicle"])
+	leadVehicleDistance, hasLeadVehicleDistance := numberField(current["leadVehicleDistance"])
+	leadVehicleRelativeSpeed, hasLeadVehicleRelativeSpeed := numberField(current["leadVehicleRelativeSpeed"])
+
+	wantsProgress := currentSpeed > 1.0 ||
+		(moveIntentSpeedTarget >= currentSpeed+0.5 &&
+			moveIntentSpeedTarget >= 1.25)
+
+	if stoppedAtTrafficLight || eventOffroad || eventWrongWay {
+		return false
+	}
+
+	if hasLeadVehicle && hasLeadVehicleDistance && leadVehicleDistance <= 12.0 {
+		relativeSpeed := 0.0
+		if hasLeadVehicleRelativeSpeed {
+			relativeSpeed = leadVehicleRelativeSpeed
+		}
+		if relativeSpeed <= 0.5 {
+			return false
+		}
+	}
+
+	if !hasRouteGPS || !routeGPSValid {
+		return wantsProgress
+	}
+
+	return wantsProgress
 }
 
 func smoothedFutureSpeed(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
@@ -734,6 +945,190 @@ func smoothedFutureSpeed(labels []timedLabel, centerIndex int, radius int) (floa
 	return sum / float64(count), true
 }
 
+func forwardFutureSpeed(labels []timedLabel, startIndex int, lookahead int) (float64, bool) {
+	if startIndex < 0 || startIndex >= len(labels) {
+		return 0, false
+	}
+	endIndex := startIndex + lookahead
+	if endIndex >= len(labels) {
+		endIndex = len(labels) - 1
+	}
+
+	var sum float64
+	count := 0
+	for index := startIndex; index <= endIndex; index++ {
+		speed, ok := numberField(labels[index].Label["currentSpeed"])
+		if !ok {
+			continue
+		}
+		sum += speed
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return sum / float64(count), true
+}
+
+func smoothedFutureYaw(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
+	if centerIndex < 0 || centerIndex >= len(labels) {
+		return 0, false
+	}
+	startIndex := centerIndex - radius
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	endIndex := centerIndex + radius
+	if endIndex >= len(labels) {
+		endIndex = len(labels) - 1
+	}
+
+	var sumSin float64
+	var sumCos float64
+	count := 0
+	for index := startIndex; index <= endIndex; index++ {
+		yaw, ok := numberField(labels[index].Label["yaw"])
+		if !ok {
+			continue
+		}
+		radians := degreesToRadians(normalizeYawDegrees(yaw))
+		sumSin += math.Sin(radians)
+		sumCos += math.Cos(radians)
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return normalizeYawDegrees(radiansToDegrees(math.Atan2(sumSin, sumCos))), true
+}
+
+func smoothedYawRate(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
+	if centerIndex < 0 || centerIndex >= len(labels) {
+		return 0, false
+	}
+	startIndex := centerIndex - radius
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	endIndex := centerIndex + radius
+	if endIndex >= len(labels) {
+		endIndex = len(labels) - 1
+	}
+
+	var sum float64
+	count := 0
+	for index := startIndex; index <= endIndex; index++ {
+		yawRate, ok := resolvedYawRate(labels, index)
+		if !ok {
+			continue
+		}
+		sum += yawRate
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return sum / float64(count), true
+}
+
+func smoothedRouteForwardDelta(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
+	if centerIndex < 0 || centerIndex >= len(labels) {
+		return 0, false
+	}
+	startIndex := centerIndex - radius
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	endIndex := centerIndex + radius
+	if endIndex >= len(labels) {
+		endIndex = len(labels) - 1
+	}
+
+	var sum float64
+	count := 0
+	for index := startIndex; index <= endIndex; index++ {
+		routeForwardDelta, ok := resolvedRouteForwardDelta(labels[index].Label)
+		if !ok || !isFiniteFloat64(routeForwardDelta) {
+			continue
+		}
+		sum += routeForwardDelta
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return sum / float64(count), true
+}
+
+func resolvedRouteForwardDelta(label map[string]any) (float64, bool) {
+	if routeForwardDelta, ok := numberField(label["routeForwardDelta"]); ok && isFiniteFloat64(routeForwardDelta) {
+		return routeForwardDelta, true
+	}
+
+	coords, ok := vector3Field(label["coords"])
+	if !ok {
+		return 0, false
+	}
+	gps, ok := vector3Field(label["gps"])
+	if !ok {
+		return 0, false
+	}
+	yaw, ok := numberField(label["yaw"])
+	if !ok || !isFiniteFloat64(yaw) {
+		return 0, false
+	}
+
+	forwardX, forwardY := headingForwardVector(yaw)
+	deltaX := gps[0] - coords[0]
+	deltaY := gps[1] - coords[1]
+	deltaZ := gps[2] - coords[2]
+	return (deltaX * forwardX) + (deltaY * forwardY) + (deltaZ * 0.0), true
+}
+
+func headingForwardVector(heading float64) (float64, float64) {
+	radians := degreesToRadians(heading)
+	return math.Sin(radians), math.Cos(radians)
+}
+
+func resolvedYawRate(labels []timedLabel, index int) (float64, bool) {
+	if index < 0 || index >= len(labels) {
+		return 0, false
+	}
+	if yawRate, ok := numberField(labels[index].Label["yawRate"]); ok && isFiniteFloat64(yawRate) {
+		return yawRate, true
+	}
+
+	leftIndex := index - 1
+	rightIndex := index + 1
+	switch {
+	case leftIndex >= 0 && rightIndex < len(labels):
+		return derivedYawRateBetween(labels[leftIndex], labels[rightIndex])
+	case leftIndex >= 0:
+		return derivedYawRateBetween(labels[leftIndex], labels[index])
+	case rightIndex < len(labels):
+		return derivedYawRateBetween(labels[index], labels[rightIndex])
+	default:
+		return 0, false
+	}
+}
+
+func derivedYawRateBetween(left timedLabel, right timedLabel) (float64, bool) {
+	leftYaw, ok := numberField(left.Label["yaw"])
+	if !ok || !isFiniteFloat64(leftYaw) {
+		return 0, false
+	}
+	rightYaw, ok := numberField(right.Label["yaw"])
+	if !ok || !isFiniteFloat64(rightYaw) {
+		return 0, false
+	}
+	deltaSeconds := right.RelativeSeconds - left.RelativeSeconds
+	if !isFiniteFloat64(deltaSeconds) || deltaSeconds <= 0 {
+		return 0, false
+	}
+	deltaDegrees := wrapHeadingDeltaDegrees(rightYaw - leftYaw)
+	return degreesToRadians(deltaDegrees) / deltaSeconds, true
+}
+
 func clampFloat64(value float64, minimum float64, maximum float64) float64 {
 	if value < minimum {
 		return minimum
@@ -742,6 +1137,34 @@ func clampFloat64(value float64, minimum float64, maximum float64) float64 {
 		return maximum
 	}
 	return value
+}
+
+func normalizeYawDegrees(value float64) float64 {
+	normalized := math.Mod(value, 360.0)
+	if normalized < 0 {
+		normalized += 360.0
+	}
+	return normalized
+}
+
+func wrapHeadingDeltaDegrees(value float64) float64 {
+	delta := math.Mod(value+180.0, 360.0)
+	if delta < 0 {
+		delta += 360.0
+	}
+	return delta - 180.0
+}
+
+func isFiniteFloat64(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func degreesToRadians(value float64) float64 {
+	return value * math.Pi / 180.0
+}
+
+func radiansToDegrees(value float64) float64 {
+	return value * 180.0 / math.Pi
 }
 
 func thinStoppedSamples(samples []DatasetSample, initialBurst int, spacingSeconds float64) []DatasetSample {
@@ -1005,6 +1428,35 @@ func numberField(value any) (float64, bool) {
 		return parsed, err == nil
 	default:
 		return 0, false
+	}
+}
+
+func vector3Field(value any) ([3]float64, bool) {
+	switch typed := value.(type) {
+	case []any:
+		if len(typed) < 3 {
+			return [3]float64{}, false
+		}
+		x, ok := numberField(typed[0])
+		if !ok || !isFiniteFloat64(x) {
+			return [3]float64{}, false
+		}
+		y, ok := numberField(typed[1])
+		if !ok || !isFiniteFloat64(y) {
+			return [3]float64{}, false
+		}
+		z, ok := numberField(typed[2])
+		if !ok || !isFiniteFloat64(z) {
+			return [3]float64{}, false
+		}
+		return [3]float64{x, y, z}, true
+	case []float64:
+		if len(typed) < 3 {
+			return [3]float64{}, false
+		}
+		return [3]float64{typed[0], typed[1], typed[2]}, true
+	default:
+		return [3]float64{}, false
 	}
 }
 

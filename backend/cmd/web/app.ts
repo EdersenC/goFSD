@@ -18,7 +18,13 @@ const queueList = document.getElementById("queue");
 const queueEmpty = document.getElementById("queue-empty");
 const inferenceState = document.getElementById("inference-state");
 const inferenceSteering = document.getElementById("inference-steering");
+const inferenceFutureYawDelta = document.getElementById("inference-future-yaw-delta");
+const inferenceFutureYaw = document.getElementById("inference-future-yaw");
+const inferenceCurrentYaw = document.getElementById("inference-current-yaw");
+const inferenceHeadingError = document.getElementById("inference-heading-error");
+const inferenceFutureSpeed = document.getElementById("inference-future-speed");
 const inferenceDeltaSpeed = document.getElementById("inference-delta-speed");
+const inferenceMoveIntent = document.getElementById("inference-move-intent");
 const inferenceSequence = document.getElementById("inference-sequence");
 const inferenceFrameIndex = document.getElementById("inference-frame-index");
 const inferencePredictedAt = document.getElementById("inference-predicted-at");
@@ -58,12 +64,56 @@ const steerRateSaved = document.getElementById("saved-steer-rate");
 const throttleRateSaved = document.getElementById("saved-throttle-rate");
 const brakeRateSaved = document.getElementById("saved-brake-rate");
 
+const pageTabs = Array.from(document.querySelectorAll("[data-page-tab]"));
+const pageControl = document.getElementById("page-control");
+const pageInspector = document.getElementById("page-inspector");
+const inspectorRunSelect = document.getElementById("data-run-select");
+const inspectorSceneSelect = document.getElementById("data-scene-select");
+const inspectorTripSelect = document.getElementById("data-trip-select");
+const inspectorSourceSelect = document.getElementById("data-source-select");
+const inspectorLayoutSelect = document.getElementById("data-layout-select");
+const inspectorFieldSearch = document.getElementById("data-field-search");
+const inspectorFieldList = document.getElementById("data-field-list");
+const inspectorFieldEmpty = document.getElementById("data-field-empty");
+const inspectorBanner = document.getElementById("data-banner");
+const inspectorSourceMeta = document.getElementById("data-source-meta");
+const inspectorRowCount = document.getElementById("data-row-count");
+const inspectorLoadButton = document.getElementById("data-load-series");
+const inspectorSelectVisibleButton = document.getElementById("data-select-visible");
+const inspectorClearFieldsButton = document.getElementById("data-clear-fields");
+const inspectorChart = document.getElementById("data-chart");
+const inspectorChartLegend = document.getElementById("data-chart-legend");
+const inspectorStats = document.getElementById("data-stats");
+const inspectorStatsEmpty = document.getElementById("data-stats-empty");
+const inspectorTableHead = document.getElementById("data-table-head");
+const inspectorTableBody = document.getElementById("data-table-body");
+const inspectorTableEmpty = document.getElementById("data-table-empty");
+
+const INSPECTOR_COLORS = [
+    "#38bdf8",
+    "#fb7185",
+    "#f59e0b",
+    "#34d399",
+    "#a78bfa",
+    "#f97316",
+    "#22c55e",
+    "#e879f9",
+];
+
 let busy = false;
 let selectedSceneName = "";
 let selectedModelPath = "";
 let lastModelsRefreshAt = 0;
 let actuatorTuningDirty = false;
 let actuatorRefreshInFlight = false;
+
+let activePage = "control";
+let inspectorRuns = [];
+let inspectorAvailableFields = [];
+let inspectorSelectedFields = new Set();
+let inspectorSeries = null;
+let inspectorFieldsLoading = false;
+let inspectorSeriesLoading = false;
 
 function setBusy(nextBusy) {
     busy = nextBusy;
@@ -85,11 +135,34 @@ function setBusy(nextBusy) {
     }
 }
 
+function setInspectorBusy(loadingFields, loadingSeries) {
+    inspectorFieldsLoading = loadingFields;
+    inspectorSeriesLoading = loadingSeries;
+    const disabled = loadingFields || loadingSeries;
+    inspectorRunSelect.disabled = disabled;
+    inspectorSceneSelect.disabled = disabled;
+    inspectorTripSelect.disabled = disabled;
+    inspectorSourceSelect.disabled = disabled;
+    inspectorLayoutSelect.disabled = loadingSeries;
+    inspectorFieldSearch.disabled = loadingFields;
+    inspectorSelectVisibleButton.disabled = loadingFields;
+    inspectorClearFieldsButton.disabled = loadingFields;
+    inspectorLoadButton.disabled = disabled;
+}
+
 function setBanner(message, tone) {
     banner.textContent = message || "";
     banner.className = "banner";
     if (tone) {
         banner.classList.add(tone);
+    }
+}
+
+function setInspectorBanner(message, tone) {
+    inspectorBanner.textContent = message || "";
+    inspectorBanner.className = "banner";
+    if (tone) {
+        inspectorBanner.classList.add(tone);
     }
 }
 
@@ -187,7 +260,6 @@ function ensureSceneOptions(availableScenes) {
 
 function renderQueue(pendingCommands) {
     queueList.innerHTML = "";
-
     if (!Array.isArray(pendingCommands) || pendingCommands.length === 0) {
         queueEmpty.hidden = false;
         return;
@@ -239,12 +311,53 @@ async function fetchActuatorTuning() {
     return result;
 }
 
+async function fetchDataRuns() {
+    const response = await fetch("/data/runs", { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.error || "failed to load runs");
+    }
+    return result;
+}
+
+async function fetchTripFields(runId, sceneKey, tripName, source) {
+    const params = new URLSearchParams({
+        runId,
+        sceneKey,
+        tripName,
+        source,
+    });
+    const response = await fetch(`/data/trip/fields?${params.toString()}`, { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.error || "failed to load trip fields");
+    }
+    return result;
+}
+
+async function fetchTripSeries(runId, sceneKey, tripName, source, fields) {
+    const params = new URLSearchParams({
+        runId,
+        sceneKey,
+        tripName,
+        source,
+    });
+    for (const field of fields) {
+        params.append("field", field);
+    }
+    const response = await fetch(`/data/trip/series?${params.toString()}`, { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.error || "failed to load trip data");
+    }
+    return result;
+}
+
 async function sendCommand(type) {
     const payload = { type };
     if (type === "startScene") {
         payload.sceneName = sceneSelect.value;
     }
-
     const response = await fetch("/control/command", {
         method: "POST",
         headers: {
@@ -252,16 +365,11 @@ async function sendCommand(type) {
         },
         body: JSON.stringify(payload),
     });
-
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
         throw new Error(result.error || "command failed");
     }
     return result;
-}
-
-async function postInference(endpoint, payload = {}) {
-    return postJSON(endpoint, payload, "inference request failed");
 }
 
 async function postJSON(endpoint, payload = {}, fallbackMessage = "request failed") {
@@ -272,7 +380,6 @@ async function postJSON(endpoint, payload = {}, fallbackMessage = "request faile
         },
         body: JSON.stringify(payload),
     });
-
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
         throw new Error(result.error || fallbackMessage);
@@ -280,11 +387,23 @@ async function postJSON(endpoint, payload = {}, fallbackMessage = "request faile
     return result;
 }
 
+async function postInference(endpoint, payload = {}) {
+    return postJSON(endpoint, payload, "inference request failed");
+}
+
 function renderInferenceStatus(status) {
     const prediction = status && status.lastPrediction ? status.lastPrediction : null;
     inferenceState.textContent = status && status.state ? status.state : "idle";
     inferenceSteering.textContent = prediction ? Number(prediction.steering || 0).toFixed(4) : "0.0000";
+    inferenceFutureYawDelta.textContent = prediction ? Number(prediction.futureYawDelta || 0).toFixed(4) : "0.0000";
+    inferenceFutureYaw.textContent = prediction ? Number(prediction.futureYaw || 0).toFixed(4) : "0.0000";
+    inferenceCurrentYaw.textContent = prediction ? Number(prediction.currentYaw || 0).toFixed(4) : "0.0000";
+    inferenceHeadingError.textContent = prediction ? Number(prediction.headingErrorDeg || 0).toFixed(4) : "0.0000";
+    inferenceFutureSpeed.textContent = prediction ? Number(prediction.futureSpeed || 0).toFixed(4) : "0.0000";
     inferenceDeltaSpeed.textContent = prediction ? Number(prediction.deltaSpeed || 0).toFixed(4) : "0.0000";
+    inferenceMoveIntent.textContent = prediction && prediction.hasMoveIntent
+        ? `${Number(prediction.moveIntentProb || 0).toFixed(3)} (${prediction.moveIntentActive ? "active" : "idle"})`
+        : "None";
     inferenceSequence.textContent = prediction && prediction.sequence !== undefined ? String(prediction.sequence) : "None";
     inferenceFrameIndex.textContent = prediction && prediction.frameIndex !== undefined ? String(prediction.frameIndex) : "None";
     inferencePredictedAt.textContent = prediction && prediction.predictedAt ? prediction.predictedAt : "None";
@@ -330,9 +449,6 @@ function formatControlLine(control, options = {}) {
     if (options.includeEnabled) {
         parts.push(control.enabled === false ? "disabled" : "enabled");
     }
-    if (options.includeStale && control.stale) {
-        parts.push("stale");
-    }
     if (options.includeMode && control.inputMode) {
         parts.push(control.inputMode);
     }
@@ -360,16 +476,21 @@ function renderActuatorState(state) {
     });
     actuatorTarget.textContent = formatControlLine(state && state.target ? state.target : null, {
         includeEnabled: true,
-        includeStale: true,
         includeTimestamp: true,
     });
     actuatorApplied.textContent = formatControlLine(state && state.applied ? state.applied : null, {
         includeEnabled: true,
-        includeStale: true,
         includeTimestamp: true,
     });
 
     const controllerStatus = [];
+    if (state && state.target && state.target.timedOut) {
+        controllerStatus.push("timeout neutralizing");
+    } else if (state && state.applied && state.applied.holding) {
+        controllerStatus.push("holding latched input");
+    } else if (state && state.target && state.target.enabled) {
+        controllerStatus.push("tracking latest input");
+    }
     if (state && state.lastApplyError) {
         controllerStatus.push(`error ${state.lastApplyError}`);
     } else if (state && state.lastApplySucceededAt) {
@@ -404,7 +525,6 @@ function readActuatorTuningForm() {
             throw new Error(`invalid ${key}`);
         }
     }
-
     return tuning;
 }
 
@@ -510,6 +630,502 @@ async function handleCommand(type, successMessage) {
     }
 }
 
+function setActivePage(pageName) {
+    activePage = pageName;
+    for (const tab of pageTabs) {
+        const isActive = tab.dataset.pageTab === pageName;
+        tab.classList.toggle("active", isActive);
+        tab.setAttribute("aria-pressed", isActive ? "true" : "false");
+    }
+    pageControl.hidden = pageName !== "control";
+    pageInspector.hidden = pageName !== "inspector";
+    if (pageName === "inspector" && inspectorRuns.length === 0) {
+        refreshInspectorRuns().catch((error) => {
+            setInspectorBanner(error instanceof Error ? error.message : "failed to load runs", "error");
+        });
+    }
+}
+
+function renderInspectorRunOptions() {
+    inspectorRunSelect.innerHTML = "";
+    if (!inspectorRuns.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No runs found";
+        inspectorRunSelect.appendChild(option);
+        inspectorRunSelect.disabled = true;
+        renderInspectorSceneOptions();
+        return;
+    }
+    for (const run of inspectorRuns) {
+        const option = document.createElement("option");
+        option.value = run.runId;
+        option.textContent = `${run.runId} · ${run.tripCount} trips`;
+        inspectorRunSelect.appendChild(option);
+    }
+    inspectorRunSelect.disabled = false;
+}
+
+function getSelectedInspectorRun() {
+    return inspectorRuns.find((run) => run.runId === inspectorRunSelect.value) || null;
+}
+
+function getSelectedInspectorScene() {
+    const run = getSelectedInspectorRun();
+    if (!run || !Array.isArray(run.scenes)) {
+        return null;
+    }
+    return run.scenes.find((scene) => scene.sceneKey === inspectorSceneSelect.value) || null;
+}
+
+function getSelectedInspectorTrip() {
+    const scene = getSelectedInspectorScene();
+    if (!scene || !Array.isArray(scene.trips)) {
+        return null;
+    }
+    return scene.trips.find((trip) => trip.tripName === inspectorTripSelect.value) || null;
+}
+
+function renderInspectorSceneOptions() {
+    inspectorSceneSelect.innerHTML = "";
+    const run = getSelectedInspectorRun();
+    if (!run || !Array.isArray(run.scenes) || !run.scenes.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No scenes found";
+        inspectorSceneSelect.appendChild(option);
+        inspectorSceneSelect.disabled = true;
+        renderInspectorTripOptions();
+        return;
+    }
+    for (const scene of run.scenes) {
+        const option = document.createElement("option");
+        option.value = scene.sceneKey;
+        option.textContent = `${scene.sceneKey} · ${scene.tripCount} trips`;
+        inspectorSceneSelect.appendChild(option);
+    }
+    inspectorSceneSelect.disabled = false;
+}
+
+function renderInspectorTripOptions() {
+    inspectorTripSelect.innerHTML = "";
+    const scene = getSelectedInspectorScene();
+    if (!scene || !Array.isArray(scene.trips) || !scene.trips.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No trips found";
+        inspectorTripSelect.appendChild(option);
+        inspectorTripSelect.disabled = true;
+        updateInspectorSourceAvailability();
+        return;
+    }
+    for (const trip of scene.trips) {
+        const option = document.createElement("option");
+        option.value = trip.tripName;
+        option.textContent = `${trip.tripName} · raw ${trip.rawAvailable ? "yes" : "no"} · processed ${trip.processedAvailable ? "yes" : "no"}`;
+        inspectorTripSelect.appendChild(option);
+    }
+    inspectorTripSelect.disabled = false;
+    updateInspectorSourceAvailability();
+}
+
+function updateInspectorSourceAvailability() {
+    const trip = getSelectedInspectorTrip();
+    const rawOption = inspectorSourceSelect.querySelector('option[value="raw"]');
+    const processedOption = inspectorSourceSelect.querySelector('option[value="processed"]');
+    if (!trip) {
+        rawOption.disabled = false;
+        processedOption.disabled = false;
+        return;
+    }
+    rawOption.disabled = !trip.rawAvailable;
+    processedOption.disabled = !trip.processedAvailable;
+    if (inspectorSourceSelect.value === "raw" && rawOption.disabled) {
+        inspectorSourceSelect.value = processedOption.disabled ? "raw" : "processed";
+    }
+    if (inspectorSourceSelect.value === "processed" && processedOption.disabled) {
+        inspectorSourceSelect.value = rawOption.disabled ? "processed" : "raw";
+    }
+}
+
+function resetInspectorSeriesState() {
+    inspectorSeries = null;
+    inspectorSourceMeta.textContent = "No source loaded.";
+    inspectorRowCount.textContent = "0 rows";
+    renderInspectorChart();
+    renderInspectorStats();
+    renderInspectorTable();
+}
+
+function renderInspectorFieldList() {
+    const query = inspectorFieldSearch.value.trim().toLowerCase();
+    inspectorFieldList.innerHTML = "";
+    const visibleFields = inspectorAvailableFields.filter((field) => field.name.toLowerCase().includes(query));
+    inspectorFieldEmpty.hidden = visibleFields.length > 0;
+    if (!visibleFields.length) {
+        inspectorFieldEmpty.textContent = inspectorAvailableFields.length
+            ? "No fields match the current filter."
+            : "Select a run, trip, and source to load available fields.";
+        return;
+    }
+
+    for (const field of visibleFields) {
+        const label = document.createElement("label");
+        label.className = "field-option";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = inspectorSelectedFields.has(field.name);
+        input.addEventListener("change", () => {
+            if (input.checked) {
+                inspectorSelectedFields.add(field.name);
+            } else {
+                inspectorSelectedFields.delete(field.name);
+            }
+            renderInspectorFieldList();
+        });
+
+        const name = document.createElement("span");
+        name.className = "field-name";
+        name.textContent = field.name;
+
+        const kind = document.createElement("span");
+        kind.className = "field-kind";
+        kind.textContent = field.kind || "unknown";
+
+        label.appendChild(input);
+        label.appendChild(name);
+        label.appendChild(kind);
+        inspectorFieldList.appendChild(label);
+    }
+}
+
+function chooseDefaultInspectorFields(fields) {
+    const preferred = [
+        "yaw",
+        "currentSpeed",
+        "routeForwardDelta",
+        "label.future_yaw_delta",
+        "label.currentSpeed",
+    ];
+    const chosen = [];
+    for (const name of preferred) {
+        const match = fields.find((field) => field.name === name);
+        if (match && chosen.length < 4) {
+            chosen.push(match.name);
+        }
+    }
+    if (!chosen.length) {
+        for (const field of fields) {
+            if (field.kind === "number") {
+                chosen.push(field.name);
+            }
+            if (chosen.length >= 4) {
+                break;
+            }
+        }
+    }
+    return chosen;
+}
+
+async function refreshInspectorRuns() {
+    setInspectorBusy(true, false);
+    try {
+        const result = await fetchDataRuns();
+        inspectorRuns = Array.isArray(result.runs) ? result.runs : [];
+        renderInspectorRunOptions();
+        if (inspectorRuns.length) {
+            inspectorRunSelect.value = inspectorRunSelect.value || inspectorRuns[0].runId;
+        }
+        renderInspectorSceneOptions();
+        const run = getSelectedInspectorRun();
+        if (run && run.scenes.length) {
+            inspectorSceneSelect.value = inspectorSceneSelect.value || run.scenes[0].sceneKey;
+        }
+        renderInspectorTripOptions();
+        const scene = getSelectedInspectorScene();
+        if (scene && scene.trips.length) {
+            inspectorTripSelect.value = inspectorTripSelect.value || scene.trips[0].tripName;
+        }
+        updateInspectorSourceAvailability();
+        await refreshInspectorFields();
+        setInspectorBanner("Inspector ready.", "success");
+    } finally {
+        setInspectorBusy(false, false);
+    }
+}
+
+async function refreshInspectorFields() {
+    const run = getSelectedInspectorRun();
+    const scene = getSelectedInspectorScene();
+    const trip = getSelectedInspectorTrip();
+    resetInspectorSeriesState();
+    inspectorAvailableFields = [];
+    inspectorSelectedFields = new Set();
+    renderInspectorFieldList();
+    if (!run || !scene || !trip) {
+        return;
+    }
+
+    setInspectorBusy(true, false);
+    try {
+        const result = await fetchTripFields(run.runId, scene.sceneKey, trip.tripName, inspectorSourceSelect.value);
+        inspectorAvailableFields = Array.isArray(result.fields) ? result.fields : [];
+        inspectorSelectedFields = new Set(chooseDefaultInspectorFields(inspectorAvailableFields));
+        inspectorSourceMeta.textContent = `${run.runId} · ${scene.sceneKey} · ${trip.tripName} · ${inspectorSourceSelect.value}`;
+        renderInspectorFieldList();
+        if (!inspectorAvailableFields.length) {
+            setInspectorBanner("No scalar fields were found for this source.", "");
+        } else {
+            setInspectorBanner(`Loaded ${inspectorAvailableFields.length} fields.`, "success");
+        }
+    } catch (error) {
+        setInspectorBanner(error instanceof Error ? error.message : "failed to load fields", "error");
+        throw error;
+    } finally {
+        setInspectorBusy(false, false);
+    }
+}
+
+async function loadInspectorSeries() {
+    const run = getSelectedInspectorRun();
+    const scene = getSelectedInspectorScene();
+    const trip = getSelectedInspectorTrip();
+    const selectedFields = Array.from(inspectorSelectedFields);
+    if (!run || !scene || !trip) {
+        setInspectorBanner("Select a run, scene, and trip first.", "error");
+        return;
+    }
+    if (!selectedFields.length) {
+        setInspectorBanner("Select at least one field to load.", "error");
+        return;
+    }
+
+    setInspectorBusy(false, true);
+    try {
+        const result = await fetchTripSeries(run.runId, scene.sceneKey, trip.tripName, inspectorSourceSelect.value, selectedFields);
+        inspectorSeries = result;
+        inspectorSourceMeta.textContent = `${run.runId} · ${scene.sceneKey} · ${trip.tripName} · ${inspectorSourceSelect.value}`;
+        inspectorRowCount.textContent = `${Number(result.rowCount || 0)} rows · ${selectedFields.length} fields`;
+        renderInspectorChart();
+        renderInspectorStats();
+        renderInspectorTable();
+        setInspectorBanner("Trip data loaded.", "success");
+    } catch (error) {
+        resetInspectorSeriesState();
+        setInspectorBanner(error instanceof Error ? error.message : "failed to load trip data", "error");
+    } finally {
+        setInspectorBusy(false, false);
+    }
+}
+
+function renderInspectorChart() {
+    inspectorChart.innerHTML = "";
+    inspectorChartLegend.innerHTML = "";
+    if (!inspectorSeries || !Array.isArray(inspectorSeries.rows) || !inspectorSeries.rows.length) {
+        inspectorChart.innerHTML = `<div class="empty-state">Load numeric fields to render the normalized trend preview.</div>`;
+        return;
+    }
+
+    const numericFields = inspectorSeries.fields.filter((field) => field.kind === "number");
+    if (!numericFields.length) {
+        inspectorChart.innerHTML = `<div class="empty-state">The current selection has no numeric fields to chart.</div>`;
+        return;
+    }
+
+    const width = 980;
+    const height = 240;
+    const padding = 18;
+    const svgParts = [
+        `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Normalized trend preview">`,
+        `<rect x="0" y="0" width="${width}" height="${height}" fill="transparent"></rect>`,
+    ];
+
+    for (let lineIndex = 0; lineIndex < 4; lineIndex += 1) {
+        const y = padding + ((height - (padding * 2)) / 3) * lineIndex;
+        svgParts.push(`<line x1="${padding}" y1="${y}" x2="${width - padding}" y2="${y}" stroke="rgba(148,163,184,0.12)" stroke-width="1"></line>`);
+    }
+
+    numericFields.forEach((field, index) => {
+        const color = INSPECTOR_COLORS[index % INSPECTOR_COLORS.length];
+        const values = inspectorSeries.rows
+            .map((row) => row[field.name])
+            .filter((value) => typeof value === "number" && Number.isFinite(value));
+        if (!values.length) {
+            return;
+        }
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = Math.max(max - min, Number.EPSILON);
+        const points = inspectorSeries.rows.map((row, rowIndex) => {
+            const value = row[field.name];
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+                return null;
+            }
+            const normalized = span <= Number.EPSILON ? 0.5 : (value - min) / span;
+            const x = padding + ((width - (padding * 2)) * rowIndex / Math.max(inspectorSeries.rows.length - 1, 1));
+            const y = height - padding - normalized * (height - (padding * 2));
+            return `${x.toFixed(2)},${y.toFixed(2)}`;
+        }).filter(Boolean);
+        if (!points.length) {
+            return;
+        }
+        svgParts.push(`<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${points.join(" ")}"></polyline>`);
+
+        const chip = document.createElement("span");
+        chip.className = "legend-chip";
+        chip.innerHTML = `<span class="legend-swatch" style="background:${color}"></span>${field.name}`;
+        inspectorChartLegend.appendChild(chip);
+    });
+
+    svgParts.push("</svg>");
+    inspectorChart.innerHTML = svgParts.join("");
+}
+
+function renderInspectorStats() {
+    inspectorStats.innerHTML = "";
+    const rows = inspectorSeries && Array.isArray(inspectorSeries.rows) ? inspectorSeries.rows : [];
+    if (!rows.length) {
+        inspectorStatsEmpty.hidden = false;
+        return;
+    }
+
+    inspectorStatsEmpty.hidden = true;
+    for (const field of inspectorSeries.fields) {
+        const values = rows.map((row) => row[field.name]).filter((value) => value !== undefined && value !== null);
+        const card = document.createElement("article");
+        card.className = "stat-card";
+        const title = document.createElement("strong");
+        title.textContent = field.name;
+        const meta = document.createElement("div");
+        meta.className = "stat-meta";
+
+        if (field.kind === "number") {
+            const numeric = values.filter((value) => typeof value === "number" && Number.isFinite(value));
+            if (numeric.length) {
+                const min = Math.min(...numeric);
+                const max = Math.max(...numeric);
+                const mean = numeric.reduce((sum, value) => sum + value, 0) / numeric.length;
+                meta.textContent = `count ${numeric.length} · min ${formatCellValue(min)} · max ${formatCellValue(max)} · mean ${formatCellValue(mean)}`;
+            } else {
+                meta.textContent = "No numeric values in current rows.";
+            }
+        } else if (field.kind === "boolean") {
+            const trueCount = values.filter((value) => value === true).length;
+            meta.textContent = `count ${values.length} · true ${trueCount} · false ${values.length - trueCount}`;
+        } else {
+            const unique = new Set(values.map((value) => String(value)));
+            meta.textContent = `count ${values.length} · unique ${unique.size}`;
+        }
+
+        card.appendChild(title);
+        card.appendChild(meta);
+        inspectorStats.appendChild(card);
+    }
+}
+
+function formatCellValue(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+    if (typeof value === "number") {
+        if (!Number.isFinite(value)) {
+            return String(value);
+        }
+        if (Math.abs(value) >= 1000) {
+            return value.toFixed(1);
+        }
+        if (Math.abs(value) >= 10) {
+            return value.toFixed(3);
+        }
+        return value.toFixed(4);
+    }
+    if (typeof value === "boolean") {
+        return value ? "true" : "false";
+    }
+    return String(value);
+}
+
+function formatTimelineLabel(row, index) {
+    if (row.time !== undefined) {
+        return `#${index} · t=${formatCellValue(row.time)}`;
+    }
+    if (row.anchor_game_time !== undefined) {
+        return `#${index} · gt=${formatCellValue(row.anchor_game_time)}`;
+    }
+    return `#${index}`;
+}
+
+function renderInspectorTable() {
+    inspectorTableHead.innerHTML = "";
+    inspectorTableBody.innerHTML = "";
+
+    const rows = inspectorSeries && Array.isArray(inspectorSeries.rows) ? inspectorSeries.rows : [];
+    const fields = inspectorSeries && Array.isArray(inspectorSeries.fields) ? inspectorSeries.fields : [];
+    if (!rows.length || !fields.length) {
+        inspectorTableEmpty.hidden = false;
+        return;
+    }
+    inspectorTableEmpty.hidden = true;
+
+    const layout = inspectorLayoutSelect.value;
+    if (layout === "rows") {
+        renderInspectorTableRows(rows, fields);
+        return;
+    }
+    renderInspectorTableColumns(rows, fields, inspectorSeries.timelineFields || []);
+}
+
+function renderInspectorTableColumns(rows, fields, timelineFields) {
+    const headRow = document.createElement("tr");
+    for (const label of [...timelineFields, ...fields.map((field) => field.name)]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        headRow.appendChild(th);
+    }
+    inspectorTableHead.appendChild(headRow);
+
+    for (const row of rows) {
+        const tr = document.createElement("tr");
+        for (const key of timelineFields) {
+            const td = document.createElement("td");
+            td.textContent = formatCellValue(row[key]);
+            tr.appendChild(td);
+        }
+        for (const field of fields) {
+            const td = document.createElement("td");
+            td.textContent = formatCellValue(row[field.name]);
+            tr.appendChild(td);
+        }
+        inspectorTableBody.appendChild(tr);
+    }
+}
+
+function renderInspectorTableRows(rows, fields) {
+    const headRow = document.createElement("tr");
+    const headLabel = document.createElement("th");
+    headLabel.textContent = "Field";
+    headRow.appendChild(headLabel);
+    rows.forEach((row, index) => {
+        const th = document.createElement("th");
+        th.textContent = formatTimelineLabel(row, index);
+        headRow.appendChild(th);
+    });
+    inspectorTableHead.appendChild(headRow);
+
+    for (const field of fields) {
+        const tr = document.createElement("tr");
+        const labelCell = document.createElement("td");
+        labelCell.textContent = field.name;
+        tr.appendChild(labelCell);
+        rows.forEach((row) => {
+            const td = document.createElement("td");
+            td.textContent = formatCellValue(row[field.name]);
+            tr.appendChild(td);
+        });
+        inspectorTableBody.appendChild(tr);
+    }
+}
+
 sceneSelect.addEventListener("change", () => {
     selectedSceneName = sceneSelect.value;
 });
@@ -535,6 +1151,73 @@ for (const input of [
     });
 }
 
+for (const tab of pageTabs) {
+    tab.addEventListener("click", () => {
+        setActivePage(tab.dataset.pageTab);
+    });
+}
+
+inspectorRunSelect.addEventListener("change", async () => {
+    renderInspectorSceneOptions();
+    const run = getSelectedInspectorRun();
+    if (run && run.scenes.length) {
+        inspectorSceneSelect.value = run.scenes[0].sceneKey;
+    }
+    renderInspectorTripOptions();
+    const scene = getSelectedInspectorScene();
+    if (scene && scene.trips.length) {
+        inspectorTripSelect.value = scene.trips[0].tripName;
+    }
+    updateInspectorSourceAvailability();
+    await refreshInspectorFields();
+});
+
+inspectorSceneSelect.addEventListener("change", async () => {
+    renderInspectorTripOptions();
+    const scene = getSelectedInspectorScene();
+    if (scene && scene.trips.length) {
+        inspectorTripSelect.value = scene.trips[0].tripName;
+    }
+    updateInspectorSourceAvailability();
+    await refreshInspectorFields();
+});
+
+inspectorTripSelect.addEventListener("change", async () => {
+    updateInspectorSourceAvailability();
+    await refreshInspectorFields();
+});
+
+inspectorSourceSelect.addEventListener("change", async () => {
+    await refreshInspectorFields();
+});
+
+inspectorFieldSearch.addEventListener("input", () => {
+    renderInspectorFieldList();
+});
+
+inspectorSelectVisibleButton.addEventListener("click", () => {
+    const query = inspectorFieldSearch.value.trim().toLowerCase();
+    for (const field of inspectorAvailableFields) {
+        if (!query || field.name.toLowerCase().includes(query)) {
+            inspectorSelectedFields.add(field.name);
+        }
+    }
+    renderInspectorFieldList();
+});
+
+inspectorClearFieldsButton.addEventListener("click", () => {
+    inspectorSelectedFields.clear();
+    renderInspectorFieldList();
+});
+
+inspectorLoadButton.addEventListener("click", async () => {
+    await loadInspectorSeries();
+});
+
+inspectorLayoutSelect.addEventListener("change", () => {
+    renderInspectorTable();
+});
+
 startSceneButton.addEventListener("click", () => handleCommand("startScene", "Start scene queued."));
 loadModelButton.addEventListener("click", async () => {
     try {
@@ -559,6 +1242,7 @@ endSceneButton.addEventListener("click", () => handleCommand("endScene", "End-sc
 endAllButton.addEventListener("click", () => handleCommand("endAllScenes", "End-all command queued."));
 startEgoButton.addEventListener("click", () => handleCommand("startEgo", "Ego control queued."));
 stopEgoButton.addEventListener("click", () => handleCommand("stopEgo", "Stop ego command queued."));
+
 startInferenceButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -572,6 +1256,7 @@ startInferenceButton.addEventListener("click", async () => {
         setBusy(false);
     }
 });
+
 stopInferenceButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -585,6 +1270,7 @@ stopInferenceButton.addEventListener("click", async () => {
         setBusy(false);
     }
 });
+
 actuatorApplyButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -599,6 +1285,7 @@ actuatorApplyButton.addEventListener("click", async () => {
         setBusy(false);
     }
 });
+
 actuatorResetButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -613,6 +1300,7 @@ actuatorResetButton.addEventListener("click", async () => {
         setBusy(false);
     }
 });
+
 actuatorSaveButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -629,12 +1317,22 @@ actuatorSaveButton.addEventListener("click", async () => {
 });
 
 setBusy(false);
-refresh(true).catch((error) => {
-    setBanner(error instanceof Error ? error.message : "failed to load state", "error");
+setInspectorBusy(false, false);
+setActivePage("control");
+
+Promise.all([
+    refresh(true),
+    refreshInspectorRuns(),
+]).catch((error) => {
+    const message = error instanceof Error ? error.message : "failed to initialize page";
+    setBanner(message, "error");
+    setInspectorBanner(message, "error");
 });
+
 setInterval(() => {
     refreshActuator();
 }, 100);
+
 setInterval(() => {
     refresh(true).catch((error) => {
         setBanner(error instanceof Error ? error.message : "failed to refresh state", "error");

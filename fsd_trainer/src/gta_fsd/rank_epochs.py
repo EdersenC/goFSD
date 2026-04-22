@@ -155,13 +155,12 @@ def rank_epochs(run_metrics_path: Path) -> list[RankedEpoch]:
             if spec.kind != "control":
                 continue
             metric_name = f"{spec.name}_rmse"
-            fallback = "steering_rmse" if spec.name == "steer" else None
             control_head_metrics[metric_name] = _require_metric_with_fallback(
                 val_metrics,
                 metric_name,
                 epoch=epoch,
                 section="val_metrics",
-                fallback=fallback,
+                fallback=None,
             )
 
         rank_score = (

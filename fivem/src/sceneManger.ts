@@ -230,14 +230,7 @@ export class SceneManager {
                     log("endAllScenes requested; stopping queued scenes.");
                     break;
                 }
-                try {
-                    await this.executeScene(name, {shuffleWaypoints: true, runId})
-                } catch (error: any) {
-                    if (this.isSceneStoppedError(error)) {
-                        throw error;
-                    }
-                    log(`Scene "${name}" failed during runAllScenes: ${error?.message ?? error}`);
-                }
+                await this.executeScene(name, {shuffleWaypoints: true, runId})
                 if (this.stopAllScenesRequested) {
                     log("endAllScenes requested; scene queue stopped.");
                     break;
@@ -313,6 +306,14 @@ export class SceneManager {
 
     public currentEgoSpeed(): number | null {
         return egoService.currentSpeed();
+    }
+
+    public currentEgoYaw(): number | null {
+        return egoService.currentYaw();
+    }
+
+    public currentEgoRouteForwardDelta(): number | null {
+        return egoService.currentRouteForwardDelta();
     }
 
     public addScene(name: string, scene: SceneType) {

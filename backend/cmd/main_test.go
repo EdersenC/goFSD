@@ -25,7 +25,7 @@ func TestRunReportRunsWritesDatasetReport(t *testing.T) {
 		FrameCount: 1,
 	})
 	writeCommandDatasetJSONL(t, filepath.Join(tripDir, "dataset.jsonl"), []datasetproc.DatasetSample{
-		{Label: map[string]any{"Steering": 0.1, "future_steer": 0.15, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 5.0, "future_speed_target": 5.0, "currentSpeed": 5.0, "isStopped": 0}},
+		{Label: map[string]any{"Steering": 0.1, "future_yaw_delta": 15.0, "future_horizon_seconds": 0.2, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 5.0, "future_speed_target": 5.0, "currentSpeed": 5.0, "isStopped": 0}},
 	})
 
 	configPath := writeCLIConfig(t)

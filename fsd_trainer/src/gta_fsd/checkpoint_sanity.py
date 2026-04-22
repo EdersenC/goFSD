@@ -24,7 +24,13 @@ from heads import head_layout_metadata, head_specs_metadata, resolve_checkpoint_
 from image_io import load_rgb_tensor_from_path
 from model_output import single_control_prediction_from_output, single_tensor_mapping
 from train import TrainConfig, load_config as load_train_config
-from state_inputs import CURRENT_SPEED_KEY, StateInputConfig, state_input_config_from_metadata, state_inputs_metadata
+from state_inputs import (
+    CURRENT_SPEED_KEY,
+    ROUTE_FORWARD_DELTA_KEY,
+    StateInputConfig,
+    state_input_config_from_metadata,
+    state_inputs_metadata,
+)
 from target_transforms import (
     legacy_delta_speed_target_transform,
     resolve_checkpoint_delta_speed_target_transform,
@@ -187,10 +193,16 @@ def predict_control_outputs(
 ) -> dict[str, float]:
     x = stacked_frames.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
     current_speed = None
+    route_forward_delta = None
     if state_inputs is not None and CURRENT_SPEED_KEY in state_inputs:
         current_speed = state_inputs[CURRENT_SPEED_KEY].unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    if state_inputs is not None and ROUTE_FORWARD_DELTA_KEY in state_inputs:
+        route_forward_delta = state_inputs[ROUTE_FORWARD_DELTA_KEY].unsqueeze(0).to(
+            device,
+            non_blocking=device.type == "cuda",
+        )
     with torch.no_grad():
-        output = model(x, current_speed=current_speed)
+        output = model(x, current_speed=current_speed, route_forward_delta=route_forward_delta)
     delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
     return single_control_prediction_from_output(
         output,
@@ -245,6 +257,7 @@ def evaluate_dataset_samples(
         data_root=data_root,
         image_size=image_size,
         expected_window_size=expected_window_size,
+        state_input_config=model.state_input_config,
         head_specs=model.head_specs,
     )
     if sample_start < 0:
@@ -292,7 +305,7 @@ def evaluate_debug_windows(
 ) -> dict[str, Any]:
     if dump_window_count < 1:
         raise ValueError("dump_window_count must be > 0")
-    if state_input_config.current_speed_enabled:
+    if state_input_config.current_speed_enabled or state_input_config.route_forward_delta_enabled:
         return {
             "debug_dir": str(debug_dir),
             "frame_count": 0,
@@ -301,7 +314,10 @@ def evaluate_debug_windows(
             "window_count": 0,
             "results": [],
             "control_ranges": {},
-            "skipped_reason": "current_speed-enabled checkpoints require live speed telemetry; debug frame dumps are image-only",
+            "skipped_reason": (
+                "state-input-enabled checkpoints require live telemetry; "
+                "debug frame dumps are image-only"
+            ),
         }
 
     frame_paths = list_debug_frame_paths(debug_dir)

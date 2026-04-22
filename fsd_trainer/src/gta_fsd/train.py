@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import tomllib
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,7 +18,7 @@ import torch
 from torch import Tensor
 from torch.nn import Module
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, Dataset as TorchDataset, Subset
+from torch.utils.data import DataLoader, Dataset as TorchDataset, Sampler, Subset, WeightedRandomSampler
 
 from config import (
     DEFAULT_IMAGE_HEIGHT,
@@ -28,6 +29,12 @@ from config import (
 )
 from dataset import DatasetStateInputs, DatasetTargets, FsdDataset
 from heads import (
+    CURRENT_SPEED_TARGET_KEY,
+    DELTA_SPEED_HEAD_NAME,
+    FUTURE_HORIZON_SECONDS_TARGET_KEY,
+    FUTURE_SPEED_HEAD_NAME,
+    FUTURE_YAW_DELTA_HEAD_NAME,
+    YAW_RATE_HEAD_NAME,
     HEAD_SPECS,
     HeadSpec,
     apply_loss_weight_overrides,
@@ -39,7 +46,15 @@ from heads import (
     supported_metric_names,
 )
 from models.planner import DrivingCNN
-from state_inputs import CURRENT_SPEED_KEY, StateInputConfig, state_inputs_metadata, training_state_input_config
+from state_inputs import (
+    CURRENT_SPEED_KEY,
+    ROUTE_FORWARD_DELTA_KEY,
+    StateInputConfig,
+    current_speed_fused_head_names,
+    route_forward_delta_fused_head_names,
+    state_inputs_metadata,
+    training_state_input_config,
+)
 from target_transforms import (
     DeltaSpeedTargetTransform,
     default_delta_speed_target_transform,
@@ -85,6 +100,31 @@ class TrainingConfig:
     early_stopping_patience: int
     early_stopping_min_delta: float
     head_loss_weights: dict[str, float]
+    yaw_consistency_weight: float
+    yaw_rate_scale_to_degrees: float
+    speed_consistency_weight: float
+    yaw_loss_weighting: "YawLossWeightingConfig" = field(default_factory=lambda: YawLossWeightingConfig())
+
+
+@dataclass(frozen=True)
+class YawLossWeightingConfig:
+    enabled: bool = False
+    base_weight: float = 1.0
+    alpha: float = 2.0
+    tau: float = 0.25
+    max_scale: float = 3.0
+
+
+@dataclass(frozen=True)
+class TurnOversamplingConfig:
+    enabled: bool = False
+    straight_weight: float = 1.0
+    light_turn_weight: float = 1.5
+    medium_turn_weight: float = 2.5
+    sharp_turn_weight: float = 4.0
+    light_turn_threshold: float = 0.05
+    medium_turn_threshold: float = 0.15
+    sharp_turn_threshold: float = 0.30
 
 
 @dataclass(frozen=True)
@@ -102,6 +142,7 @@ class LoaderConfig:
     log_every_n_batches: int
     val_split: float
     cpu_batch_size: int
+    turn_oversampling: TurnOversamplingConfig = field(default_factory=lambda: TurnOversamplingConfig())
 
 
 @dataclass(frozen=True)
@@ -110,6 +151,7 @@ class TrainConfig:
     output: OutputConfig
     training: TrainingConfig
     loader: LoaderConfig
+    state_inputs: StateInputConfig = field(default_factory=training_state_input_config)
 
 
 @dataclass(frozen=True)
@@ -135,6 +177,8 @@ class TrainingContext:
     ignored_loss_weight_overrides: tuple[str, ...]
     state_input_config: StateInputConfig
     delta_speed_transform: DeltaSpeedTargetTransform
+    train_sampler_weights: Tensor | None = None
+    train_sampler_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,6 +240,7 @@ def load_config(path: Path) -> TrainConfig:
     output_raw = raw["output"]
     training_raw = raw["training"]
     loader_raw = raw["loader"]
+    state_inputs_raw = raw.get("state_inputs")
     window_size, frame_stride, sample_stride = parse_dataset_window(raw)
     data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
     train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
@@ -233,6 +278,16 @@ def load_config(path: Path) -> TrainConfig:
                 str(name): float(weight)
                 for name, weight in dict(training_raw.get("loss_weights", {})).items()
             },
+            yaw_consistency_weight=float(
+                dict(training_raw.get("consistency", {})).get("yaw_delta_vs_yaw_rate_weight", 0.0)
+            ),
+            yaw_rate_scale_to_degrees=float(
+                dict(training_raw.get("consistency", {})).get("yaw_rate_scale_to_degrees", 57.29577951308232)
+            ),
+            speed_consistency_weight=float(
+                dict(training_raw.get("consistency", {})).get("future_speed_vs_delta_speed_weight", 0.0)
+            ),
+            yaw_loss_weighting=_load_yaw_loss_weighting_config(training_raw),
         ),
         loader=LoaderConfig(
             train_batch_size=int(loader_raw.get("train_batch_size", legacy_batch_size)),
@@ -252,8 +307,60 @@ def load_config(path: Path) -> TrainConfig:
             log_every_n_batches=max(1, int(loader_raw.get("log_every_n_batches", 10))),
             val_split=float(loader_raw["val_split"]),
             cpu_batch_size=int(loader_raw["cpu_batch_size"]),
+            turn_oversampling=_load_turn_oversampling_config(loader_raw),
         ),
+        state_inputs=training_state_input_config(state_inputs_raw),
     )
+
+
+def _load_yaw_loss_weighting_config(training_raw: dict[str, Any]) -> YawLossWeightingConfig:
+    raw = training_raw.get("yaw_loss_weighting", {})
+    if not isinstance(raw, dict):
+        raise ValueError("training.yaw_loss_weighting must be a table")
+
+    config = YawLossWeightingConfig(
+        enabled=bool(raw.get("enabled", False)),
+        base_weight=float(raw.get("base_weight", 1.0)),
+        alpha=float(raw.get("alpha", 2.0)),
+        tau=float(raw.get("tau", 0.25)),
+        max_scale=float(raw.get("max_scale", 3.0)),
+    )
+    if config.base_weight <= 0.0:
+        raise ValueError("training.yaw_loss_weighting.base_weight must be > 0")
+    if config.alpha < 0.0:
+        raise ValueError("training.yaw_loss_weighting.alpha must be >= 0")
+    if config.tau <= 0.0:
+        raise ValueError("training.yaw_loss_weighting.tau must be > 0")
+    if config.max_scale <= 0.0:
+        raise ValueError("training.yaw_loss_weighting.max_scale must be > 0")
+    return config
+
+
+def _load_turn_oversampling_config(loader_raw: dict[str, Any]) -> TurnOversamplingConfig:
+    raw = loader_raw.get("turn_oversampling", {})
+    if not isinstance(raw, dict):
+        raise ValueError("loader.turn_oversampling must be a table")
+
+    config = TurnOversamplingConfig(
+        enabled=bool(raw.get("enabled", False)),
+        straight_weight=float(raw.get("straight_weight", 1.0)),
+        light_turn_weight=float(raw.get("light_turn_weight", 1.5)),
+        medium_turn_weight=float(raw.get("medium_turn_weight", 2.5)),
+        sharp_turn_weight=float(raw.get("sharp_turn_weight", 4.0)),
+        light_turn_threshold=float(raw.get("light_turn_threshold", 0.05)),
+        medium_turn_threshold=float(raw.get("medium_turn_threshold", 0.15)),
+        sharp_turn_threshold=float(raw.get("sharp_turn_threshold", 0.30)),
+    )
+    for field_name in ("straight_weight", "light_turn_weight", "medium_turn_weight", "sharp_turn_weight"):
+        if getattr(config, field_name) <= 0.0:
+            raise ValueError(f"loader.turn_oversampling.{field_name} must be > 0")
+    if config.light_turn_threshold < 0.0:
+        raise ValueError("loader.turn_oversampling.light_turn_threshold must be >= 0")
+    if config.medium_turn_threshold < config.light_turn_threshold:
+        raise ValueError("loader.turn_oversampling.medium_turn_threshold must be >= light_turn_threshold")
+    if config.sharp_turn_threshold < config.medium_turn_threshold:
+        raise ValueError("loader.turn_oversampling.sharp_turn_threshold must be >= medium_turn_threshold")
+    return config
 
 
 def _optional_str(value: Any) -> str | None:
@@ -320,6 +427,13 @@ def save_epoch_artifacts(
     head_specs: tuple[HeadSpec, ...],
     state_input_config: StateInputConfig,
     delta_speed_transform: DeltaSpeedTargetTransform,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+    speed_consistency_weight: float,
+    yaw_loss_weighting: YawLossWeightingConfig,
+    turn_oversampling: TurnOversamplingConfig,
+    state_input_fusion_heads: dict[str, list[str]],
+    train_sampler_summary: dict[str, Any],
 ) -> dict[str, Any]:
     checkpoint_path = run_dir / f"epoch-{epoch_index:03d}.pt"
     checkpoint_payload = {
@@ -332,6 +446,32 @@ def save_epoch_artifacts(
         "input_channels": frame_window_size * 3,
         "state_inputs": state_inputs_metadata(state_input_config),
         "delta_speed_target_transform": delta_speed_transform.metadata(),
+        "yaw_consistency": {
+            "yaw_delta_vs_yaw_rate_weight": yaw_consistency_weight,
+            "yaw_rate_scale_to_degrees": yaw_rate_scale_to_degrees,
+        },
+        "speed_consistency": {
+            "future_speed_vs_delta_speed_weight": speed_consistency_weight,
+        },
+        "yaw_loss_weighting": {
+            "enabled": yaw_loss_weighting.enabled,
+            "base_weight": yaw_loss_weighting.base_weight,
+            "alpha": yaw_loss_weighting.alpha,
+            "tau": yaw_loss_weighting.tau,
+            "max_scale": yaw_loss_weighting.max_scale,
+        },
+        "turn_oversampling": {
+            "enabled": turn_oversampling.enabled,
+            "straight_weight": turn_oversampling.straight_weight,
+            "light_turn_weight": turn_oversampling.light_turn_weight,
+            "medium_turn_weight": turn_oversampling.medium_turn_weight,
+            "sharp_turn_weight": turn_oversampling.sharp_turn_weight,
+            "light_turn_threshold": turn_oversampling.light_turn_threshold,
+            "medium_turn_threshold": turn_oversampling.medium_turn_threshold,
+            "sharp_turn_threshold": turn_oversampling.sharp_turn_threshold,
+        },
+        "state_input_fusion_heads": state_input_fusion_heads,
+        "train_sampler": train_sampler_summary,
         "head_specs": head_specs_metadata(head_specs),
         "head_layout": head_layout_metadata(head_specs),
         "train_metrics": train_metrics,
@@ -355,6 +495,32 @@ def save_epoch_artifacts(
         "input_channels": frame_window_size * 3,
         "state_inputs": state_inputs_metadata(state_input_config),
         "delta_speed_target_transform": delta_speed_transform.metadata(),
+        "yaw_consistency": {
+            "yaw_delta_vs_yaw_rate_weight": yaw_consistency_weight,
+            "yaw_rate_scale_to_degrees": yaw_rate_scale_to_degrees,
+        },
+        "speed_consistency": {
+            "future_speed_vs_delta_speed_weight": speed_consistency_weight,
+        },
+        "yaw_loss_weighting": {
+            "enabled": yaw_loss_weighting.enabled,
+            "base_weight": yaw_loss_weighting.base_weight,
+            "alpha": yaw_loss_weighting.alpha,
+            "tau": yaw_loss_weighting.tau,
+            "max_scale": yaw_loss_weighting.max_scale,
+        },
+        "turn_oversampling": {
+            "enabled": turn_oversampling.enabled,
+            "straight_weight": turn_oversampling.straight_weight,
+            "light_turn_weight": turn_oversampling.light_turn_weight,
+            "medium_turn_weight": turn_oversampling.medium_turn_weight,
+            "sharp_turn_weight": turn_oversampling.sharp_turn_weight,
+            "light_turn_threshold": turn_oversampling.light_turn_threshold,
+            "medium_turn_threshold": turn_oversampling.medium_turn_threshold,
+            "sharp_turn_threshold": turn_oversampling.sharp_turn_threshold,
+        },
+        "state_input_fusion_heads": state_input_fusion_heads,
+        "train_sampler": train_sampler_summary,
         "head_specs": head_specs_metadata(head_specs),
         "head_layout": head_layout_metadata(head_specs),
         "train_metrics": train_metrics,
@@ -397,10 +563,17 @@ def probe_device(
         image_width, image_height = image_size
         probe_batch = torch.zeros((1, frame_count * 3, image_height, image_width), device=device)
         probe_speed = None
+        probe_route_forward_delta = None
         if state_input_config.current_speed_enabled:
             probe_speed = torch.zeros((1,), device=device)
+        if state_input_config.route_forward_delta_enabled:
+            probe_route_forward_delta = torch.zeros((1,), device=device)
         with torch.no_grad():
-            _ = model(probe_batch, current_speed=probe_speed)
+            _ = model(
+                probe_batch,
+                current_speed=probe_speed,
+                route_forward_delta=probe_route_forward_delta,
+            )
         return True
     except RuntimeError as exc:
         message = str(exc).lower()
@@ -415,31 +588,53 @@ def _build_phase_loader(
     device: torch.device,
     batch_size: int,
     shuffle: bool,
+    sampler: Sampler[int] | None,
     num_workers: int,
     pin_memory: bool,
     prefetch_factor: int,
     persistent_workers: bool,
     cpu_batch_size: int,
 ) -> DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]]:
+    resolved_shuffle = shuffle and sampler is None
     if device.type != "cuda":
         return DataLoader(
             dataset=dataset,
             batch_size=cpu_batch_size,
-            shuffle=shuffle,
+            shuffle=resolved_shuffle,
+            sampler=sampler,
             num_workers=0,
             pin_memory=False,
         )
 
     resolved_num_workers = max(0, num_workers)
+    resolved_pin_memory = pin_memory and resolved_num_workers > 0
+    resolved_persistent_workers = persistent_workers and resolved_num_workers > 0
     resolved_prefetch_factor = prefetch_factor if resolved_num_workers > 0 else None
+
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=resolved_shuffle,
+        sampler=sampler,
         num_workers=resolved_num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers and resolved_num_workers > 0,
+        pin_memory=resolved_pin_memory,
+        persistent_workers=resolved_persistent_workers,
         prefetch_factor=resolved_prefetch_factor,
+    )
+
+
+def _format_loader_summary(
+    phase_name: str,
+    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+) -> str:
+    prefetch_factor = getattr(loader, "prefetch_factor", None)
+    sampler_name = type(loader.sampler).__name__ if getattr(loader, "sampler", None) is not None else "None"
+    return (
+        f"{phase_name}_loader batch_size={loader.batch_size} "
+        f"num_workers={loader.num_workers} pin_memory={loader.pin_memory} "
+        f"persistent_workers={loader.persistent_workers} "
+        f"prefetch_factor={prefetch_factor} sampler={sampler_name} "
+        f"samples={_loader_dataset_len(loader)}"
     )
 
 
@@ -471,6 +666,64 @@ def build_validation_subset(
 
 def _loader_dataset_len(dataset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]) -> int:
     return len(dataset)
+
+
+def _bucket_turn_magnitude(magnitude: float, config: TurnOversamplingConfig) -> tuple[str, float]:
+    if magnitude < config.light_turn_threshold:
+        return "straight", config.straight_weight
+    if magnitude < config.medium_turn_threshold:
+        return "light_turn", config.light_turn_weight
+    if magnitude < config.sharp_turn_threshold:
+        return "medium_turn", config.medium_turn_weight
+    return "sharp_turn", config.sharp_turn_weight
+
+
+def build_turn_oversampling_weights(
+    dataset: FsdDataset,
+    config: TurnOversamplingConfig,
+) -> tuple[Tensor | None, dict[str, Any]]:
+    summary: dict[str, Any] = {
+        "enabled": config.enabled,
+        "sample_count": len(dataset),
+        "thresholds": {
+            "light_turn": config.light_turn_threshold,
+            "medium_turn": config.medium_turn_threshold,
+            "sharp_turn": config.sharp_turn_threshold,
+        },
+        "weights": {
+            "straight": config.straight_weight,
+            "light_turn": config.light_turn_weight,
+            "medium_turn": config.medium_turn_weight,
+            "sharp_turn": config.sharp_turn_weight,
+        },
+        "bucket_counts": {
+            "straight": 0,
+            "light_turn": 0,
+            "medium_turn": 0,
+            "sharp_turn": 0,
+        },
+    }
+    if not config.enabled:
+        summary["sampler"] = "disabled"
+        return None, summary
+
+    magnitudes = dataset.scalar_target_values(FUTURE_YAW_DELTA_HEAD_NAME)
+    bucket_counts: Counter[str] = Counter()
+    weights: list[float] = []
+    for raw_value in magnitudes:
+        bucket_name, weight = _bucket_turn_magnitude(abs(raw_value), config)
+        bucket_counts[bucket_name] += 1
+        weights.append(weight)
+    for bucket_name in summary["bucket_counts"]:
+        summary["bucket_counts"][bucket_name] = int(bucket_counts.get(bucket_name, 0))
+    summary["sampler"] = "WeightedRandomSampler"
+    return torch.tensor(weights, dtype=torch.double), summary
+
+
+def _turn_oversampling_sampler(weights: Tensor | None) -> Sampler[int] | None:
+    if weights is None:
+        return None
+    return WeightedRandomSampler(weights, num_samples=int(weights.numel()), replacement=True)
 
 
 def _process_rss_bytes() -> int | None:
@@ -574,6 +827,14 @@ def _empty_metric_totals(head_specs: tuple[HeadSpec, ...]) -> dict[str, Any]:
         "weighted_loss_sum": 0.0,
         "control_weighted_loss_sum": 0.0,
         "aux_weighted_loss_sum": 0.0,
+        "yaw_consistency_loss_sum": 0.0,
+        "yaw_consistency_weighted_loss_sum": 0.0,
+        "yaw_consistency_batch_count": 0,
+        "speed_consistency_loss_sum": 0.0,
+        "speed_consistency_weighted_loss_sum": 0.0,
+        "speed_consistency_batch_count": 0,
+        "future_yaw_delta_weighted_sample_loss_sum": 0.0,
+        "future_yaw_delta_weighted_sample_batch_count": 0,
         "loss_sum_by_head": {spec.name: 0.0 for spec in head_specs},
         "weighted_loss_sum_by_head": {spec.name: 0.0 for spec in head_specs},
         "abs_error_sum_by_head": {spec.name: 0.0 for spec in head_specs},
@@ -631,13 +892,17 @@ def _move_targets_to_device(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
 ) -> DatasetTargets:
-    return {
-        spec.name: normalize_head_tensor(spec.name, targets[spec.name], spec).to(
-            device, non_blocking=device.type == "cuda"
-        )
-        for spec in head_specs
-        if spec.name in targets
-    }
+    head_specs_by_name = {spec.name: spec for spec in head_specs}
+    moved: DatasetTargets = {}
+    for name, value in targets.items():
+        if name in head_specs_by_name:
+            moved[name] = normalize_head_tensor(name, value, head_specs_by_name[name]).to(
+                device,
+                non_blocking=device.type == "cuda",
+            )
+            continue
+        moved[name] = value.to(device, non_blocking=device.type == "cuda")
+    return moved
 
 
 def _move_state_inputs_to_device(
@@ -662,6 +927,93 @@ def _metric_tensor_for_head(
     return tensor
 
 
+def _compute_weighted_future_yaw_delta_loss(
+    prediction: Tensor,
+    target: Tensor,
+    config: YawLossWeightingConfig,
+) -> tuple[Tensor, Tensor]:
+    pred = prediction.float()
+    truth = target.to(dtype=pred.dtype)
+    base_loss = torch.nn.functional.smooth_l1_loss(pred, truth)
+    if not config.enabled:
+        return base_loss, base_loss
+
+    per_sample = torch.nn.functional.smooth_l1_loss(pred, truth, reduction="none")
+    turn_strength = (truth.abs() / config.tau).clamp(min=0.0, max=1.0)
+    sample_weight = (config.base_weight + config.alpha * turn_strength).clamp(max=config.max_scale)
+    weighted_loss = (per_sample * sample_weight).mean()
+    return base_loss, weighted_loss
+
+
+def _compute_yaw_consistency_loss(
+    outputs: dict[str, Tensor],
+    targets: DatasetTargets,
+    *,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+) -> Tensor | None:
+    if yaw_consistency_weight <= 0.0:
+        return None
+    if FUTURE_YAW_DELTA_HEAD_NAME not in outputs or YAW_RATE_HEAD_NAME not in outputs:
+        return None
+    if FUTURE_HORIZON_SECONDS_TARGET_KEY not in targets:
+        return None
+    horizon = targets[FUTURE_HORIZON_SECONDS_TARGET_KEY].float()
+    if horizon.ndim > 1 and horizon.shape[-1] == 1:
+        horizon = horizon.squeeze(-1)
+    if horizon.ndim != 1:
+        raise ValueError(
+            f"{FUTURE_HORIZON_SECONDS_TARGET_KEY} expected shape (batch,) or (batch, 1), got {tuple(horizon.shape)}"
+        )
+    if bool((horizon <= 0).any().item()):
+        raise ValueError(f"{FUTURE_HORIZON_SECONDS_TARGET_KEY} must be > 0 for every sample")
+    if yaw_rate_scale_to_degrees <= 0.0:
+        raise ValueError("training.consistency.yaw_rate_scale_to_degrees must be > 0")
+
+    future_yaw_delta = outputs[FUTURE_YAW_DELTA_HEAD_NAME].float()
+    yaw_rate = outputs[YAW_RATE_HEAD_NAME].float()
+    if future_yaw_delta.ndim > 1 and future_yaw_delta.shape[-1] == 1:
+        future_yaw_delta = future_yaw_delta.squeeze(-1)
+    if yaw_rate.ndim > 1 and yaw_rate.shape[-1] == 1:
+        yaw_rate = yaw_rate.squeeze(-1)
+    expected_yaw_delta = yaw_rate * horizon.to(dtype=yaw_rate.dtype) * yaw_rate_scale_to_degrees
+    return torch.nn.functional.smooth_l1_loss(future_yaw_delta, expected_yaw_delta.to(dtype=future_yaw_delta.dtype))
+
+
+def _compute_speed_consistency_loss(
+    outputs: dict[str, Tensor],
+    targets: DatasetTargets,
+    *,
+    delta_speed_transform: DeltaSpeedTargetTransform,
+    speed_consistency_weight: float,
+) -> Tensor | None:
+    if speed_consistency_weight <= 0.0:
+        return None
+    if FUTURE_SPEED_HEAD_NAME not in outputs or DELTA_SPEED_HEAD_NAME not in outputs:
+        return None
+    if CURRENT_SPEED_TARGET_KEY not in targets:
+        return None
+
+    future_speed = outputs[FUTURE_SPEED_HEAD_NAME].float()
+    delta_speed = outputs[DELTA_SPEED_HEAD_NAME].float()
+    current_speed = targets[CURRENT_SPEED_TARGET_KEY].float()
+
+    if future_speed.ndim > 1 and future_speed.shape[-1] == 1:
+        future_speed = future_speed.squeeze(-1)
+    if delta_speed.ndim > 1 and delta_speed.shape[-1] == 1:
+        delta_speed = delta_speed.squeeze(-1)
+    if current_speed.ndim > 1 and current_speed.shape[-1] == 1:
+        current_speed = current_speed.squeeze(-1)
+    if current_speed.ndim != 1:
+        raise ValueError(
+            f"{CURRENT_SPEED_TARGET_KEY} expected shape (batch,) or (batch, 1), got {tuple(current_speed.shape)}"
+        )
+
+    delta_speed_raw = denormalize_delta_speed_tensor(delta_speed, delta_speed_transform).to(dtype=future_speed.dtype)
+    expected_future_speed = current_speed.to(dtype=future_speed.dtype) + delta_speed_raw
+    return torch.nn.functional.smooth_l1_loss(future_speed, expected_future_speed)
+
+
 def _compute_loss_and_update_totals(
     outputs: dict[str, Tensor],
     targets: DatasetTargets,
@@ -670,6 +1022,11 @@ def _compute_loss_and_update_totals(
     sample_count: int,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+    speed_consistency_weight: float,
+    yaw_loss_weighting: YawLossWeightingConfig,
+    apply_yaw_loss_weighting: bool,
 ) -> Tensor:
     loss_terms: list[Tensor] = []
 
@@ -687,10 +1044,24 @@ def _compute_loss_and_update_totals(
         prediction = normalize_head_tensor(spec.name, outputs[spec.name], spec)
         target = normalize_head_tensor(spec.name, targets[spec.name], spec).to(dtype=prediction.dtype)
 
-        head_loss = compute_head_loss(spec, prediction, target)
+        if spec.name == FUTURE_YAW_DELTA_HEAD_NAME:
+            head_loss, optimized_head_loss = _compute_weighted_future_yaw_delta_loss(
+                prediction,
+                target,
+                yaw_loss_weighting,
+            )
+            weighted_sample_loss_value = float(optimized_head_loss.item())
+            totals["future_yaw_delta_weighted_sample_loss_sum"] += weighted_sample_loss_value
+            totals["future_yaw_delta_weighted_sample_batch_count"] += 1
+            effective_head_loss = optimized_head_loss if apply_yaw_loss_weighting else head_loss
+        else:
+            head_loss = compute_head_loss(spec, prediction, target)
+            optimized_head_loss = head_loss
+            effective_head_loss = head_loss
+
         if head_loss is not None:
             head_loss_value = float(head_loss.item())
-            weighted_loss_value = head_loss_value * spec.loss_weight
+            weighted_loss_value = float(effective_head_loss.item()) * spec.loss_weight
             totals["loss_sum_by_head"][spec.name] += head_loss_value
             totals["weighted_loss_sum_by_head"][spec.name] += weighted_loss_value
             totals["weighted_loss_sum"] += weighted_loss_value
@@ -699,7 +1070,7 @@ def _compute_loss_and_update_totals(
             else:
                 totals["aux_weighted_loss_sum"] += weighted_loss_value
             if spec.loss_weight > 0.0:
-                loss_terms.append(head_loss * spec.loss_weight)
+                loss_terms.append(effective_head_loss * spec.loss_weight)
 
         if spec.loss_type == "bce_with_logits":
             prediction_binary = (torch.sigmoid(prediction) >= 0.5).to(dtype=target.dtype)
@@ -739,6 +1110,36 @@ def _compute_loss_and_update_totals(
             totals["aux_sq_error_sum"] += sq_error_sum
             totals["aux_element_count"] += element_count
 
+    yaw_consistency_loss = _compute_yaw_consistency_loss(
+        outputs,
+        targets,
+        yaw_consistency_weight=yaw_consistency_weight,
+        yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
+    )
+    if yaw_consistency_loss is not None:
+        yaw_consistency_loss_value = float(yaw_consistency_loss.item())
+        weighted_yaw_consistency_loss = yaw_consistency_loss_value * yaw_consistency_weight
+        totals["yaw_consistency_loss_sum"] += yaw_consistency_loss_value
+        totals["yaw_consistency_weighted_loss_sum"] += weighted_yaw_consistency_loss
+        totals["yaw_consistency_batch_count"] += 1
+        totals["weighted_loss_sum"] += weighted_yaw_consistency_loss
+        loss_terms.append(yaw_consistency_loss * yaw_consistency_weight)
+
+    speed_consistency_loss = _compute_speed_consistency_loss(
+        outputs,
+        targets,
+        delta_speed_transform=delta_speed_transform,
+        speed_consistency_weight=speed_consistency_weight,
+    )
+    if speed_consistency_loss is not None:
+        speed_consistency_loss_value = float(speed_consistency_loss.item())
+        weighted_speed_consistency_loss = speed_consistency_loss_value * speed_consistency_weight
+        totals["speed_consistency_loss_sum"] += speed_consistency_loss_value
+        totals["speed_consistency_weighted_loss_sum"] += weighted_speed_consistency_loss
+        totals["speed_consistency_batch_count"] += 1
+        totals["weighted_loss_sum"] += weighted_speed_consistency_loss
+        loss_terms.append(speed_consistency_loss * speed_consistency_weight)
+
     if loss_terms:
         return torch.stack(loss_terms).sum()
 
@@ -748,6 +1149,9 @@ def _compute_loss_and_update_totals(
 
 def finalize_metrics(totals: dict[str, Any], head_specs: tuple[HeadSpec, ...]) -> MetricPayload:
     batch_count = int(totals["batch_count"])
+    yaw_consistency_batch_count = int(totals["yaw_consistency_batch_count"])
+    speed_consistency_batch_count = int(totals["speed_consistency_batch_count"])
+    weighted_yaw_batch_count = int(totals["future_yaw_delta_weighted_sample_batch_count"])
     control_specs = tuple(spec for spec in head_specs if spec.kind == "control")
     aux_specs = tuple(spec for spec in head_specs if spec.kind == "aux")
     metrics: MetricPayload = {
@@ -775,6 +1179,23 @@ def finalize_metrics(totals: dict[str, Any], head_specs: tuple[HeadSpec, ...]) -
                 float(totals["aux_sq_error_sum"]), int(totals["aux_element_count"])
             ),
         })
+    metrics["yaw_consistency_loss"] = _mean_or_zero(float(totals["yaw_consistency_loss_sum"]), yaw_consistency_batch_count)
+    metrics["yaw_consistency_weighted_loss"] = _mean_or_zero(
+        float(totals["yaw_consistency_weighted_loss_sum"]),
+        yaw_consistency_batch_count,
+    )
+    metrics["speed_consistency_loss"] = _mean_or_zero(
+        float(totals["speed_consistency_loss_sum"]),
+        speed_consistency_batch_count,
+    )
+    metrics["speed_consistency_weighted_loss"] = _mean_or_zero(
+        float(totals["speed_consistency_weighted_loss_sum"]),
+        speed_consistency_batch_count,
+    )
+    metrics["future_yaw_delta_weighted_sample_loss"] = _mean_or_zero(
+        float(totals["future_yaw_delta_weighted_sample_loss_sum"]),
+        weighted_yaw_batch_count,
+    )
 
     per_head: dict[str, dict[str, Any]] = {}
     control_head_metrics: dict[str, dict[str, Any]] = {}
@@ -805,9 +1226,9 @@ def finalize_metrics(totals: dict[str, Any], head_specs: tuple[HeadSpec, ...]) -
             head_metrics["rmse"] = rmse
             metrics[f"{spec.name}_mae"] = mae
             metrics[f"{spec.name}_rmse"] = rmse
-            if spec.name == "steer":
-                metrics["steering_mae"] = mae
-                metrics["steering_rmse"] = rmse
+            if spec.name == FUTURE_YAW_DELTA_HEAD_NAME:
+                metrics["yaw_delta_mae"] = mae
+                metrics["yaw_delta_rmse"] = rmse
 
         per_head[spec.name] = head_metrics
         if spec.kind == "control":
@@ -834,6 +1255,10 @@ def train_batch(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+    speed_consistency_weight: float,
+    yaw_loss_weighting: YawLossWeightingConfig,
 ) -> tuple[float, BatchTiming, dict[str, Any]]:
     step_start = time.perf_counter()
     transfer_start = time.perf_counter()
@@ -847,7 +1272,11 @@ def train_batch(
     batch_totals = _empty_metric_totals(head_specs)
     forward_backward_start = time.perf_counter()
     with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-        model_output = model(x_batch, current_speed=state_inputs.get(CURRENT_SPEED_KEY))
+        model_output = model(
+            x_batch,
+            current_speed=state_inputs.get(CURRENT_SPEED_KEY),
+            route_forward_delta=state_inputs.get(ROUTE_FORWARD_DELTA_KEY),
+        )
         loss = _compute_loss_and_update_totals(
             model_output,
             y_batch,
@@ -855,6 +1284,11 @@ def train_batch(
             sample_count=int(x_batch.shape[0]),
             head_specs=head_specs,
             delta_speed_transform=delta_speed_transform,
+            yaw_consistency_weight=yaw_consistency_weight,
+            yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
+            speed_consistency_weight=speed_consistency_weight,
+            yaw_loss_weighting=yaw_loss_weighting,
+            apply_yaw_loss_weighting=True,
         )
 
     scaler.scale(loss).backward()
@@ -893,6 +1327,10 @@ def train_epoch(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+    speed_consistency_weight: float,
+    yaw_loss_weighting: YawLossWeightingConfig,
     log_every_n_batches: int,
 ) -> tuple[MetricPayload, float, dict[str, float]]:
     epoch_start = time.perf_counter()
@@ -928,6 +1366,10 @@ def train_epoch(
                 device,
                 head_specs,
                 delta_speed_transform,
+                yaw_consistency_weight,
+                yaw_rate_scale_to_degrees,
+                speed_consistency_weight,
+                yaw_loss_weighting,
             )
             batch_timing = BatchTiming(
                 loader_wait_s=loader_wait_time,
@@ -971,6 +1413,14 @@ def _merge_metric_totals(target: dict[str, Any], source: dict[str, Any]) -> None
         "weighted_loss_sum",
         "control_weighted_loss_sum",
         "aux_weighted_loss_sum",
+        "yaw_consistency_loss_sum",
+        "yaw_consistency_weighted_loss_sum",
+        "yaw_consistency_batch_count",
+        "speed_consistency_loss_sum",
+        "speed_consistency_weighted_loss_sum",
+        "speed_consistency_batch_count",
+        "future_yaw_delta_weighted_sample_loss_sum",
+        "future_yaw_delta_weighted_sample_batch_count",
         "overall_abs_error_sum",
         "overall_sq_error_sum",
         "overall_element_count",
@@ -1003,6 +1453,10 @@ def evaluate_epoch(
     device: torch.device,
     head_specs: tuple[HeadSpec, ...],
     delta_speed_transform: DeltaSpeedTargetTransform,
+    yaw_consistency_weight: float,
+    yaw_rate_scale_to_degrees: float,
+    speed_consistency_weight: float,
+    yaw_loss_weighting: YawLossWeightingConfig,
 ) -> tuple[MetricPayload, float]:
     eval_start = time.perf_counter()
     model.eval()
@@ -1011,13 +1465,17 @@ def evaluate_epoch(
     loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None
     try:
         loader_iter = iter(loader)
-        with torch.no_grad():
+        with torch.inference_mode():
             for x_batch, state_inputs, targets in loader_iter:
                 x_batch = x_batch.to(device, non_blocking=device.type == "cuda", memory_format=torch.channels_last)
                 state_inputs = _move_state_inputs_to_device(state_inputs, device)
                 y_batch = _move_targets_to_device(targets, device, head_specs)
                 with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                    model_output = model(x_batch, current_speed=state_inputs.get(CURRENT_SPEED_KEY))
+                    model_output = model(
+                        x_batch,
+                        current_speed=state_inputs.get(CURRENT_SPEED_KEY),
+                        route_forward_delta=state_inputs.get(ROUTE_FORWARD_DELTA_KEY),
+                    )
                     _compute_loss_and_update_totals(
                         model_output,
                         y_batch,
@@ -1025,9 +1483,25 @@ def evaluate_epoch(
                         sample_count=int(x_batch.shape[0]),
                         head_specs=head_specs,
                         delta_speed_transform=delta_speed_transform,
+                        yaw_consistency_weight=yaw_consistency_weight,
+                        yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
+                        speed_consistency_weight=speed_consistency_weight,
+                        yaw_loss_weighting=yaw_loss_weighting,
+                        apply_yaw_loss_weighting=False,
                     )
+                del model_output
+                del y_batch
+                del state_inputs
+                del targets
+                del x_batch
     finally:
         _shutdown_loader_iterator(loader_iter)
+
+    if int(totals["batch_count"]) <= 0 or int(totals["sample_count"]) <= 0:
+        raise ValueError(
+            "Validation produced zero batches/samples. "
+            "Check processed validation runs for empty dataset.jsonl files or missing required label fields."
+        )
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -1037,6 +1511,8 @@ def evaluate_epoch(
 
 
 def build_run_summary(context: TrainingContext) -> dict[str, object]:
+    current_speed_fused_heads = current_speed_fused_head_names(context.state_input_config)
+    route_forward_delta_fused_heads = route_forward_delta_fused_head_names(context.state_input_config)
     return {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "completed_at": None,
@@ -1059,6 +1535,10 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "input_channels": context.config.dataset.window_size * 3,
         },
         "state_inputs": state_inputs_metadata(context.state_input_config),
+        "state_input_fusion_heads": {
+            "current_speed": list(current_speed_fused_heads),
+            "route_forward_delta": list(route_forward_delta_fused_heads),
+        },
         "delta_speed_target_transform": context.delta_speed_transform.metadata(),
         "head_specs": head_specs_metadata(context.head_specs),
         "head_layout": head_layout_metadata(context.head_specs),
@@ -1087,6 +1567,16 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "val_persistent_workers": context.config.loader.val_persistent_workers,
             "cpu_batch_size": context.config.loader.cpu_batch_size,
             "log_every_n_batches": context.config.loader.log_every_n_batches,
+            "turn_oversampling": {
+                "enabled": context.config.loader.turn_oversampling.enabled,
+                "straight_weight": context.config.loader.turn_oversampling.straight_weight,
+                "light_turn_weight": context.config.loader.turn_oversampling.light_turn_weight,
+                "medium_turn_weight": context.config.loader.turn_oversampling.medium_turn_weight,
+                "sharp_turn_weight": context.config.loader.turn_oversampling.sharp_turn_weight,
+                "light_turn_threshold": context.config.loader.turn_oversampling.light_turn_threshold,
+                "medium_turn_threshold": context.config.loader.turn_oversampling.medium_turn_threshold,
+                "sharp_turn_threshold": context.config.loader.turn_oversampling.sharp_turn_threshold,
+            },
         },
         "epochs_total": context.config.training.epochs,
         "early_stopping": {
@@ -1094,6 +1584,21 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "patience": context.config.training.early_stopping_patience,
             "min_delta": context.config.training.early_stopping_min_delta,
         },
+        "yaw_consistency": {
+            "yaw_delta_vs_yaw_rate_weight": context.config.training.yaw_consistency_weight,
+            "yaw_rate_scale_to_degrees": context.config.training.yaw_rate_scale_to_degrees,
+        },
+        "speed_consistency": {
+            "future_speed_vs_delta_speed_weight": context.config.training.speed_consistency_weight,
+        },
+        "yaw_loss_weighting": {
+            "enabled": context.config.training.yaw_loss_weighting.enabled,
+            "base_weight": context.config.training.yaw_loss_weighting.base_weight,
+            "alpha": context.config.training.yaw_loss_weighting.alpha,
+            "tau": context.config.training.yaw_loss_weighting.tau,
+            "max_scale": context.config.training.yaw_loss_weighting.max_scale,
+        },
+        "train_sampler": context.train_sampler_summary,
         "epochs": [],
     }
 
@@ -1129,20 +1634,41 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
     data_root = Path(config.dataset.data_root)
     requested_device = select_device(config.training.device)
     image_size = (config.dataset.image_width, config.dataset.image_height)
+    state_input_config = config.state_inputs
     train_dataset = FsdDataset(
         run_paths=config.dataset.train_run_paths,
         image_size=image_size,
         expected_window_size=config.dataset.window_size,
+        state_input_config=state_input_config,
     )
     val_dataset = FsdDataset(
         run_paths=config.dataset.val_run_paths,
         image_size=image_size,
         expected_window_size=config.dataset.window_size,
+        state_input_config=state_input_config,
     )
-    train_sample_x, train_state_inputs, train_targets = train_dataset[0]
+    if len(train_dataset) <= 0:
+        raise ValueError(
+            "Training dataset resolved to zero samples. "
+            f"train_run_ids={list(config.dataset.train_run_ids)} "
+            f"train_trips={train_dataset.trip_count}"
+        )
+    if len(val_dataset) <= 0:
+        raise ValueError(
+            "Validation dataset resolved to zero samples before subset selection. "
+            f"val_run_ids={list(config.dataset.val_run_ids)} "
+            f"val_trips={val_dataset.trip_count}. "
+            "Check processed validation runs for empty dataset.jsonl files."
+        )
     ignored_loss_weight_overrides = inactive_loss_weight_override_names(config.training.head_loss_weights)
     head_specs = apply_loss_weight_overrides(config.training.head_loss_weights)
-    state_input_config = training_state_input_config()
+    train_dataset.head_specs = head_specs
+    val_dataset.head_specs = head_specs
+    train_sample_x, train_state_inputs, train_targets = train_dataset[0]
+    train_sampler_weights, train_sampler_summary = build_turn_oversampling_weights(
+        train_dataset,
+        config.loader.turn_oversampling,
+    )
     model, device = prepare_model(
         requested_device,
         image_size,
@@ -1157,6 +1683,16 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         val_dataset,
         config.loader.val_split,
     )
+    val_subset_sample_count = _loader_dataset_len(val_subset)
+    if val_subset_sample_count <= 0:
+        raise ValueError(
+            "Validation subset resolved to zero usable samples. "
+            f"val_run_ids={list(config.dataset.val_run_ids)} "
+            f"validation_dataset_trips={val_dataset.trip_count} "
+            f"validation_dataset_samples={len(val_dataset)} "
+            f"selected_val_trips={selected_val_trip_count}/{total_val_trip_count}. "
+            "Check processed validation runs for empty dataset.jsonl files or missing required label fields."
+        )
     run_dir, run_metrics_path = prepare_output_paths(Path(config.output.base_dir))
     optimizer = torch.optim.Adam(model.parameters(), lr=config.training.learning_rate)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -1183,6 +1719,8 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         ignored_loss_weight_overrides=ignored_loss_weight_overrides,
         state_input_config=state_input_config,
         delta_speed_transform=config.dataset.delta_speed_transform,
+        train_sampler_weights=train_sampler_weights,
+        train_sampler_summary=train_sampler_summary,
     )
 
 
@@ -1203,17 +1741,20 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
     memory_snapshots["train_start"] = _memory_snapshot(context.device)
     print(_format_memory_snapshot("memory train_start", memory_snapshots["train_start"]))
 
+    train_sampler = _turn_oversampling_sampler(context.train_sampler_weights)
     train_loader = _build_phase_loader(
         context.train_dataset,
         device=context.device,
         batch_size=context.config.loader.train_batch_size,
         shuffle=True,
+        sampler=train_sampler,
         num_workers=context.config.loader.train_num_workers,
         pin_memory=context.config.loader.train_pin_memory,
         prefetch_factor=context.config.loader.train_prefetch_factor,
         persistent_workers=context.config.loader.train_persistent_workers,
         cpu_batch_size=context.config.loader.cpu_batch_size,
     )
+    print(_format_loader_summary("train", train_loader))
     try:
         train_metrics, train_epoch_time, avg_timings = train_epoch(
             train_loader,
@@ -1223,6 +1764,10 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
             context.device,
             context.head_specs,
             context.delta_speed_transform,
+            context.config.training.yaw_consistency_weight,
+            context.config.training.yaw_rate_scale_to_degrees,
+            context.config.training.speed_consistency_weight,
+            context.config.training.yaw_loss_weighting,
             context.config.loader.log_every_n_batches,
         )
     finally:
@@ -1238,12 +1783,14 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
         device=context.device,
         batch_size=context.config.loader.val_batch_size,
         shuffle=False,
+        sampler=None,
         num_workers=context.config.loader.val_num_workers,
         pin_memory=context.config.loader.val_pin_memory,
         prefetch_factor=context.config.loader.val_prefetch_factor,
         persistent_workers=context.config.loader.val_persistent_workers,
         cpu_batch_size=context.config.loader.cpu_batch_size,
     )
+    print(_format_loader_summary("val", val_loader))
     try:
         val_metrics, val_epoch_time = evaluate_epoch(
             val_loader,
@@ -1251,6 +1798,10 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
             context.device,
             context.head_specs,
             context.delta_speed_transform,
+            context.config.training.yaw_consistency_weight,
+            context.config.training.yaw_rate_scale_to_degrees,
+            context.config.training.speed_consistency_weight,
+            context.config.training.yaw_loss_weighting,
         )
     finally:
         _release_phase_resources(context.device, loader=val_loader)
@@ -1317,6 +1868,16 @@ def record_epoch(
         head_specs=context.head_specs,
         state_input_config=context.state_input_config,
         delta_speed_transform=context.delta_speed_transform,
+        yaw_consistency_weight=context.config.training.yaw_consistency_weight,
+        yaw_rate_scale_to_degrees=context.config.training.yaw_rate_scale_to_degrees,
+        speed_consistency_weight=context.config.training.speed_consistency_weight,
+        yaw_loss_weighting=context.config.training.yaw_loss_weighting,
+        turn_oversampling=context.config.loader.turn_oversampling,
+        state_input_fusion_heads={
+            "current_speed": list(current_speed_fused_head_names(context.state_input_config)),
+            "route_forward_delta": list(route_forward_delta_fused_head_names(context.state_input_config)),
+        },
+        train_sampler_summary=context.train_sampler_summary,
     )
     epoch_artifact["is_best"] = is_best
     epoch_artifact["early_stopping_metric"] = early_stopping_state.metric_name
@@ -1352,6 +1913,15 @@ def format_batch_weighted_losses(batch_totals: dict[str, Any], head_specs: tuple
     parts: list[str] = []
     for spec in head_specs:
         parts.append(f"{spec.name}:{float(batch_totals['weighted_loss_sum_by_head'][spec.name]):.3f}")
+    if int(batch_totals.get("future_yaw_delta_weighted_sample_batch_count", 0)) > 0:
+        parts.append(
+            "yaw_weighted:"
+            f"{float(batch_totals['future_yaw_delta_weighted_sample_loss_sum']):.3f}"
+        )
+    if int(batch_totals.get("yaw_consistency_batch_count", 0)) > 0:
+        parts.append(f"yaw_consistency:{float(batch_totals['yaw_consistency_weighted_loss_sum']):.3f}")
+    if int(batch_totals.get("speed_consistency_batch_count", 0)) > 0:
+        parts.append(f"speed_consistency:{float(batch_totals['speed_consistency_weighted_loss_sum']):.3f}")
     return " ".join(parts)
 
 
@@ -1395,6 +1965,15 @@ def print_epoch_summary(
         summary_parts.append(control_summary)
     if aux_summary:
         summary_parts.append(aux_summary)
+    if "yaw_consistency_loss" in epoch_result.val_metrics:
+        summary_parts.append(f"yaw_consistency_loss={float(epoch_result.val_metrics['yaw_consistency_loss']):.6f}")
+    if "speed_consistency_loss" in epoch_result.val_metrics:
+        summary_parts.append(f"speed_consistency_loss={float(epoch_result.val_metrics['speed_consistency_loss']):.6f}")
+    if "future_yaw_delta_weighted_sample_loss" in epoch_result.val_metrics:
+        summary_parts.append(
+            "future_yaw_delta_weighted_sample_loss="
+            f"{float(epoch_result.val_metrics['future_yaw_delta_weighted_sample_loss']):.6f}"
+        )
     summary_parts.extend([
         f"checkpoint={checkpoint}",
         f"train_epoch_s={epoch_result.train_epoch_time:.3f}",
@@ -1445,6 +2024,31 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
             "Ignoring inactive auxiliary loss-weight overrides in control-only mode: "
             + ", ".join(context.ignored_loss_weight_overrides)
         )
+    print(
+        "Yaw loss weighting: "
+        f"enabled={context.config.training.yaw_loss_weighting.enabled} "
+        f"base={context.config.training.yaw_loss_weighting.base_weight:.3f} "
+        f"alpha={context.config.training.yaw_loss_weighting.alpha:.3f} "
+        f"tau={context.config.training.yaw_loss_weighting.tau:.3f} "
+        f"max_scale={context.config.training.yaw_loss_weighting.max_scale:.3f}"
+    )
+    print(
+        "Turn oversampling: "
+        f"enabled={context.config.loader.turn_oversampling.enabled} "
+        f"summary={context.train_sampler_summary}"
+    )
+    print(
+        "Current speed fusion: "
+        f"mode={context.state_input_config.current_speed_fusion} "
+        f"heads={list(current_speed_fused_head_names(context.state_input_config))}"
+    )
+    print(
+        "Route forward delta input: "
+        f"enabled={context.state_input_config.route_forward_delta_enabled} "
+        f"cap={context.state_input_config.route_forward_delta_cap:.3f} "
+        f"mode={context.state_input_config.route_forward_delta_fusion} "
+        f"heads={list(route_forward_delta_fused_head_names(context.state_input_config))}"
+    )
     print(f"Starting training for {context.config.training.epochs} epochs...")
 
     for epoch_index in range(1, context.config.training.epochs + 1):

@@ -3,14 +3,26 @@ package capture
 import (
 	"encoding/json"
 	"image"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
 )
+
+type fakeActuatorSubmitter struct {
+	commands []actuator.CommandRequest
+	err      error
+}
+
+func (f *fakeActuatorSubmitter) Submit(req actuator.CommandRequest) (actuator.State, error) {
+	f.commands = append(f.commands, req)
+	return actuator.State{}, f.err
+}
 
 func TestShouldDispatchInferenceFrame(t *testing.T) {
 	cases := []struct {
@@ -83,6 +95,9 @@ func TestCloneInferenceStatusCopiesPrediction(t *testing.T) {
 		State: "running",
 		LastPrediction: &InferencePrediction{
 			Steering:           0.25,
+			FutureYawDelta:     15.0,
+			FutureYaw:          35.0,
+			CurrentYaw:         20.0,
 			DeltaSpeed:         -0.1,
 			WindowFrameIndices: []int{0, 2, 4},
 		},
@@ -198,12 +213,17 @@ func TestRequestPredictionReadsControlOutputs(t *testing.T) {
 		if payload["current_speed"] != 4.5 {
 			t.Fatalf("expected current_speed=4.5, got=%v", payload["current_speed"])
 		}
+		if payload["route_forward_delta"] != 0.75 {
+			t.Fatalf("expected route_forward_delta=0.75, got=%v", payload["route_forward_delta"])
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"checkpoint": "C:/models/run-1/epoch-006.pt",
 			"device":     "cuda",
 			"control_outputs": map[string]any{
-				"steer":       0.125,
-				"delta_speed": -0.375,
+				"future_yaw_delta": 33.0,
+				"future_speed":     5.25,
+				"delta_speed":      -0.375,
+				"move_intent_prob": 0.8,
 			},
 		})
 	}))
@@ -212,7 +232,12 @@ func TestRequestPredictionReadsControlOutputs(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = server.URL
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return time.Unix(1710000000, 0).UTC() }))
-	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.5, TimestampMs: 123})
+	store.UpdateTelemetry(control.TelemetryUpdate{
+		CurrentSpeed:      4.5,
+		CurrentYaw:        12.0,
+		RouteForwardDelta: 0.75,
+		TimestampMs:       123,
+	})
 	inferencer := NewInferencer(cfg, store)
 	now := time.Unix(1710000000, 0).UTC()
 	inferencer.nowFunc = func() time.Time { return now }
@@ -233,8 +258,14 @@ func TestRequestPredictionReadsControlOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("requestPrediction returned error: %v", err)
 	}
-	if prediction.Steering != 0.125 {
-		t.Fatalf("unexpected steering: got=%f want=0.125", prediction.Steering)
+	if prediction.FutureYawDelta != 33.0 {
+		t.Fatalf("unexpected future yaw delta: got=%f want=33.0", prediction.FutureYawDelta)
+	}
+	if prediction.FutureYaw != 45.0 {
+		t.Fatalf("unexpected future yaw: got=%f want=45.0", prediction.FutureYaw)
+	}
+	if prediction.FutureSpeed != 5.25 {
+		t.Fatalf("unexpected future speed: got=%f want=5.25", prediction.FutureSpeed)
 	}
 	if prediction.DeltaSpeed != -0.375 {
 		t.Fatalf("unexpected delta speed: got=%f want=-0.375", prediction.DeltaSpeed)
@@ -242,11 +273,342 @@ func TestRequestPredictionReadsControlOutputs(t *testing.T) {
 	if prediction.CurrentSpeed != 4.5 {
 		t.Fatalf("unexpected current speed: got=%f want=4.5", prediction.CurrentSpeed)
 	}
+	if prediction.CurrentYaw != 12.0 {
+		t.Fatalf("unexpected current yaw: got=%f want=12.0", prediction.CurrentYaw)
+	}
+	if prediction.RouteForwardDelta != 0.75 {
+		t.Fatalf("unexpected route forward delta: got=%f want=0.75", prediction.RouteForwardDelta)
+	}
+	if !prediction.HasMoveIntent || prediction.MoveIntentProb != 0.8 {
+		t.Fatalf("unexpected move intent: %+v", prediction)
+	}
 	if prediction.Sequence != 9 {
 		t.Fatalf("unexpected sequence: got=%d want=9", prediction.Sequence)
 	}
 	if len(prediction.WindowFrameHashes) != 3 {
 		t.Fatalf("unexpected frame hash count: got=%d want=3", len(prediction.WindowFrameHashes))
+	}
+}
+
+func TestCommandFromPredictionUsesFutureSpeedWithDeltaTrim(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   15.0,
+		FutureYaw:        30.0,
+		FutureSpeed:      8.0,
+		DeltaSpeed:       -0.4,
+		CurrentSpeed:     4.0,
+		CurrentYaw:       15.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.9,
+		HasMoveIntent:    true,
+		Sequence:         11,
+	}
+
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if prediction.CommandPreview == nil {
+		t.Fatal("expected command preview to be populated")
+	}
+	if command.InputMode != actuator.InputModeNormalized {
+		t.Fatalf("unexpected input mode: got=%s want=%s", command.InputMode, actuator.InputModeNormalized)
+	}
+	if command.Throttle <= 0 {
+		t.Fatalf("expected throttle > 0, got=%f", command.Throttle)
+	}
+	if command.Brake != 0 {
+		t.Fatalf("expected brake=0, got=%f", command.Brake)
+	}
+	if prediction.HeadingErrorDeg != 15.0 {
+		t.Fatalf("unexpected heading error: got=%f want=15.0", prediction.HeadingErrorDeg)
+	}
+	if prediction.LongitudinalMode != "future_speed" {
+		t.Fatalf("unexpected longitudinal mode: %s", prediction.LongitudinalMode)
+	}
+}
+
+func TestCommandFromPredictionSuppressesPositiveThrottleWhenMoveIntentIsLow(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   15.0,
+		FutureYaw:        30.0,
+		FutureSpeed:      8.0,
+		DeltaSpeed:       0.2,
+		CurrentSpeed:     0.0,
+		CurrentYaw:       15.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.2,
+		HasMoveIntent:    true,
+	}
+
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if command.Throttle != 0 {
+		t.Fatalf("expected throttle to be gated off, got=%f", command.Throttle)
+	}
+	if command.Brake != 0 {
+		t.Fatalf("expected brake=0, got=%f", command.Brake)
+	}
+}
+
+func TestCommandFromPredictionKeepsLowSpeedThrottleAliveAcrossMoveIntentHysteresisBand(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+
+	first := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      4.0,
+		DeltaSpeed:       0.1,
+		CurrentSpeed:     0.0,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.8,
+		HasMoveIntent:    true,
+	}
+	firstCommand, err := inferencer.commandFromPrediction(first)
+	if err != nil {
+		t.Fatalf("first commandFromPrediction returned error: %v", err)
+	}
+	if firstCommand.Throttle <= 0 {
+		t.Fatalf("expected first throttle > 0, got=%f", firstCommand.Throttle)
+	}
+	if !first.MoveIntentActive {
+		t.Fatal("expected move intent to latch active on high probability")
+	}
+
+	second := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      3.0,
+		DeltaSpeed:       0.05,
+		CurrentSpeed:     2.0,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.5,
+		HasMoveIntent:    true,
+	}
+	secondCommand, err := inferencer.commandFromPrediction(second)
+	if err != nil {
+		t.Fatalf("second commandFromPrediction returned error: %v", err)
+	}
+	if secondCommand.Throttle <= 0 {
+		t.Fatalf("expected second throttle > 0 while intent stays latched, got=%f", secondCommand.Throttle)
+	}
+	if !second.MoveIntentActive {
+		t.Fatal("expected move intent to remain active inside hysteresis band")
+	}
+}
+
+func TestCommandFromPredictionDropsLowSpeedThrottleAfterMoveIntentTurnsOff(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+
+	_, err := inferencer.commandFromPrediction(&InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      4.0,
+		CurrentSpeed:     0.0,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.9,
+		HasMoveIntent:    true,
+	})
+	if err != nil {
+		t.Fatalf("warmup commandFromPrediction returned error: %v", err)
+	}
+
+	prediction := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      3.0,
+		CurrentSpeed:     1.0,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.2,
+		HasMoveIntent:    true,
+	}
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if command.Throttle != 0 {
+		t.Fatalf("expected throttle to be gated off after move intent turns off, got=%f", command.Throttle)
+	}
+	if prediction.MoveIntentActive {
+		t.Fatal("expected move intent to be inactive below off threshold")
+	}
+}
+
+func TestCommandFromPredictionDoesNotGateThrottleAboveMoveIntentHoldSpeed(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      6.5,
+		CurrentSpeed:     cfg.MoveIntentHoldSpeedMax + 0.5,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+		MoveIntentProb:   0.1,
+		HasMoveIntent:    true,
+	}
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if command.Throttle <= 0 {
+		t.Fatalf("expected throttle above hold-speed ceiling even with low move intent, got=%f", command.Throttle)
+	}
+}
+
+func TestCommandFromPredictionCapsFutureSpeedTargetAtMaxTargetSpeed(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		FutureSpeed:      10.0,
+		CurrentSpeed:     4.0,
+		CurrentYaw:       0.0,
+		ControlSemantics: "target_speed",
+	}
+
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	wantCap := cfg.MaxTargetSpeedKPH / 3.6
+	if math.Abs(prediction.TargetSpeed-wantCap) > 1e-9 {
+		t.Fatalf("expected target speed to be capped at %f m/s, got=%f", wantCap, prediction.TargetSpeed)
+	}
+	if command.Throttle <= 0 {
+		t.Fatalf("expected capped target to still allow throttle below the cap, got=%f", command.Throttle)
+	}
+}
+
+func TestCommandFromPredictionSuppressesPositiveDeltaSpeedAboveMaxTargetSpeed(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   0.0,
+		DeltaSpeed:       0.5,
+		CurrentSpeed:     cfg.MaxTargetSpeedKPH/3.6 + 0.2,
+		CurrentYaw:       0.0,
+		ControlSemantics: "speed_delta",
+	}
+
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if command.Throttle != 0 {
+		t.Fatalf("expected positive throttle to be suppressed above max target speed, got=%f", command.Throttle)
+	}
+}
+
+func TestPreviewSteerCommandIsStrongerAtLowSpeedThanHighSpeed(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.HeadingErrorDeadbandDeg = 0
+	cfg.HeadingErrorFullLockDeg = 40
+	inferencer := NewInferencer(cfg, nil)
+
+	lowSpeedSteer := inferencer.previewSteerCommand(&InferencePrediction{
+		FutureYawDelta: 9.0,
+		CurrentSpeed:   0.0,
+	})
+	highSpeedSteer := inferencer.previewSteerCommand(&InferencePrediction{
+		FutureYawDelta: 9.0,
+		CurrentSpeed:   cfg.SteerGainFadeSpeedMPS,
+	})
+
+	if lowSpeedSteer <= highSpeedSteer {
+		t.Fatalf("expected low-speed steer to exceed high-speed steer, low=%f high=%f", lowSpeedSteer, highSpeedSteer)
+	}
+}
+
+func TestShapeSteerCommandBlendsTowardNewTurnDemand(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.SteerResponseBlend = 0.25
+	cfg.SteerCommandRatePerSec = 100.0
+	cfg.FPS = 20
+	cfg.DispatchStride = 1
+	inferencer := NewInferencer(cfg, nil)
+
+	first := inferencer.shapeSteerCommand(1.0)
+	if first != 1.0 {
+		t.Fatalf("expected first shaped steer to initialize at 1.0, got=%f", first)
+	}
+	second := inferencer.shapeSteerCommand(-1.0)
+	if math.Abs(second-0.5) > 1e-9 {
+		t.Fatalf("expected blended steer to settle at 0.5, got=%f", second)
+	}
+}
+
+func TestCommandFromPredictionRateLimitsSteerCommandAcrossTicks(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.FPS = 20
+	cfg.DispatchStride = 2
+	cfg.HeadingErrorDeadbandDeg = 0
+	cfg.HeadingErrorFullLockDeg = 10
+	cfg.SteerCommandRatePerSec = 2.0
+	inferencer := NewInferencer(cfg, nil)
+
+	firstPrediction := &InferencePrediction{
+		FutureYawDelta:   10.0,
+		DeltaSpeed:       0.0,
+		CurrentYaw:       0.0,
+		CurrentSpeed:     3.0,
+		ControlSemantics: "speed_delta",
+	}
+	firstCommand, err := inferencer.commandFromPrediction(firstPrediction)
+	if err != nil {
+		t.Fatalf("first commandFromPrediction returned error: %v", err)
+	}
+	if math.Abs(firstCommand.Steer-0.99) > 1e-9 {
+		t.Fatalf("expected first steer to initialize near 0.99, got=%f", firstCommand.Steer)
+	}
+
+	secondPrediction := &InferencePrediction{
+		FutureYawDelta:   -10.0,
+		DeltaSpeed:       0.0,
+		CurrentYaw:       0.0,
+		CurrentSpeed:     3.0,
+		ControlSemantics: "speed_delta",
+	}
+	secondCommand, err := inferencer.commandFromPrediction(secondPrediction)
+	if err != nil {
+		t.Fatalf("second commandFromPrediction returned error: %v", err)
+	}
+	if math.Abs(secondCommand.Steer-0.79) > 1e-9 {
+		t.Fatalf("expected steer rate limiting to step down to 0.79, got=%f", secondCommand.Steer)
+	}
+}
+
+func TestCommandFromPredictionFallsBackToDeltaSpeed(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, nil)
+	prediction := &InferencePrediction{
+		FutureYawDelta:   -20.0,
+		FutureYaw:        350.0,
+		DeltaSpeed:       -0.5,
+		CurrentSpeed:     4.0,
+		CurrentYaw:       10.0,
+		ControlSemantics: "speed_delta",
+	}
+
+	command, err := inferencer.commandFromPrediction(prediction)
+	if err != nil {
+		t.Fatalf("commandFromPrediction returned error: %v", err)
+	}
+	if command.Brake <= 0 {
+		t.Fatalf("expected brake > 0, got=%f", command.Brake)
+	}
+	if command.Throttle != 0 {
+		t.Fatalf("expected throttle=0, got=%f", command.Throttle)
+	}
+	if prediction.LongitudinalMode != "delta_speed" {
+		t.Fatalf("unexpected longitudinal mode: %s", prediction.LongitudinalMode)
 	}
 }
 
@@ -265,7 +627,7 @@ func TestRequestPredictionFailsWhenResponseOmitsControls(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = server.URL
 	store := control.NewStore()
-	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 1.0, TimestampMs: 123})
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 1.0, CurrentYaw: 5.0, TimestampMs: 123})
 	inferencer := NewInferencer(cfg, store)
 
 	window := predictionWindow{
@@ -284,7 +646,7 @@ func TestRequestPredictionFailsWhenResponseOmitsControls(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected requestPrediction to fail when control outputs are missing")
 	}
-	if !strings.Contains(err.Error(), "missing control outputs") {
+	if !strings.Contains(err.Error(), "missing future_yaw_delta output") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -311,7 +673,7 @@ func TestRequestPredictionFailsWhenTelemetryIsUnavailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected requestPrediction to fail without telemetry")
 	}
-	if !strings.Contains(err.Error(), "currentSpeed telemetry is unavailable") {
+	if !strings.Contains(err.Error(), "control telemetry is unavailable") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

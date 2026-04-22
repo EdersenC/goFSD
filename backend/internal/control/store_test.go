@@ -90,14 +90,22 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
 
 	telemetry := store.UpdateTelemetry(TelemetryUpdate{
-		CurrentSpeed: 4.25,
-		TimestampMs:  123456,
+		CurrentSpeed:      4.25,
+		CurrentYaw:        182.5,
+		RouteForwardDelta: 0.75,
+		TimestampMs:       123456,
 	})
 	if telemetry == nil {
 		t.Fatal("expected telemetry snapshot")
 	}
 	if telemetry.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected current speed: %+v", telemetry)
+	}
+	if telemetry.CurrentYaw != 182.5 {
+		t.Fatalf("unexpected current yaw: %+v", telemetry)
+	}
+	if telemetry.RouteForwardDelta != 0.75 {
+		t.Fatalf("unexpected route forward delta: %+v", telemetry)
 	}
 
 	state := store.State()
@@ -106,6 +114,12 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 	if state.Telemetry.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected telemetry in state: %+v", state.Telemetry)
+	}
+	if state.Telemetry.CurrentYaw != 182.5 {
+		t.Fatalf("unexpected telemetry yaw in state: %+v", state.Telemetry)
+	}
+	if state.Telemetry.RouteForwardDelta != 0.75 {
+		t.Fatalf("unexpected telemetry route forward delta in state: %+v", state.Telemetry)
 	}
 	if latest := store.LatestTelemetry(); latest == nil || latest.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected latest telemetry: %+v", latest)

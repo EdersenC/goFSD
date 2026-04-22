@@ -43,6 +43,8 @@ type controllerSnapshot struct {
 	controlState
 	Enabled   bool   `json:"enabled"`
 	Stale     bool   `json:"stale"`
+	Holding   bool   `json:"holding"`
+	TimedOut  bool   `json:"timedOut"`
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
@@ -300,16 +302,26 @@ func (s *Service) step(now time.Time) error {
 	s.target = target
 
 	nextApplied := s.applied
-	if target.Stale || !target.Enabled {
-		nextApplied.controlState = target.controlState
-	} else {
+	switch {
+	case target.TimedOut:
 		nextApplied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
 		nextApplied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
 		nextApplied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
+		nextApplied.Handbrake = target.Handbrake
+		nextApplied.Enabled = false
+	case !target.Enabled:
+		nextApplied.controlState = target.controlState
+		nextApplied.Enabled = false
+	default:
+		nextApplied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
+		nextApplied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
+		nextApplied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
+		nextApplied.Handbrake = target.Handbrake
+		nextApplied.Enabled = true
 	}
-	nextApplied.Handbrake = target.Handbrake
-	nextApplied.Enabled = target.Enabled
 	nextApplied.Stale = target.Stale
+	nextApplied.TimedOut = target.TimedOut
+	nextApplied.Holding = target.Enabled && !target.TimedOut && controlStateEqual(nextApplied.controlState, target.controlState)
 	nextApplied.UpdatedAt = now.Format(time.RFC3339Nano)
 
 	s.lastApplyAttemptedAt = now.Format(time.RFC3339Nano)
@@ -325,34 +337,51 @@ func (s *Service) step(now time.Time) error {
 }
 
 func (s *Service) targetLocked(now time.Time) controllerSnapshot {
-	target, stale, enabled := resolveTarget(s.lastCmd, s.liveTuning, s.cfg.StaleTimeout, now)
+	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.liveTuning, s.cfg.StaleTimeout, s.cfg.HoldLastCommand, now)
 	return controllerSnapshot{
 		controlState: target,
 		Enabled:      enabled,
 		Stale:        stale,
+		Holding:      enabled && !timedOut,
+		TimedOut:     timedOut,
 		UpdatedAt:    now.Format(time.RFC3339Nano),
 	}
 }
 
-func resolveTarget(cmd *commandEnvelope, tuning Tuning, staleTimeout time.Duration, now time.Time) (controlState, bool, bool) {
+func resolveTarget(
+	cmd *commandEnvelope,
+	tuning Tuning,
+	staleTimeout time.Duration,
+	holdLastCommand bool,
+	now time.Time,
+) (controlState, bool, bool, bool) {
 	if cmd == nil {
-		return controlState{}, true, false
+		return controlState{}, true, false, false
 	}
 
 	receivedAt, err := time.Parse(time.RFC3339Nano, cmd.ReceivedAt)
 	if err != nil {
-		return controlState{}, true, false
+		return controlState{}, true, false, false
 	}
 	if !cmd.Enabled {
-		return controlState{}, false, false
+		return controlState{}, false, false, false
 	}
-	if now.Sub(receivedAt) > staleTimeout {
-		return controlState{}, true, false
+	isStale := now.Sub(receivedAt) > staleTimeout
+	if isStale && !holdLastCommand {
+		return controlState{}, true, false, true
 	}
 
+	resolved, err := commandToControlState(cmd, tuning)
+	if err != nil {
+		return controlState{}, true, false, false
+	}
+	return resolved, isStale, true, false
+}
+
+func commandToControlState(cmd *commandEnvelope, tuning Tuning) (controlState, error) {
 	inputMode, err := normalizeInputMode(cmd.InputMode)
 	if err != nil {
-		return controlState{}, true, false
+		return controlState{}, err
 	}
 
 	steer := cmd.Steer
@@ -385,7 +414,7 @@ func resolveTarget(cmd *commandEnvelope, tuning Tuning, staleTimeout time.Durati
 		Throttle:  throttle,
 		Brake:     brake,
 		Handbrake: cmd.Handbrake,
-	}, false, true
+	}, nil
 }
 
 func (s *Service) stateLocked(now time.Time) State {
@@ -479,6 +508,13 @@ func moveTowards(current float64, target float64, maxDelta float64) float64 {
 		return target
 	}
 	return current + math.Copysign(maxDelta, delta)
+}
+
+func controlStateEqual(left controlState, right controlState) bool {
+	return left.Steer == right.Steer &&
+		left.Throttle == right.Throttle &&
+		left.Brake == right.Brake &&
+		left.Handbrake == right.Handbrake
 }
 
 func (s *Service) Unsupported() bool {

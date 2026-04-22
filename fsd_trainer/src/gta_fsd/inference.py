@@ -28,7 +28,12 @@ from model_output import (
     single_tensor_mapping,
 )
 from models.planner import DrivingCNN
-from state_inputs import CURRENT_SPEED_KEY, state_input_config_from_metadata, state_inputs_metadata
+from state_inputs import (
+    CURRENT_SPEED_KEY,
+    ROUTE_FORWARD_DELTA_KEY,
+    state_input_config_from_metadata,
+    state_inputs_metadata,
+)
 from target_transforms import (
     legacy_delta_speed_target_transform,
     resolve_checkpoint_delta_speed_target_transform,
@@ -207,11 +212,28 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
     return checkpoint
 
 
+def remap_legacy_state_dict_keys(state_dict: Mapping[str, Any]) -> dict[str, Any]:
+    remapped: dict[str, Any] = {}
+    legacy_head_prefixes = (
+        "heads.steer.",
+        "heads.future_steer.",
+        "heads.steering.",
+    )
+    for key, value in state_dict.items():
+        new_key = key
+        for legacy_prefix in legacy_head_prefixes:
+            if key.startswith(legacy_prefix):
+                new_key = f"heads.future_yaw_delta.{key[len(legacy_prefix):]}"
+                break
+        remapped[new_key] = value
+    return remapped
+
+
 def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
     state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
     head_specs = resolve_checkpoint_head_specs(checkpoint)
     model = DrivingCNN(frame_count=frame_count, head_specs=head_specs, state_input_config=state_input_config).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(remap_legacy_state_dict_keys(checkpoint["model_state_dict"]))
     model.delta_speed_target_transform = resolve_checkpoint_delta_speed_target_transform(checkpoint)
     model.eval()
     return model
@@ -264,6 +286,7 @@ def run_sample_inference(
         data_root=data_root,
         image_size=image_size,
         expected_window_size=expected_window_size,
+        state_input_config=model.state_input_config,
         head_specs=model.head_specs,
     )
     if sample_index < 0 or sample_index >= len(dataset):
@@ -273,11 +296,14 @@ def run_sample_inference(
     sample_meta = dataset.samples[sample_index]
     x = x.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
     current_speed = state_inputs.get(CURRENT_SPEED_KEY)
+    route_forward_delta = state_inputs.get(ROUTE_FORWARD_DELTA_KEY)
     if current_speed is not None:
         current_speed = current_speed.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    if route_forward_delta is not None:
+        route_forward_delta = route_forward_delta.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
 
     with torch.no_grad():
-        output = model(x, current_speed=current_speed)
+        output = model(x, current_speed=current_speed, route_forward_delta=route_forward_delta)
     head_specs = model.head_specs
     delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
 
@@ -345,6 +371,13 @@ def print_plain(output: dict[str, Any]) -> None:
             "State inputs: "
             f"current_speed enabled cap={float(current_speed.get('cap', 0.0)):.3f} "
             f"fusion={current_speed.get('fusion', 'unknown')}"
+        )
+    route_forward_delta = state_inputs.get("route_forward_delta") if isinstance(state_inputs, dict) else None
+    if isinstance(route_forward_delta, dict) and route_forward_delta.get("enabled"):
+        print(
+            "State inputs: "
+            f"route_forward_delta enabled cap={float(route_forward_delta.get('cap', 0.0)):.3f} "
+            f"fusion={route_forward_delta.get('fusion', 'unknown')}"
         )
 
     val_metrics = output.get("val_metrics") or {}

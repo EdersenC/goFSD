@@ -70,10 +70,11 @@ type StartResult struct {
 }
 
 type StopResult struct {
-	Status     string `json:"status"`
-	SessionID  string `json:"sessionId"`
-	OutputFile string `json:"outputFile"`
-	LogFile    string `json:"logFile"`
+	Status      string `json:"status"`
+	SessionID   string `json:"sessionId"`
+	OutputFile  string `json:"outputFile"`
+	LogFile     string `json:"logFile"`
+	OutputBytes int64  `json:"outputBytes"`
 }
 
 type CommandFactory func(name string, args ...string) *exec.Cmd
@@ -317,6 +318,14 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 }
 
 func (s *Service) Stop(ctx context.Context) (StopResult, error) {
+	return s.stop(ctx, true)
+}
+
+func (s *Service) ForceStop(ctx context.Context) (StopResult, error) {
+	return s.stop(ctx, false)
+}
+
+func (s *Service) stop(ctx context.Context, validateOutput bool) (StopResult, error) {
 	s.mu.Lock()
 	active := s.active
 	s.mu.Unlock()
@@ -359,11 +368,26 @@ func (s *Service) Stop(ctx context.Context) (StopResult, error) {
 		}
 	}
 
+	var outputBytes int64
+	if validateOutput {
+		info, err := os.Stat(active.outputFile)
+		if err != nil {
+			return StopResult{}, fmt.Errorf("%w: output file validation failed for %s: %v", ErrStopFailed, active.outputFile, err)
+		}
+		if info.Size() <= 0 {
+			return StopResult{}, fmt.Errorf("%w: output file %s is empty (%d bytes)", ErrStopFailed, active.outputFile, info.Size())
+		}
+		outputBytes = info.Size()
+	} else if info, err := os.Stat(active.outputFile); err == nil {
+		outputBytes = info.Size()
+	}
+
 	return StopResult{
-		Status:     "stopped",
-		SessionID:  active.id,
-		OutputFile: active.outputFile,
-		LogFile:    active.logFile,
+		Status:      "stopped",
+		SessionID:   active.id,
+		OutputFile:  active.outputFile,
+		LogFile:     active.logFile,
+		OutputBytes: outputBytes,
 	}, nil
 }
 

@@ -6,10 +6,12 @@ import {defaultScene, defaultSceneId, getLocalScene} from "./datasets";
 import {normalizeScenePayload, SceneType} from "./sceneManger";
 import {WaypointCompleted} from "./egoService";
 
-console.log("[server] loaded");
+const SERVER_BUILD_ID = "2026-04-21-capture-failfast-v1";
+console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
 type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "isTripComplete"> & {
     vehicleData: WaypointCompleted["vehicleData"]
+    receivedFinalChunk: boolean
 };
 
 type TripTelemetrySummary = {
@@ -45,6 +47,27 @@ type CaptureResponse = {
     error?: string
     outputFile?: string
     logFile?: string
+    outputBytes?: number
+}
+
+type TripFinalizeResponse = {
+    requestId: string
+    success: boolean
+    error?: string
+    runId?: string
+    sceneId?: string
+    sceneVariant?: string
+    tripIndex?: number
+    tripKey?: string
+    tripDir?: string
+    runFile?: string
+    metadataFile?: string
+    sampleCount?: number
+}
+
+type FinalizedTripResult = {
+    response: TripFinalizeResponse
+    finalizedAt: number
 }
 
 type RunIdParts = {
@@ -90,6 +113,8 @@ type ControlStatusUpdate = {
 
 type ControlTelemetryUpdate = {
     currentSpeed: number
+    currentYaw: number
+    routeForwardDelta: number
     timestampMs?: number
 }
 
@@ -100,6 +125,12 @@ type AvailableScene = {
 
 const activeTripByStream = new Map<string, string>();
 const pendingTrips = new Map<string, AggregatedTrip>();
+const seenTripTelemetry = new Set<string>();
+const finalizedTripResults = new Map<string, FinalizedTripResult>();
+const finalizeInFlightTrips = new Map<string, Promise<TripFinalizeResponse>>();
+const flushedTripRetentionMs = 10 * 60_000;
+const tripFinalizeWaitMs = 15_000;
+const tripTelemetryPollMs = 50;
 let controlPollInFlight = false;
 let lastSeenControlCommandId = "";
 let availableScenesSyncInFlight = false;
@@ -118,6 +149,7 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
     try {
         const validated = validateCaptureRequest(request);
         const sceneInfo = resolveSceneInfo(validated.sceneId, validated.sceneVariant, validated.sceneName);
+        console.log(`[server] capture:start request run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex}`);
         const runStorage = buildRunStoragePaths(
             resolveDataRoot(),
             sceneInfo.sceneId,
@@ -136,6 +168,7 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
         response.outputFile = result.outputFile;
         response.logFile = result.logFile;
     } catch (err: any) {
+        console.error(`[server] capture:start failed requestId=${response.requestId}: ${err?.message ?? err}`);
         response.error = err?.message ?? "failed to start capture";
     }
 
@@ -151,16 +184,121 @@ onNet("capture:stopRequest", async (request: CaptureRequest) => {
     };
 
     try {
-        validateCaptureRequest(request);
-        const result = await captureApiRequest("/capture/stop", {});
+        const validated = validateCaptureRequest(request);
+        const sceneInfo = resolveSceneInfo(validated.sceneId, validated.sceneVariant, validated.sceneName);
+        const tripKey = buildTripKey(
+            validated.runId,
+            sceneInfo.sceneId,
+            sceneInfo.sceneVariant,
+            validated.tripIndex ?? 0
+        );
+        pruneFinalizedTripResults();
+        if (!finalizedTripResults.has(tripKey)) {
+            throw new Error(`trip ${tripKey} has not been finalized; refusing to stop capture before finalize-trip ack`);
+        }
+        console.log(`[server] capture:stop request run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex} finalized=yes`);
+        const result = await captureApiRequest("/capture/stop", {
+            runId: validated.runId,
+            tripIndex: validated.tripIndex ?? 0,
+            sceneId: validated.sceneId ?? "",
+            sceneVariant: validated.sceneVariant ?? "",
+            sceneName: validated.sceneName ?? ""
+        });
         response.success = true;
         response.outputFile = result.outputFile;
         response.logFile = result.logFile;
+        response.outputBytes = typeof result?.outputBytes === "number" ? result.outputBytes : undefined;
+        console.log(`[server] capture:stop success run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex} output=${response.outputFile ?? ""} bytes=${response.outputBytes ?? -1}`);
     } catch (err: any) {
+        console.error(`[server] capture:stop failed requestId=${response.requestId}: ${err?.message ?? err}`);
         response.error = err?.message ?? "failed to stop capture";
     }
 
     emitNet("capture:stopResponse", playerSource, response);
+});
+
+onNet("capture:abortRequest", async (request: CaptureRequest) => {
+    const playerSource = (global as any).source;
+    rememberControlPlayerSource(playerSource);
+    const response: CaptureResponse = {
+        requestId: String(request?.requestId ?? ""),
+        success: false
+    };
+
+    try {
+        const validated = validateCaptureRequest(request);
+        const sceneInfo = resolveSceneInfo(validated.sceneId, validated.sceneVariant, validated.sceneName);
+        console.log(`[server] capture:abort request run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex}`);
+        const result = await captureApiRequest("/capture/stop", {
+            runId: validated.runId,
+            tripIndex: validated.tripIndex ?? 0,
+            sceneId: validated.sceneId ?? "",
+            sceneVariant: validated.sceneVariant ?? "",
+            sceneName: validated.sceneName ?? "",
+            abortOnly: true
+        });
+        response.success = true;
+        response.outputFile = result.outputFile;
+        response.logFile = result.logFile;
+        response.outputBytes = typeof result?.outputBytes === "number" ? result.outputBytes : undefined;
+        console.log(`[server] capture:abort success run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex} output=${response.outputFile ?? ""} bytes=${response.outputBytes ?? -1}`);
+    } catch (err: any) {
+        const message = String(err?.message ?? err ?? "");
+        if (message.toLowerCase().includes("capture is not running")) {
+            console.log(`[server] capture:abort no-op requestId=${response.requestId}; capture was already stopped`);
+            response.success = true;
+        } else {
+            console.error(`[server] capture:abort failed requestId=${response.requestId}: ${message}`);
+            response.error = err?.message ?? "failed to abort capture";
+        }
+    }
+
+    emitNet("capture:abortResponse", playerSource, response);
+});
+
+onNet("capture:finalizeTripRequest", async (request: CaptureRequest) => {
+    const playerSource = (global as any).source;
+    rememberControlPlayerSource(playerSource);
+    const response: TripFinalizeResponse = {
+        requestId: String(request?.requestId ?? ""),
+        success: false
+    };
+
+    try {
+        const validated = validateCaptureRequest(request);
+        const dataRoot = resolveDataRoot();
+        const sceneInfo = resolveSceneInfo(validated.sceneId, validated.sceneVariant, validated.sceneName);
+        console.log(`[server] capture:finalize request run=${validated.runId} scene=${sceneInfo.sceneId} variant=${sceneInfo.sceneVariant} trip=${validated.tripIndex}`);
+        const runStorage = buildRunStoragePaths(
+            dataRoot,
+            sceneInfo.sceneId,
+            sceneInfo.sceneVariant,
+            validated.runId
+        );
+        const manifestFile = resolveManifestFile(dataRoot);
+        const fs = require("fs");
+        const tripKey = buildTripKey(
+            validated.runId,
+            sceneInfo.sceneId,
+            sceneInfo.sceneVariant,
+            validated.tripIndex ?? 0
+        );
+        const finalized = await finalizeTrip(
+            validated.requestId,
+            tripKey,
+            runStorage,
+            manifestFile,
+            fs,
+            dataRoot
+        );
+        Object.assign(response, finalized);
+        console.log(`[server] capture:finalize success trip=${response.tripKey ?? "unknown"} tripDir=${response.tripDir ?? ""} samples=${response.sampleCount ?? -1}`);
+    } catch (err: any) {
+        console.error(`[server] capture:finalize failed requestId=${response.requestId}: ${err?.message ?? err}`);
+        response.error = err?.message ?? "failed to finalize trip";
+    }
+
+    emitNet("capture:finalizeTripResponse", playerSource, response);
 });
 
 onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
@@ -181,6 +319,8 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
     try {
         await apiRequest("/control/telemetry", "POST", {
             currentSpeed: update?.currentSpeed ?? 0,
+            currentYaw: update?.currentYaw ?? 0,
+            routeForwardDelta: update?.routeForwardDelta ?? 0,
             timestampMs: update?.timestampMs ?? 0
         });
     } catch (err: any) {
@@ -201,6 +341,7 @@ onNet("control:availableScenesResponse", async (scenes: AvailableScene[]) => {
 onNet("control:registerClient", async () => {
     rememberControlPlayerSource((global as any).source);
     lastSeenControlCommandId = "";
+    console.log(`[control] register client source=${String((global as any).source ?? "unknown")} build=${SERVER_BUILD_ID}`);
     await stopCaptureOnReconnect();
     await connectControlSession();
     requestAvailableScenesFromClient();
@@ -223,8 +364,14 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     const tripStorage = buildTripStoragePaths(dataRoot, runStorage, data.tripIndex);
     const streamKey = buildTripStreamKey(data.runId, data.sceneId, data.sceneVariant);
     const tripKey = buildTripKey(data.runId, data.sceneId, data.sceneVariant, data.tripIndex);
+    pruneFinalizedTripResults();
 
     console.log(`[server] received chunk ${data.chunkIndex} for trip ${data.tripIndex} run ${data.runId} with ${data.vehicleData.length} points complete=${data.isTripComplete}`);
+
+    if (finalizedTripResults.has(tripKey)) {
+        console.log(`[server] ignoring telemetry chunk ${data.chunkIndex} for already-finalized trip ${tripKey}`);
+        return;
+    }
 
     if (!fs.existsSync(runsDir)) {
         fs.mkdirSync(runsDir, { recursive: true });
@@ -268,8 +415,10 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
 
     const previousTripKey = activeTripByStream.get(streamKey);
     if (previousTripKey && previousTripKey !== tripKey) {
-        console.log(`[server] flushing previous trip ${previousTripKey} before accepting trip ${tripKey}`);
-        flushTrip(previousTripKey, runStorage, manifestFile, fs, dataRoot);
+        console.error(
+            `[server] refusing telemetry for ${tripKey} while previous trip ${previousTripKey} is still active; finalize-trip barrier was bypassed`
+        );
+        return;
     }
 
     activeTripByStream.set(streamKey, tripKey);
@@ -291,14 +440,18 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
             fromDestination: data.fromDestination,
             toDestination: data.toDestination,
             vehicle: data.vehicle,
-            vehicleData: [...data.vehicleData]
+            vehicleData: [...data.vehicleData],
+            receivedFinalChunk: false
         });
     }
+    seenTripTelemetry.add(tripKey);
 
     if (data.isTripComplete) {
-        console.log(`[server] received final chunk for trip ${tripKey}; flushing to ${runFile}`);
-        flushTrip(tripKey, runStorage, manifestFile, fs, dataRoot);
-        activeTripByStream.delete(streamKey);
+        const trip = pendingTrips.get(tripKey);
+        if (trip) {
+            trip.receivedFinalChunk = true;
+        }
+        console.log(`[server] received final chunk for trip ${tripKey}; awaiting explicit finalize request`);
     }
 });
 
@@ -308,6 +461,35 @@ function buildTripStreamKey(runId: string, sceneId: string, sceneVariant: string
 
 function buildTripKey(runId: string, sceneId: string, sceneVariant: string, tripIndex: number): string {
     return `${buildTripStreamKey(runId, sceneId, sceneVariant)}:${tripIndex}`;
+}
+
+function getTripFinalizeState(tripKey: string): "ready" | "pending" | "finalized" | "missing" {
+    pruneFinalizedTripResults();
+    const cached = finalizedTripResults.get(tripKey);
+    if (cached) {
+        return "finalized";
+    }
+    const trip = pendingTrips.get(tripKey);
+    if (trip?.receivedFinalChunk) {
+        return "ready";
+    }
+    if (trip || seenTripTelemetry.has(tripKey)) {
+        return "pending";
+    }
+    return "missing";
+}
+
+async function waitForTripFinalizationReady(
+    tripKey: string,
+    timeoutMs = tripFinalizeWaitMs
+): Promise<"ready" | "pending" | "finalized" | "missing"> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    let state = getTripFinalizeState(tripKey);
+    while ((state === "missing" || state === "pending") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, tripTelemetryPollMs));
+        state = getTripFinalizeState(tripKey);
+    }
+    return state;
 }
 
 function coerceBoolean(value: unknown): boolean {
@@ -623,7 +805,7 @@ async function connectControlSession() {
     try {
         const result = await apiRequest("/control/connect", "POST", {});
         lastSeenControlCommandId = "";
-        console.log(`[control] reset session ${result?.sessionId ?? "unknown"}`);
+        console.log(`[control] connected to session ${result?.sessionId ?? "unknown"} build=${SERVER_BUILD_ID}`);
     } catch (err: any) {
         console.error(`[control] failed to reset control session: ${err?.message ?? err}`);
     } finally {
@@ -704,10 +886,73 @@ setInterval(() => {
     requestAvailableScenesFromClient();
 }, 10000);
 
-function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: string, fs: any, dataRoot: string) {
+async function finalizeTrip(
+    requestId: string,
+    tripKey: string,
+    runStorage: RunStoragePaths,
+    manifestFile: string,
+    fs: any,
+    dataRoot: string
+): Promise<TripFinalizeResponse> {
+    pruneFinalizedTripResults();
+    const cached = finalizedTripResults.get(tripKey);
+    if (cached) {
+        return {
+            ...cached.response,
+            requestId
+        };
+    }
+
+    const inFlight = finalizeInFlightTrips.get(tripKey);
+    if (inFlight) {
+        const finalized = await inFlight;
+        return {
+            ...finalized,
+            requestId
+        };
+    }
+
+    const promise = (async () => {
+        const state = await waitForTripFinalizationReady(tripKey);
+        if (state === "finalized") {
+            const finalized = finalizedTripResults.get(tripKey);
+            if (!finalized) {
+                throw new Error(`trip ${tripKey} reported finalized but no finalized result was cached`);
+            }
+            return finalized.response;
+        }
+        if (state !== "ready") {
+            throw new Error(`trip ${tripKey} did not become ready for finalization within ${tripFinalizeWaitMs}ms`);
+        }
+        const finalized = flushTrip(tripKey, runStorage, manifestFile, fs, dataRoot);
+        if (!finalized) {
+            throw new Error(`trip ${tripKey} became ready for finalization but no pending trip data was found`);
+        }
+        return finalized;
+    })();
+
+    finalizeInFlightTrips.set(tripKey, promise);
+    try {
+        const finalized = await promise;
+        return {
+            ...finalized,
+            requestId
+        };
+    } finally {
+        finalizeInFlightTrips.delete(tripKey);
+    }
+}
+
+function flushTrip(
+    tripKey: string,
+    runStorage: RunStoragePaths,
+    manifestFile: string,
+    fs: any,
+    dataRoot: string
+): TripFinalizeResponse | null {
     const trip = pendingTrips.get(tripKey);
     if (!trip) {
-        return;
+        return null;
     }
 
     const tripStorage = buildTripStoragePaths(dataRoot, runStorage, trip.tripIndex);
@@ -788,10 +1033,39 @@ function flushTrip(tripKey: string, runStorage: RunStoragePaths, manifestFile: s
 
     fs.appendFileSync(manifestFile, manifestLine);
     pendingTrips.delete(tripKey);
+    seenTripTelemetry.delete(tripKey);
+    activeTripByStream.delete(buildTripStreamKey(trip.runId, trip.sceneId, trip.sceneVariant));
+    const finalizedAt = Date.now();
+    const response: TripFinalizeResponse = {
+        requestId: "",
+        success: true,
+        runId: trip.runId,
+        sceneId: trip.sceneId,
+        sceneVariant: trip.sceneVariant,
+        tripIndex: trip.tripIndex,
+        tripKey,
+        tripDir: tripStorage.tripDir,
+        runFile,
+        metadataFile: tripStorage.metadataFile,
+        sampleCount: trip.vehicleData.length
+    };
+    finalizedTripResults.set(tripKey, {
+        response,
+        finalizedAt
+    });
     console.log(`[server] flush success trip=${tripKey} stored tripIndex=${trip.tripIndex} run=${trip.runId} samples=${trip.vehicleData.length} runFile=${runFile}`);
+    return response;
 }
 
 function pathBasename(targetPath: string): string {
     const path = require("path");
     return path.basename(targetPath);
+}
+
+function pruneFinalizedTripResults(now = Date.now()) {
+    for (const [tripKey, finalized] of finalizedTripResults.entries()) {
+        if (now - finalized.finalizedAt > flushedTripRetentionMs) {
+            finalizedTripResults.delete(tripKey);
+        }
+    }
 }

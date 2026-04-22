@@ -50,14 +50,18 @@ type StatusUpdate struct {
 }
 
 type TelemetryUpdate struct {
-	CurrentSpeed float64 `json:"currentSpeed"`
-	TimestampMs  int64   `json:"timestampMs,omitempty"`
+	CurrentSpeed      float64 `json:"currentSpeed"`
+	CurrentYaw        float64 `json:"currentYaw"`
+	RouteForwardDelta float64 `json:"routeForwardDelta"`
+	TimestampMs       int64   `json:"timestampMs,omitempty"`
 }
 
 type RuntimeTelemetry struct {
-	CurrentSpeed float64 `json:"currentSpeed"`
-	TimestampMs  int64   `json:"timestampMs,omitempty"`
-	UpdatedAt    string  `json:"updatedAt,omitempty"`
+	CurrentSpeed      float64 `json:"currentSpeed"`
+	CurrentYaw        float64 `json:"currentYaw"`
+	RouteForwardDelta float64 `json:"routeForwardDelta"`
+	TimestampMs       int64   `json:"timestampMs,omitempty"`
+	UpdatedAt         string  `json:"updatedAt,omitempty"`
 }
 
 type SceneOption struct {
@@ -247,9 +251,11 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 
 	now := s.nowFunc()
 	s.telemetry = &RuntimeTelemetry{
-		CurrentSpeed: update.CurrentSpeed,
-		TimestampMs:  update.TimestampMs,
-		UpdatedAt:    now.Format(time.RFC3339),
+		CurrentSpeed:      update.CurrentSpeed,
+		CurrentYaw:        update.CurrentYaw,
+		RouteForwardDelta: update.RouteForwardDelta,
+		TimestampMs:       update.TimestampMs,
+		UpdatedAt:         now.Format(time.RFC3339),
 	}
 	s.telemetryUpdatedAt = now
 	copyTelemetry := *s.telemetry

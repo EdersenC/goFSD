@@ -13,6 +13,7 @@ from inference import (
     DEFAULT_CONFIG_PATH,
     load_checkpoint,
     load_config as load_inference_config,
+    remap_legacy_state_dict_keys,
     resolve_existing_path,
     select_device,
 )
@@ -124,7 +125,7 @@ def _load_optional_checkpoint(model: DrivingCNN, checkpoint_path: Path | None, c
         return None
     resolved = resolve_existing_path(str(checkpoint_path), config_path)
     checkpoint = load_checkpoint(resolved, device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(remap_legacy_state_dict_keys(checkpoint["model_state_dict"]))
     return str(resolved)
 
 
@@ -155,8 +156,13 @@ def main() -> None:
         device=device,
     )
     dummy_speed = torch.zeros((1,), dtype=torch.float32, device=device)
+    dummy_route_forward_delta = torch.zeros((1,), dtype=torch.float32, device=device)
     with torch.no_grad():
-        dummy_outputs = model(dummy, current_speed=dummy_speed)
+        dummy_outputs = model(
+            dummy,
+            current_speed=dummy_speed,
+            route_forward_delta=dummy_route_forward_delta,
+        )
     model_without_speed = DrivingCNN(
         frame_count=config.dataset.window_size,
         state_input_config=StateInputConfig(),
@@ -192,6 +198,7 @@ def main() -> None:
         run_paths=[run_path],
         image_size=(config.dataset.image_width, config.dataset.image_height),
         expected_window_size=config.dataset.window_size,
+        state_input_config=config.state_inputs,
     )
     if len(dataset) <= 0:
         raise ValueError(f"Dataset is empty for run_path={run_path}")

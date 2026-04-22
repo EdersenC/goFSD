@@ -25,11 +25,13 @@ const (
 	defaultActuatorURL         = "http://127.0.0.1:8080"
 	defaultActuatorHTTPTimeout = 500 * time.Millisecond
 	defaultStaleTimeout        = 250 * time.Millisecond
+	defaultHoldLastCommand     = false
 )
 
 type Config struct {
 	TickHz             int
 	StaleTimeout       time.Duration
+	HoldLastCommand    bool
 	SteerDeadzone      float64
 	MaxSteerScale      float64
 	SteerInputGain     float64
@@ -68,6 +70,7 @@ type backendSection struct {
 type actuatorSection struct {
 	TickHz             int     `toml:"tick_hz"`
 	StaleTimeout       string  `toml:"stale_timeout"`
+	HoldLastCommand    *bool   `toml:"hold_last_command"`
 	SteerDeadzone      float64 `toml:"steer_deadzone"`
 	MaxSteerScale      float64 `toml:"max_steer_scale"`
 	SteerInputGain     float64 `toml:"steer_input_gain"`
@@ -86,6 +89,7 @@ func DefaultConfig() Config {
 	return Config{
 		TickHz:             defaultTickHz,
 		StaleTimeout:       defaultStaleTimeout,
+		HoldLastCommand:    defaultHoldLastCommand,
 		SteerDeadzone:      defaultSteerDeadzone,
 		MaxSteerScale:      defaultMaxSteerScale,
 		SteerInputGain:     defaultSteerInputGain,
@@ -123,6 +127,9 @@ func LoadConfig(path string) (Config, error) {
 	section := parsed.Backend.Actuator
 	if section.TickHz > 0 {
 		cfg.TickHz = section.TickHz
+	}
+	if section.HoldLastCommand != nil {
+		cfg.HoldLastCommand = *section.HoldLastCommand
 	}
 	if section.SteerDeadzone > 0 {
 		cfg.SteerDeadzone = section.SteerDeadzone

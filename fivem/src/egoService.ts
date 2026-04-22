@@ -1,7 +1,7 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
 import {Environment, EnvironmentService} from "./environment";
 import {syncFlash} from "./sceneManger";
-import {requestCapture} from "./captureControl";
+import {requestCapture, requestTripFinalize, TripFinalizeResponse} from "./captureControl";
 import {buildDeterministicTripProfile, TripProfileSnapshot} from "./tripProfiles";
 
 
@@ -252,9 +252,11 @@ export interface WaypointCompleted {
 }
 
 export const SceneStoppedErrorCode = "SCENE_STOPPED";
+const EGO_BUILD_ID = "2026-04-21-capture-failfast-v1";
+const HardFailureErrorCode = "HARD_TRIP_FAILURE";
 
 export class EgoService {
-    private static readonly MAX_TRIP_VEHICLE_DATA_POINTS = 1000;
+    private static readonly MAX_TRIP_VEHICLE_DATA_POINTS = 200;
     private readonly environmentService = new EnvironmentService();
 
     public oldEgo: Ego | null = null;
@@ -313,7 +315,7 @@ export class EgoService {
         this.makeVehicleGodMode(ego.vehicle.id)
         this.startCaptureCamera(ego);
         this.makePlayerUnaware(PlayerPedId(),true)
-        console.log("[ego-control] FiveM ego setup ready; vehicle actuation now comes from the Go virtual controller.");
+        console.log(`[ego-control] FiveM ego setup ready build=${EGO_BUILD_ID} chunk_points=${EgoService.MAX_TRIP_VEHICLE_DATA_POINTS}; vehicle actuation now comes from the Go virtual controller.`);
         return
     }
 
@@ -349,6 +351,29 @@ export class EgoService {
             return null;
         }
         return GetEntitySpeed(this.oldEgo.vehicle.id);
+    }
+
+    public currentYaw(): number | null {
+        if (!this.oldEgo || !isValidEntity(this.oldEgo.vehicle.id)) {
+            return null;
+        }
+        return GetEntityHeading(this.oldEgo.vehicle.id);
+    }
+
+    public currentRouteForwardDelta(): number | null {
+        if (!this.oldEgo || !isValidEntity(this.oldEgo.vehicle.id)) {
+            return null;
+        }
+        const id = this.oldEgo.vehicle.id;
+        const coords = GetEntityCoords(id, true) as Vector3;
+        const yaw = GetEntityHeading(id);
+        const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
+        const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
+        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        if (!routeContext.routeGpsValid || routeContext.routeForwardDelta === undefined) {
+            return null;
+        }
+        return routeContext.routeForwardDelta;
     }
 
 
@@ -410,6 +435,8 @@ export class EgoService {
             if (this.stopRequested) {
                 throw new Error(SceneStoppedErrorCode);
             }
+            let captureStarted = false;
+            let tripCaptureClosed = false;
 
             try {
                 this.tripChunkIndex = 0;
@@ -424,7 +451,6 @@ export class EgoService {
                 await this.prepareTripRuntime(ego, tripProfile);
                 await wait(1000)
 
-                let captureStarted = false;
                 try {
                     await requestCapture("start", {
                         runId: this.RunId,
@@ -454,57 +480,40 @@ export class EgoService {
                 };
                 const [x, y, z] = this.configureRoute(waypoint, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle).destination;
                 SetNewWaypoint(x,y);
-                try {
-                    await wait(1000)
-                    const blip = GetFirstBlipInfoId(8)
-                    this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
-                    const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
-                    await new Promise<void>((resolve) => {
-                        signal.addEventListener("abort", () => resolve());
-                    });
+                await wait(1000)
+                const blip = GetFirstBlipInfoId(8)
+                this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
+                const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
+                await new Promise<void>((resolve) => {
+                    signal.addEventListener("abort", () => resolve());
+                });
 
-                    if (this.stopRequested) {
-                        this.emitTripChunk(
-                            ego,
-                            GetGameTimer(),
-                            true
-                        );
-                        this.activeTripContext = null;
-                        ClearGpsPlayerWaypoint()
-                        throw new Error(SceneStoppedErrorCode);
-                    }
-
-                    this.emitTripChunk(
-                        ego,
-                        GetGameTimer(),
-                        true
-                    );
+                const tripEndedByStop = this.stopRequested;
+                await this.finalizeTripCapture(ego, tripIndex, sceneInfo, GetGameTimer());
+                tripCaptureClosed = true;
+                if (!tripEndedByStop) {
                     previousDestination = waypoint.destination
-                    this.activeTripContext = null;
-                } finally {
-                    if (captureStarted) {
-                        try {
-                            await requestCapture("stop", {
-                                runId: this.RunId,
-                                tripIndex,
-                                sceneId: sceneInfo.sceneId,
-                                sceneVariant: sceneInfo.sceneVariant,
-                                sceneName: this.SceneName
-                            });
-                        } catch (error) {
-                            console.error(`[ego] failed to stop capture for trip ${tripIndex} run ${this.RunId}: ${error}`);
-                        }
-                    }
+                }
+                this.activeTripContext = null;
+
+                if (tripEndedByStop) {
+                    ClearGpsPlayerWaypoint()
+                    throw new Error(SceneStoppedErrorCode);
                 }
             } catch (error: any) {
-                this.activeTripContext = null;
-                ego.vehicle.VehicleData = [];
-                ClearGpsPlayerWaypoint();
                 if (this.stopRequested || error?.message === SceneStoppedErrorCode) {
+                    this.activeTripContext = null;
+                    ego.vehicle.VehicleData = [];
+                    ClearGpsPlayerWaypoint();
                     throw error;
                 }
-                console.error(`[ego] trip ${tripIndex} failed for run ${this.RunId}: ${error?.message ?? error}`);
-                continue;
+                await this.enterHardFailureState(
+                    ego,
+                    tripIndex,
+                    sceneInfo,
+                    `trip ${tripIndex} failed for run ${this.RunId}: ${error?.message ?? error}`,
+                    captureStarted && !tripCaptureClosed
+                );
             }
         }
 
@@ -513,6 +522,110 @@ export class EgoService {
             throw new Error(SceneStoppedErrorCode);
         }
         TaskVehicleDriveWander(PlayerPedId(), ego.vehicle.id, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
+    }
+
+    private async enterHardFailureState(
+        ego: Ego,
+        tripIndex: number,
+        sceneInfo: { sceneId: string; sceneVariant: string },
+        reason: string,
+        shouldAbortCapture: boolean
+    ): Promise<never> {
+        console.error(`[ego] HARD FAILURE build=${EGO_BUILD_ID} run=${this.RunId} scene=${sceneInfo.sceneId}:${sceneInfo.sceneVariant} trip=${tripIndex}: ${reason}`);
+        this.stopRequested = true;
+        this.stopReason = reason;
+        if (this.activeAbortController && !(this.activeAbortController as any).signal?.aborted) {
+            this.activeAbortController.abort();
+        }
+        this.stopManagedLoops();
+        ClearGpsPlayerWaypoint();
+        ClearPedTasksImmediately(PlayerPedId());
+
+        if (shouldAbortCapture) {
+            try {
+                await requestCapture("abort", {
+                    runId: this.RunId,
+                    tripIndex,
+                    sceneId: sceneInfo.sceneId,
+                    sceneVariant: sceneInfo.sceneVariant,
+                    sceneName: this.SceneName
+                });
+            } catch (abortError: any) {
+                console.error(`[ego] capture abort failed during hard failure for trip ${tripIndex} run ${this.RunId}: ${abortError?.message ?? abortError}`);
+            }
+        }
+
+        if (isValidEntity(ego.vehicle.id)) {
+            SetVehicleHandbrake(ego.vehicle.id, true);
+            SetVehicleEngineOn(ego.vehicle.id, false, true, true);
+            SetVehicleUndriveable(ego.vehicle.id, true);
+            FreezeEntityPosition(ego.vehicle.id, true);
+        }
+        ego.vehicle.VehicleData = [];
+        this.activeTripContext = null;
+        throw new Error(`${HardFailureErrorCode}: ${reason}`);
+    }
+
+    private async finalizeTripCapture(
+        ego: Ego,
+        tripIndex: number,
+        sceneInfo: { sceneId: string; sceneVariant: string },
+        endTime: number
+    ) {
+        if (!this.activeTripContext) {
+            throw new Error(`trip ${tripIndex} capture finalization requested without an active trip context`);
+        }
+
+        this.emitTripChunk(ego, endTime, true);
+        console.log(`[ego] finalize-trip request build=${EGO_BUILD_ID} run=${this.RunId} scene=${sceneInfo.sceneId}:${sceneInfo.sceneVariant} trip=${tripIndex}`);
+        const finalizeResponse = await requestTripFinalize({
+            runId: this.RunId,
+            tripIndex,
+            sceneId: sceneInfo.sceneId,
+            sceneVariant: sceneInfo.sceneVariant,
+            sceneName: this.SceneName
+        });
+        const finalizedTrip = this.requireFinalizedTrip(finalizeResponse, tripIndex, sceneInfo);
+        console.log(`[ego] finalize-trip ack run=${finalizedTrip.runId} scene=${finalizedTrip.sceneId}:${finalizedTrip.sceneVariant} trip=${finalizedTrip.tripIndex}`);
+        console.log(`[ego] capture:stop request run=${finalizedTrip.runId} scene=${finalizedTrip.sceneId}:${finalizedTrip.sceneVariant} trip=${finalizedTrip.tripIndex}`);
+        await requestCapture("stop", {
+            runId: finalizedTrip.runId,
+            tripIndex: finalizedTrip.tripIndex,
+            sceneId: finalizedTrip.sceneId,
+            sceneVariant: finalizedTrip.sceneVariant,
+            sceneName: this.SceneName
+        });
+        console.log(`[ego] capture:stop ack run=${finalizedTrip.runId} scene=${finalizedTrip.sceneId}:${finalizedTrip.sceneVariant} trip=${finalizedTrip.tripIndex}`);
+    }
+
+    private requireFinalizedTrip(
+        response: TripFinalizeResponse,
+        tripIndex: number,
+        sceneInfo: { sceneId: string; sceneVariant: string }
+    ) {
+        const runId = typeof response.runId === "string" ? response.runId.trim() : "";
+        const sceneId = typeof response.sceneId === "string" ? response.sceneId.trim() : "";
+        const sceneVariant = typeof response.sceneVariant === "string" ? response.sceneVariant.trim() : "";
+        const finalizedTripIndex = typeof response.tripIndex === "number" ? response.tripIndex : Number.NaN;
+
+        if (!runId || !sceneId || !sceneVariant || !Number.isInteger(finalizedTripIndex) || finalizedTripIndex < 0) {
+            throw new Error("finalize-trip ack was missing required trip identity fields");
+        }
+        if (runId !== this.RunId) {
+            throw new Error(`finalize-trip ack returned mismatched runId ${runId} for run ${this.RunId}`);
+        }
+        if (sceneId !== sceneInfo.sceneId || sceneVariant !== sceneInfo.sceneVariant || finalizedTripIndex !== tripIndex) {
+            throw new Error(
+                `finalize-trip ack returned mismatched trip identity: expected ${sceneInfo.sceneId}:${sceneInfo.sceneVariant}:${tripIndex}, got ${sceneId}:${sceneVariant}:${finalizedTripIndex}`
+            );
+        }
+
+        return {
+            runId,
+            sceneId,
+            sceneVariant,
+            tripIndex: finalizedTripIndex
+        };
     }
 
     private emitTripChunk( ego: Ego, endTime: number, isTripComplete: boolean )

@@ -10,7 +10,14 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from heads import HEAD_SPECS, HeadSpec, build_targets_from_label
+from heads import (
+    CURRENT_SPEED_TARGET_KEY,
+    FUTURE_HORIZON_SECONDS_TARGET_KEY,
+    HEAD_SPECS,
+    HEAD_SPECS_BY_NAME,
+    HeadSpec,
+    build_targets_from_label,
+)
 from image_io import load_rgb_tensor_from_path
 from state_inputs import StateInputConfig, build_state_inputs_from_label, training_state_input_config
 
@@ -108,6 +115,7 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
         self.trips: list[Trip] = self._load_trips()
         self.samples: list[dict[str, Any]] = self._load_samples()
+        self._scalar_target_cache: dict[str, tuple[float, ...]] = {}
 
     def _resolve_run_paths(
         self,
@@ -177,6 +185,30 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def scalar_target_values(self, head_name: str) -> tuple[float, ...]:
+        cached = self._scalar_target_cache.get(head_name)
+        if cached is not None:
+            return cached
+
+        spec = next((item for item in self.head_specs if item.name == head_name), None)
+        if spec is None:
+            spec = HEAD_SPECS_BY_NAME.get(head_name)
+        if spec is None:
+            raise KeyError(f"unknown head target: {head_name}")
+
+        values: list[float] = []
+        for sample in self.samples:
+            target = spec.target_builder(sample["label"]).detach()
+            if target.numel() != 1:
+                raise ValueError(
+                    f"head '{head_name}' target_builder must produce a scalar per sample, got shape {tuple(target.shape)}"
+                )
+            values.append(float(target.reshape(()).item()))
+
+        resolved = tuple(values)
+        self._scalar_target_cache[head_name] = resolved
+        return resolved
+
     def _load_frame_tensor(self, frame_path: Path) -> Tensor:
         return load_rgb_tensor_from_path(frame_path, self.image_size)
 
@@ -213,4 +245,15 @@ def build_targets(
     head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
 ) -> DatasetTargets:
     del steering, delta_speed
-    return build_targets_from_label(label, head_specs=head_specs)
+    targets = build_targets_from_label(label, head_specs=head_specs)
+    if FUTURE_HORIZON_SECONDS_TARGET_KEY in label:
+        targets[FUTURE_HORIZON_SECONDS_TARGET_KEY] = torch.tensor(
+            float(label[FUTURE_HORIZON_SECONDS_TARGET_KEY]),
+            dtype=torch.float32,
+        )
+    if "currentSpeed" in label:
+        targets[CURRENT_SPEED_TARGET_KEY] = torch.tensor(
+            float(label["currentSpeed"]),
+            dtype=torch.float32,
+        )
+    return targets

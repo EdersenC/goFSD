@@ -23,7 +23,9 @@ const innerCityDrivingWaypoints = [
     routePresets.delPerroParkingGarage,
     routePresets.littleSeoulArcadiusApproach,
     routePresets.kortzCenter,
-    routePresets.delPerroPier
+    routePresets.delPerroPier,
+    routePresets.littleSeoulParking,
+    routePresets.rockfordHillParking
 ];
 
 type InnerCityDrivingSceneOptions = {

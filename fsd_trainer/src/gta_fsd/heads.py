@@ -26,6 +26,18 @@ from target_transforms import DELTA_SPEED_TARGET_LABEL_KEY
 HeadKind = Literal["control", "aux"]
 LossType = Literal["smooth_l1", "mse", "bce_with_logits"] | None
 TargetBuilder = Callable[[dict[str, Any]], Tensor]
+FUTURE_YAW_DELTA_HEAD_NAME = "future_yaw_delta"
+FUTURE_SPEED_HEAD_NAME = "future_speed"
+MOVE_INTENT_HEAD_NAME = "move_intent"
+DELTA_SPEED_HEAD_NAME = "delta_speed"
+YAW_RATE_HEAD_NAME = "yaw_rate"
+FUTURE_HORIZON_SECONDS_TARGET_KEY = "future_horizon_seconds"
+CURRENT_SPEED_TARGET_KEY = "current_speed_raw"
+LEGACY_HEAD_NAME_ALIASES: dict[str, str] = {
+    "steer": FUTURE_YAW_DELTA_HEAD_NAME,
+    "future_steer": FUTURE_YAW_DELTA_HEAD_NAME,
+    "steering": FUTURE_YAW_DELTA_HEAD_NAME,
+}
 
 
 def _require_label_key(label: dict[str, Any], raw_key: str) -> Any:
@@ -96,17 +108,17 @@ def binary_target(raw_key: str) -> TargetBuilder:
 
 CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
     HeadSpec(
-        name="steer",
+        name=FUTURE_YAW_DELTA_HEAD_NAME,
         kind="control",
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=1.0,
-        target_source="label.future_steer",
-        target_builder=scalar_target("future_steer"),
+        target_source="label.future_yaw_delta",
+        target_builder=scalar_target("future_yaw_delta"),
         used_for_control=True,
     ),
     HeadSpec(
-        name="future_speed",
+        name=FUTURE_SPEED_HEAD_NAME,
         kind="control",
         output_dim=1,
         loss_type="smooth_l1",
@@ -119,13 +131,33 @@ CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
 
 AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
     HeadSpec(
-        name="delta_speed",
+        name=MOVE_INTENT_HEAD_NAME,
+        kind="aux",
+        output_dim=1,
+        loss_type="bce_with_logits",
+        loss_weight=0.35,
+        target_source="label.move_intent (bool or 0/1)",
+        target_builder=binary_target("move_intent"),
+        used_for_control=False,
+    ),
+    HeadSpec(
+        name=DELTA_SPEED_HEAD_NAME,
         kind="aux",
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=0.2,
         target_source=f"label.{DELTA_SPEED_TARGET_LABEL_KEY}",
         target_builder=scalar_target(DELTA_SPEED_TARGET_LABEL_KEY),
+        used_for_control=False,
+    ),
+    HeadSpec(
+        name=YAW_RATE_HEAD_NAME,
+        kind="aux",
+        output_dim=1,
+        loss_type="smooth_l1",
+        loss_weight=0.1,
+        target_source="label.yaw_rate",
+        target_builder=scalar_target("yaw_rate"),
         used_for_control=False,
     ),
     HeadSpec(
@@ -163,9 +195,11 @@ AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
 ALL_HEAD_SPECS: tuple[HeadSpec, ...] = CONTROL_HEAD_SPECS + AUX_HEAD_SPECS
 ALL_HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in ALL_HEAD_SPECS}
 ACTIVE_HEAD_SPECS: tuple[HeadSpec, ...] = (
-    ALL_HEAD_SPECS_BY_NAME["steer"],
-    ALL_HEAD_SPECS_BY_NAME["future_speed"],
-    ALL_HEAD_SPECS_BY_NAME["delta_speed"],
+    ALL_HEAD_SPECS_BY_NAME[FUTURE_YAW_DELTA_HEAD_NAME],
+    ALL_HEAD_SPECS_BY_NAME[FUTURE_SPEED_HEAD_NAME],
+    ALL_HEAD_SPECS_BY_NAME[MOVE_INTENT_HEAD_NAME],
+    ALL_HEAD_SPECS_BY_NAME[DELTA_SPEED_HEAD_NAME],
+    ALL_HEAD_SPECS_BY_NAME[YAW_RATE_HEAD_NAME],
 )
 HEAD_SPECS: tuple[HeadSpec, ...] = ACTIVE_HEAD_SPECS
 HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in HEAD_SPECS}
@@ -179,6 +213,11 @@ for _spec in ALL_HEAD_SPECS:
 
 def head_names(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[str, ...]:
     return tuple(spec.name for spec in head_specs)
+
+
+def canonical_head_name(name: str) -> str:
+    normalized = str(name).strip()
+    return LEGACY_HEAD_NAME_ALIASES.get(normalized, normalized)
 
 
 def control_head_specs(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[HeadSpec, ...]:
@@ -210,14 +249,15 @@ def resolve_head_specs_from_metadata(raw_specs: Any) -> tuple[HeadSpec, ...]:
     for item in raw_specs:
         if not isinstance(item, dict):
             raise ValueError("head metadata entries must be dicts")
-        name = str(item.get("name", "")).strip()
-        if not name:
+        raw_name = str(item.get("name", "")).strip()
+        if not raw_name:
             raise ValueError("head metadata entry is missing a non-empty name")
+        name = canonical_head_name(raw_name)
         if name in seen:
             raise ValueError(f"duplicate head metadata entry: {name}")
         spec = ALL_HEAD_SPECS_BY_NAME.get(name)
         if spec is None:
-            raise ValueError(f"unknown head in metadata: {name}")
+            raise ValueError(f"unknown head in metadata: {raw_name}")
         if "output_dim" in item and int(item.get("output_dim")) != spec.output_dim:
             raise ValueError(f"head metadata output_dim mismatch for '{name}'")
         resolved_kind = spec.kind
@@ -253,7 +293,10 @@ def apply_loss_weight_overrides(loss_weight_overrides: Mapping[str, float] | Non
     if not loss_weight_overrides:
         return HEAD_SPECS
 
-    normalized = {str(name): float(weight) for name, weight in loss_weight_overrides.items()}
+    normalized = {
+        canonical_head_name(str(name)): float(weight)
+        for name, weight in loss_weight_overrides.items()
+    }
     unknown = sorted(set(normalized) - set(ALL_HEAD_SPECS_BY_NAME))
     if unknown:
         raise ValueError(f"unknown head loss weight override(s): {', '.join(unknown)}")
@@ -276,7 +319,12 @@ def inactive_loss_weight_override_names(loss_weight_overrides: Mapping[str, floa
         return ()
     active = set(HEAD_SPECS_BY_NAME)
     all_names = set(ALL_HEAD_SPECS_BY_NAME)
-    return tuple(sorted(name for name in loss_weight_overrides if name in all_names and name not in active))
+    ignored: set[str] = set()
+    for raw_name in loss_weight_overrides:
+        name = canonical_head_name(str(raw_name))
+        if name in all_names and name not in active:
+            ignored.add(str(raw_name))
+    return tuple(sorted(ignored))
 
 
 def build_targets_from_label(label: dict[str, Any], head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> dict[str, Tensor]:
@@ -341,6 +389,11 @@ def supported_metric_names(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> set[s
         "loss",
         "overall_mae",
         "overall_rmse",
+        "future_yaw_delta_weighted_sample_loss",
+        "yaw_consistency_loss",
+        "yaw_consistency_weighted_loss",
+        "speed_consistency_loss",
+        "speed_consistency_weighted_loss",
     }
     if control_specs:
         names.update({
@@ -363,9 +416,9 @@ def supported_metric_names(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> set[s
         else:
             names.add(f"{spec.name}_mae")
             names.add(f"{spec.name}_rmse")
-    if "steer" in head_spec_names:
-        names.add("steering_mae")
-        names.add("steering_rmse")
+    if FUTURE_YAW_DELTA_HEAD_NAME in head_spec_names:
+        names.add("yaw_delta_mae")
+        names.add("yaw_delta_rmse")
     return names
 
 

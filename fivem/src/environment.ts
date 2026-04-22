@@ -80,9 +80,9 @@ export class EnvironmentService {
 
 export function configurePopulation(environment: Environment|undefined) {
     SetPedPopulationBudget(3);
-    SetPedDensityMultiplierThisFrame(1.0)
-    // SetVehiclePopulationBudget(0);
-    const [x, y, z] = GetEntityCoords(PlayerPedId(), true) as [number, number, number];
+    // SetPedDensityMultiplierThisFrame(1.0)
+    SetVehiclePopulationBudget(3);
+    // const [x, y, z] = GetEntityCoords(PlayerPedId(), true) as [number, number, number];
     // ClearAreaOfVehicles(x, y, z, 1000.0, false, false, false, false, false);
     // SetRandomVehicleDensityMultiplierThisFrame(0.0);
     SetParkedVehicleDensityMultiplierThisFrame(3);

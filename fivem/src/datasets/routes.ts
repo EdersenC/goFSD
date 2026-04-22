@@ -21,6 +21,8 @@ export const routePresets = {
     vespucciCanals: {destination: [-1183.5, -1074.4, 2.2]},
     kortzCenter: {destination: [-2243.8, 270.8, 174.6]},
     orientalTheater: {destination: [296.5, 185.4, 104.3]},
+    littleSeoulParking: {destination: [-464.828, -777.476, 34.859]},
+    rockfordHillParking: {destination: [-777.282, 373.133, 87.353]},
 } satisfies Record<string, Route>;
 
 export type RoutePresetId = keyof typeof routePresets;

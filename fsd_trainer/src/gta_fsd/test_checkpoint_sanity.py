@@ -39,13 +39,22 @@ def make_train_config() -> TrainConfig:
             early_stopping_patience=1,
             early_stopping_min_delta=0.0,
             head_loss_weights={},
+            yaw_consistency_weight=0.0,
+            yaw_rate_scale_to_degrees=57.29577951308232,
+            speed_consistency_weight=0.0,
         ),
         loader=LoaderConfig(
-            batch_size=1,
-            num_workers=0,
-            pin_memory=False,
-            prefetch_factor=1,
-            persistent_workers=False,
+            train_batch_size=1,
+            train_num_workers=0,
+            train_pin_memory=False,
+            train_prefetch_factor=1,
+            train_persistent_workers=False,
+            val_batch_size=1,
+            val_num_workers=0,
+            val_pin_memory=False,
+            val_prefetch_factor=1,
+            val_persistent_workers=False,
+            log_every_n_batches=1,
             val_split=1.0,
             cpu_batch_size=1,
         ),
@@ -81,11 +90,11 @@ class CheckpointSanityTests(unittest.TestCase):
 
     def test_summarize_control_ranges_marks_flat_outputs(self) -> None:
         summary = summarize_control_ranges([
-            {"control_outputs": {"steer": 0.1, "delta_speed": 0.5}},
-            {"control_outputs": {"steer": 0.1, "delta_speed": 0.50001}},
+            {"control_outputs": {"future_yaw_delta": 0.1, "delta_speed": 0.5}},
+            {"control_outputs": {"future_yaw_delta": 0.1, "delta_speed": 0.50001}},
         ])
 
-        self.assertTrue(bool(summary["steer"]["flat"]))
+        self.assertTrue(bool(summary["future_yaw_delta"]["flat"]))
         self.assertTrue(bool(summary["delta_speed"]["flat"]))
 
     def test_resolve_debug_dir_accepts_explicit_override(self) -> None:

@@ -279,6 +279,15 @@ func TestHelperProcessFFmpeg(t *testing.T) {
 		return
 	}
 
+	args := os.Args
+	if len(args) > 0 {
+		outputFile := args[len(args)-1]
+		if strings.HasSuffix(strings.ToLower(outputFile), ".mkv") {
+			_ = os.MkdirAll(filepath.Dir(outputFile), 0o755)
+			_ = os.WriteFile(outputFile, []byte("fake-video-data"), 0o644)
+		}
+	}
+
 	buf := make([]byte, 1024)
 	for {
 		n, err := os.Stdin.Read(buf)
@@ -293,8 +302,8 @@ func TestHelperProcessFFmpeg(t *testing.T) {
 
 func testCommandFactory(t *testing.T) CommandFactory {
 	t.Helper()
-	return func(_ string, _ ...string) *exec.Cmd {
-		cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessFFmpeg", "--")
+	return func(_ string, args ...string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestHelperProcessFFmpeg", "--"}, args...)...)
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 		return cmd
 	}
@@ -343,7 +352,7 @@ func TestStartWithoutSourceIDAutoSelectsPreferredWindow(t *testing.T) {
 		}),
 		WithCommandFactory(func(_ string, args ...string) *exec.Cmd {
 			capturedArgs = append([]string{}, args...)
-			cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessFFmpeg", "--")
+			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestHelperProcessFFmpeg", "--"}, args...)...)
 			cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 			return cmd
 		}),
