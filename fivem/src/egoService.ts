@@ -181,6 +181,7 @@ export interface VehicleData {
     currentSpeed: number
     drivingStyle: DrivingStyle
     acceleration: number
+    brakePressureAvg: number
     isStopped: boolean | number
     Steering: number
     yaw: number
@@ -374,6 +375,51 @@ export class EgoService {
             return null;
         }
         return routeContext.routeForwardDelta;
+    }
+
+    public currentControlTelemetry(): {
+        currentSpeed: number
+        currentYaw: number
+        yawRate: number
+        steering: number
+        acceleration: number
+        brakePressureAvg: number
+        routeForwardDelta: number | null
+        routeHeadingError: number | null
+        routeDistance: number | null
+        hasLeadVehicle: boolean
+        leadVehicleDistance: number | null
+        gameTimeMs: number
+    } | null {
+        if (!this.oldEgo || !isValidEntity(this.oldEgo.vehicle.id)) {
+            return null;
+        }
+        const id = this.oldEgo.vehicle.id;
+        const coords = GetEntityCoords(id, true) as Vector3;
+        const yaw = GetEntityHeading(id);
+        const currentSpeed = GetEntitySpeed(id);
+        const acceleration = GetVehicleCurrentAcceleration(id);
+        const brakePressureAvg = this.averageBrakePressure(id);
+        const steering = GetVehicleWheelSteeringAngle(id, 0);
+        const rotationVelocity = this.toVector3(GetEntityRotationVelocity(id)) ?? [0, 0, 0];
+        const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
+        const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
+        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        const nearbyActors = this.collectNearbyActorSummary(id, coords, yaw, currentSpeed);
+        return {
+            currentSpeed,
+            currentYaw: yaw,
+            yawRate: rotationVelocity[2],
+            steering,
+            acceleration,
+            brakePressureAvg,
+            routeForwardDelta: routeContext.routeForwardDelta ?? null,
+            routeHeadingError: routeContext.routeHeadingError ?? null,
+            routeDistance: routeContext.routeDistance ?? null,
+            hasLeadVehicle: nearbyActors.hasLeadVehicle,
+            leadVehicleDistance: nearbyActors.leadVehicleDistance ?? null,
+            gameTimeMs: GetGameTimer(),
+        };
     }
 
 
@@ -760,6 +806,7 @@ export class EgoService {
         const currentSpeed = GetEntitySpeed(ego.vehicle.id);
         const isStopped :boolean | number = IsVehicleStopped(id)
         const acceleration = GetVehicleCurrentAcceleration(id);
+        const brakePressureAvg = this.averageBrakePressure(id);
         const Steering = GetVehicleWheelSteeringAngle(id, 0);
         const yaw = GetEntityHeading(id)
         const time = GetGameTimer();
@@ -793,6 +840,7 @@ export class EgoService {
             currentSpeed,
             drivingStyle: ego.vehicle.drivingStyle,
             acceleration,
+            brakePressureAvg,
             isStopped,
             Steering,
             yaw,
@@ -855,6 +903,37 @@ export class EgoService {
         if (ego.vehicle.VehicleData.length >= EgoService.MAX_TRIP_VEHICLE_DATA_POINTS) {
             this.emitTripChunk(ego, GetGameTimer(), false);
         }
+    }
+
+    private averageBrakePressure(vehicle: number): number {
+        if (!isValidEntity(vehicle)) {
+            return 0;
+        }
+        const wheelCount = GetVehicleNumberOfWheels(vehicle);
+        if (!Number.isFinite(wheelCount) || wheelCount <= 0) {
+            return 0;
+        }
+        let totalPressure = 0;
+        let observedWheels = 0;
+        for (let wheelIndex = 0; wheelIndex < wheelCount; wheelIndex += 1) {
+            const pressure = GetVehicleWheelBrakePressure(vehicle, wheelIndex);
+            if (!Number.isFinite(pressure)) {
+                continue;
+            }
+            totalPressure += pressure;
+            observedWheels += 1;
+        }
+        if (observedWheels <= 0) {
+            return 0;
+        }
+        return this.clampNumber(totalPressure / observedWheels, 0, 1);
+    }
+
+    private clampNumber(value: number, minValue: number, maxValue: number): number {
+        if (!Number.isFinite(value)) {
+            return minValue;
+        }
+        return Math.min(Math.max(value, minValue), maxValue);
     }
 
     private collectRouteContext(id: number, coords: Vector3, heading: number, gpsRouteFound: boolean, gps: Vector3) {

@@ -90,10 +90,14 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
 
 	telemetry := store.UpdateTelemetry(TelemetryUpdate{
-		CurrentSpeed:      4.25,
-		CurrentYaw:        182.5,
-		RouteForwardDelta: 0.75,
-		TimestampMs:       123456,
+		CurrentSpeed:        4.25,
+		CurrentYaw:          182.5,
+		RouteForwardDelta:   0.75,
+		RouteHeadingError:   -8.0,
+		RouteDistance:       32.0,
+		LeadVehicleDistance: 18.5,
+		HasLeadVehicle:      true,
+		TimestampMs:         123456,
 	})
 	if telemetry == nil {
 		t.Fatal("expected telemetry snapshot")
@@ -106,6 +110,12 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 	if telemetry.RouteForwardDelta != 0.75 {
 		t.Fatalf("unexpected route forward delta: %+v", telemetry)
+	}
+	if telemetry.RouteHeadingError != -8.0 || telemetry.RouteDistance != 32.0 {
+		t.Fatalf("unexpected route telemetry: %+v", telemetry)
+	}
+	if !telemetry.HasLeadVehicle || telemetry.LeadVehicleDistance != 18.5 {
+		t.Fatalf("unexpected lead telemetry: %+v", telemetry)
 	}
 
 	state := store.State()
@@ -120,6 +130,12 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 	if state.Telemetry.RouteForwardDelta != 0.75 {
 		t.Fatalf("unexpected telemetry route forward delta in state: %+v", state.Telemetry)
+	}
+	if state.Telemetry.RouteHeadingError != -8.0 || state.Telemetry.RouteDistance != 32.0 {
+		t.Fatalf("unexpected route telemetry in state: %+v", state.Telemetry)
+	}
+	if !state.Telemetry.HasLeadVehicle || state.Telemetry.LeadVehicleDistance != 18.5 {
+		t.Fatalf("unexpected lead telemetry in state: %+v", state.Telemetry)
 	}
 	if latest := store.LatestTelemetry(); latest == nil || latest.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected latest telemetry: %+v", latest)

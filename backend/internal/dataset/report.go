@@ -742,8 +742,9 @@ func buildTripDatasetReport(ctx tripContext, deltaSpeedClip float64) (TripDatase
 	acc := newSummaryAccumulator(deltaSpeedClip)
 	rawLabels := make([]map[string]any, 0, len(samples))
 	for _, sample := range samples {
-		rawLabels = append(rawLabels, sample.Label)
-		acc.addSample(sample.Label)
+		reportLabel := mergedReportLabel(sample)
+		rawLabels = append(rawLabels, reportLabel)
+		acc.addSample(reportLabel)
 	}
 	summary := acc.summary()
 
@@ -818,6 +819,24 @@ func buildTripDatasetReport(ctx tripContext, deltaSpeedClip float64) (TripDatase
 		DeltaSpeedClip:     summary.DeltaSpeedClip,
 		Warnings:           warnings,
 	}, rawLabels, nil
+}
+
+func mergedReportLabel(sample DatasetSample) map[string]any {
+	merged := flattenGroupedLabel(sample.Label)
+	current := sampleCurrentTelemetry(sample)
+	if current == nil {
+		return merged
+	}
+	if merged == nil {
+		merged = make(map[string]any)
+	}
+	for key, value := range flattenGroupedTelemetry(*current) {
+		if _, exists := merged[key]; exists {
+			continue
+		}
+		merged[key] = cloneValue(value)
+	}
+	return merged
 }
 
 func readDatasetSamples(path string) ([]DatasetSample, bool, error) {

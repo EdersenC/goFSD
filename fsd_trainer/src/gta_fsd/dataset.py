@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -10,20 +11,24 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from heads import (
-    CURRENT_SPEED_TARGET_KEY,
-    FUTURE_HORIZON_SECONDS_TARGET_KEY,
-    HEAD_SPECS,
-    HEAD_SPECS_BY_NAME,
-    HeadSpec,
-    build_targets_from_label,
+from config import (
+    DEFAULT_AUX_TARGET_NAMES,
+    DEFAULT_CONTROL_TARGET_NAMES,
+    DEFAULT_FUTURE_OFFSETS,
+    DEFAULT_IMAGE_OFFSETS,
+    DEFAULT_TELEMETRY_FEATURE_NAMES,
+    DEFAULT_TELEMETRY_OFFSETS,
 )
 from image_io import load_rgb_tensor_from_path
-from state_inputs import StateInputConfig, build_state_inputs_from_label, training_state_input_config
 
 
-DatasetTargets = dict[str, Tensor]
-DatasetStateInputs = dict[str, Tensor]
+DatasetImages = Tensor
+DatasetTelemetry = Tensor
+DatasetTargetControls = Tensor
+DatasetTargetAux = Tensor
+DatasetItem = tuple[DatasetImages, DatasetTelemetry, DatasetTargetControls, DatasetTargetAux]
+
+TelemetryMap = dict[str, Any]
 
 
 class Trip:
@@ -50,7 +55,7 @@ class Trip:
             raise FileNotFoundError(f"Trip metadata is missing: {metadata_path}")
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-
+        samples = self.load_samples()
         return {
             "trip_dir": self.trip_dir,
             "trip_name": self.trip_dir.name,
@@ -63,7 +68,7 @@ class Trip:
             "log_path": log_path,
             "dataset_path": dataset_path,
             "processing_path": processing_path,
-            "samples": self.load_samples(),
+            "samples": samples,
             "sample_indices": list(self.sample_indices),
             "run_id": metadata.get("runId"),
             "scene_id": metadata.get("sceneId"),
@@ -92,7 +97,86 @@ class Trip:
         return samples
 
 
-class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
+def _coerce_float(mapping: TelemetryMap, key: str) -> float:
+    if key not in mapping:
+        raise KeyError(f"missing telemetry key '{key}'")
+    value = mapping[key]
+    if isinstance(value, bool):
+        raise TypeError(f"telemetry key '{key}' must be numeric, got bool")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"telemetry key '{key}' must be numeric") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"telemetry key '{key}' must be finite")
+    return result
+
+
+def wrap_degrees_delta(current_yaw: float, future_yaw: float) -> float:
+    return ((future_yaw - current_yaw + 180.0) % 360.0) - 180.0
+
+
+def flatten_grouped_mapping(mapping: TelemetryMap) -> TelemetryMap:
+    if not isinstance(mapping, dict):
+        raise TypeError(f"expected grouped telemetry mapping, got {type(mapping).__name__}")
+    if "control" not in mapping and "aux" not in mapping and "raw" not in mapping:
+        return mapping
+
+    flat: TelemetryMap = {}
+    for section_name in ("control", "aux", "raw"):
+        section = mapping.get(section_name)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            raise TypeError(f"telemetry section '{section_name}' must be a dict")
+        flat.update(section)
+    return flat
+
+
+def build_telemetry_features(telemetry: TelemetryMap, feature_names: tuple[str, ...]) -> Tensor:
+    telemetry = flatten_grouped_mapping(telemetry)
+    current_speed = _coerce_float(telemetry, "currentSpeed")
+    yaw_degrees = _coerce_float(telemetry, "yaw")
+    yaw_radians = math.radians(yaw_degrees)
+    yaw_rate = _coerce_float(telemetry, "yawRate")
+    steering = _coerce_float(telemetry, "Steering")
+    acceleration = _coerce_float(telemetry, "acceleration")
+
+    feature_map = {
+        "current_speed": current_speed,
+        "yaw_sin": math.sin(yaw_radians),
+        "yaw_cos": math.cos(yaw_radians),
+        "yaw_rate": yaw_rate,
+        "steering": steering,
+        "acceleration": acceleration,
+    }
+    return torch.tensor([feature_map[name] for name in feature_names], dtype=torch.float32)
+
+
+def build_control_targets(telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
+    telemetry = flatten_grouped_mapping(telemetry)
+    target_map = {
+        "steering": _coerce_float(telemetry, "Steering"),
+        "acceleration": _coerce_float(telemetry, "acceleration"),
+        "brakePressureAvg": _coerce_float(telemetry, "brakePressureAvg"),
+    }
+    return torch.tensor([target_map[name] for name in target_names], dtype=torch.float32)
+
+
+def build_aux_targets(current_telemetry: TelemetryMap, future_telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
+    current_telemetry = flatten_grouped_mapping(current_telemetry)
+    future_telemetry = flatten_grouped_mapping(future_telemetry)
+    current_yaw = _coerce_float(current_telemetry, "yaw")
+    future_yaw = _coerce_float(future_telemetry, "yaw")
+    target_map = {
+        "future_speed": _coerce_float(future_telemetry, "currentSpeed"),
+        "future_yaw_delta": wrap_degrees_delta(current_yaw, future_yaw),
+        "future_yaw_rate": _coerce_float(future_telemetry, "yawRate"),
+    }
+    return torch.tensor([target_map[name] for name in target_names], dtype=torch.float32)
+
+
+class FsdDataset(Dataset[DatasetItem]):
     def __init__(
         self,
         run_paths: Iterable[str | Path] | None = None,
@@ -100,22 +184,45 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
         run_id: str | None = None,
         data_root: str | Path | None = None,
         image_size: tuple[int, int] = (480, 480),
-        expected_window_size: int = 3,
-        state_input_config: StateInputConfig | None = None,
-        head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
+        expected_window_size: int | None = None,
+        image_offsets: tuple[int, ...] = DEFAULT_IMAGE_OFFSETS,
+        telemetry_offsets: tuple[int, ...] = DEFAULT_TELEMETRY_OFFSETS,
+        future_offsets: tuple[int, ...] = DEFAULT_FUTURE_OFFSETS,
+        telemetry_feature_names: tuple[str, ...] = DEFAULT_TELEMETRY_FEATURE_NAMES,
+        control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
+        aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
+        state_input_config: Any | None = None,
+        head_specs: Any | None = None,
     ):
-        if expected_window_size < 1:
-            raise ValueError("expected_window_size must be > 0")
+        del state_input_config, head_specs
+        if expected_window_size is not None and expected_window_size != len(image_offsets):
+            raise ValueError(
+                "expected_window_size must match the configured sparse image offset count: "
+                f"expected_window_size={expected_window_size} image_offsets={len(image_offsets)}"
+            )
 
-        self.expected_window_size = expected_window_size
+        self.image_offsets = tuple(image_offsets)
+        self.telemetry_offsets = tuple(telemetry_offsets)
+        self.future_offsets = tuple(future_offsets)
+        self.telemetry_feature_names = tuple(telemetry_feature_names)
+        self.control_target_names = tuple(control_target_names)
+        self.aux_target_names = tuple(aux_target_names)
         self.image_size = image_size
-        self.state_input_config = state_input_config or training_state_input_config()
-        self.head_specs = head_specs
         self.data_root = None if data_root is None else Path(data_root)
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
         self.trips: list[Trip] = self._load_trips()
+        self.rejected_sample_summary: dict[str, Any] = {
+            "rejected_samples": 0,
+            "bad_frame_paths": 0,
+            "bad_telemetry_history": 0,
+            "bad_telemetry_future": 0,
+            "non_dict_history_items": 0,
+            "non_dict_future_items": 0,
+            "observed_frame_path_lengths": {},
+            "observed_telemetry_history_lengths": {},
+            "observed_telemetry_future_lengths": {},
+        }
         self.samples: list[dict[str, Any]] = self._load_samples()
-        self._scalar_target_cache: dict[str, tuple[float, ...]] = {}
 
     def _resolve_run_paths(
         self,
@@ -161,14 +268,69 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
                     trips.append(Trip(trip_dir, run_path=run_path))
         return trips
 
+    @staticmethod
+    def _increment_count(bucket: dict[int, int], value: int) -> None:
+        bucket[value] = int(bucket.get(value, 0)) + 1
+
+    def _sample_has_required_offsets(self, sample: dict[str, Any]) -> bool:
+        frame_paths = sample.get("frame_paths", [])
+        history = sample.get("telemetry_history", [])
+        future = sample.get("telemetry_future", [])
+
+        ok = True
+        self._increment_count(self.rejected_sample_summary["observed_frame_path_lengths"], len(frame_paths))
+        self._increment_count(self.rejected_sample_summary["observed_telemetry_history_lengths"], len(history))
+        self._increment_count(self.rejected_sample_summary["observed_telemetry_future_lengths"], len(future))
+
+        if len(frame_paths) != len(self.image_offsets):
+            self.rejected_sample_summary["bad_frame_paths"] += 1
+            ok = False
+        if len(history) < len(self.telemetry_offsets):
+            self.rejected_sample_summary["bad_telemetry_history"] += 1
+            ok = False
+        if len(future) < len(self.future_offsets):
+            self.rejected_sample_summary["bad_telemetry_future"] += 1
+            ok = False
+
+        if not all(isinstance(item, dict) for item in history):
+            self.rejected_sample_summary["non_dict_history_items"] += 1
+            ok = False
+        if not all(isinstance(item, dict) for item in future):
+            self.rejected_sample_summary["non_dict_future_items"] += 1
+            ok = False
+        if not ok:
+            self.rejected_sample_summary["rejected_samples"] += 1
+        return ok
+
     def _load_samples(self) -> list[dict[str, Any]]:
         samples: list[dict[str, Any]] = []
         for trip in self.trips:
-            start_index = len(samples)
             trip_samples = trip.load_samples()
-            samples.extend(trip_samples)
-            trip.sample_indices = list(range(start_index, len(samples)))
+            trip.sample_indices = []
+            for sample in trip_samples:
+                if not self._sample_has_required_offsets(sample):
+                    continue
+                trip.sample_indices.append(len(samples))
+                samples.append(sample)
         return samples
+
+    def format_rejected_sample_summary(self) -> str:
+        summary = self.rejected_sample_summary
+        return (
+            "rejected_samples_summary="
+            f"rejected={summary['rejected_samples']} "
+            f"bad_frame_paths={summary['bad_frame_paths']} "
+            f"bad_telemetry_history={summary['bad_telemetry_history']} "
+            f"bad_telemetry_future={summary['bad_telemetry_future']} "
+            f"non_dict_history_items={summary['non_dict_history_items']} "
+            f"non_dict_future_items={summary['non_dict_future_items']} "
+            f"observed_frame_path_lengths={summary['observed_frame_path_lengths']} "
+            f"observed_telemetry_history_lengths={summary['observed_telemetry_history_lengths']} "
+            f"observed_telemetry_future_lengths={summary['observed_telemetry_future_lengths']} "
+            f"expected_frame_paths={len(self.image_offsets)} "
+            f"expected_telemetry_history>={len(self.telemetry_offsets)} "
+            f"expected_telemetry_future>={len(self.future_offsets)}"
+        )
 
     @property
     def trip_count(self) -> int:
@@ -185,43 +347,23 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def scalar_target_values(self, head_name: str) -> tuple[float, ...]:
-        cached = self._scalar_target_cache.get(head_name)
-        if cached is not None:
-            return cached
-
-        spec = next((item for item in self.head_specs if item.name == head_name), None)
-        if spec is None:
-            spec = HEAD_SPECS_BY_NAME.get(head_name)
-        if spec is None:
-            raise KeyError(f"unknown head target: {head_name}")
-
-        values: list[float] = []
-        for sample in self.samples:
-            target = spec.target_builder(sample["label"]).detach()
-            if target.numel() != 1:
-                raise ValueError(
-                    f"head '{head_name}' target_builder must produce a scalar per sample, got shape {tuple(target.shape)}"
-                )
-            values.append(float(target.reshape(()).item()))
-
-        resolved = tuple(values)
-        self._scalar_target_cache[head_name] = resolved
-        return resolved
-
     def _load_frame_tensor(self, frame_path: Path) -> Tensor:
         return load_rgb_tensor_from_path(frame_path, self.image_size)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, DatasetStateInputs, DatasetTargets]:
+    def _history_item_for_offset(self, history: list[TelemetryMap], offset: int) -> TelemetryMap:
+        index = offset + len(history) - 1
+        return history[index]
+
+    def _future_item_for_offset(self, future: list[TelemetryMap], offset: int) -> TelemetryMap:
+        return future[offset - 1]
+
+    def __getitem__(self, index: int) -> DatasetItem:
         sample = self.samples[index]
         frame_paths = sample.get("frame_paths", [])
-        if not frame_paths:
-            raise ValueError(f"No frame paths found for sample at index {index}")
-        if len(frame_paths) != self.expected_window_size:
+        if len(frame_paths) != len(self.image_offsets):
             raise ValueError(
-                "Expected "
-                f"{self.expected_window_size} frame paths for sample at index {index}, "
-                f"found {len(frame_paths)}"
+                "Expected frame paths aligned to image_offsets, "
+                f"found {len(frame_paths)} paths for {len(self.image_offsets)} offsets"
             )
 
         frame_tensors: list[Tensor] = []
@@ -230,30 +372,25 @@ class FsdDataset(Dataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]):
                 raise FileNotFoundError(f"Frame image not found: {frame_path}")
             frame_tensors.append(self._load_frame_tensor(frame_path))
 
-        label = sample["label"]
-        x = torch.cat(frame_tensors, dim=0)
-        state_inputs = build_state_inputs_from_label(label, self.state_input_config)
-        targets = build_targets(label, head_specs=self.head_specs)
-        return x, state_inputs, targets
+        history = sample.get("telemetry_history", [])
+        future = sample.get("telemetry_future", [])
+        current_telemetry = self._history_item_for_offset(history, 0)
 
+        telemetry_tensors = [
+            build_telemetry_features(self._history_item_for_offset(history, offset), self.telemetry_feature_names)
+            for offset in self.telemetry_offsets
+        ]
+        control_targets = [
+            build_control_targets(self._future_item_for_offset(future, offset), self.control_target_names)
+            for offset in self.future_offsets
+        ]
+        aux_targets = [
+            build_aux_targets(current_telemetry, self._future_item_for_offset(future, offset), self.aux_target_names)
+            for offset in self.future_offsets
+        ]
 
-def build_targets(
-    label: dict[str, Any],
-    *,
-    steering: float | None = None,
-    delta_speed: float | None = None,
-    head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
-) -> DatasetTargets:
-    del steering, delta_speed
-    targets = build_targets_from_label(label, head_specs=head_specs)
-    if FUTURE_HORIZON_SECONDS_TARGET_KEY in label:
-        targets[FUTURE_HORIZON_SECONDS_TARGET_KEY] = torch.tensor(
-            float(label[FUTURE_HORIZON_SECONDS_TARGET_KEY]),
-            dtype=torch.float32,
-        )
-    if "currentSpeed" in label:
-        targets[CURRENT_SPEED_TARGET_KEY] = torch.tensor(
-            float(label["currentSpeed"]),
-            dtype=torch.float32,
-        )
-    return targets
+        images = torch.stack(frame_tensors, dim=0)
+        telemetry = torch.stack(telemetry_tensors, dim=0)
+        target_controls = torch.stack(control_targets, dim=0)
+        target_aux = torch.stack(aux_targets, dim=0)
+        return images, telemetry, target_controls, target_aux

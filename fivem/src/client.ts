@@ -33,11 +33,21 @@ type AvailableScene = {
 type ControlTelemetryUpdate = {
     currentSpeed: number
     currentYaw: number
+    yawRate: number
+    steering: number
+    acceleration: number
+    brakePressureAvg: number
     routeForwardDelta: number
+    routeHeadingError: number
+    routeDistance: number
+    leadVehicleDistance: number
+    hasLeadVehicle: boolean
     timestampMs: number
+    gameTimeMs: number
 }
 
 const TELEMETRY_INTERVAL_MS = 67;
+const CONTROL_REGISTER_INTERVAL_MS = 5000;
 
 function registerInnerCityScenes() {
     for (const variant of innerCitySceneNames) {
@@ -65,6 +75,15 @@ function buildAvailableScenes(): AvailableScene[] {
 
 function publishAvailableScenes() {
     emitNet("control:availableScenesResponse", buildAvailableScenes());
+}
+
+function registerControlClient(reason: string) {
+    log(`[client] registering control client session (${reason})`);
+    emitNet("control:registerClient");
+}
+
+function sendControlClientHeartbeat() {
+    emitNet("control:clientHeartbeat");
 }
 
 function publishTelemetry(update: ControlTelemetryUpdate) {
@@ -105,11 +124,14 @@ async function executeAllScenesControlled() {
 
 async function executeEgoControl() {
     reportControlStatus("runningScene", "ego-control");
+    log("[client] starting ego control");
     try {
         await sceneManager.startEgoControl();
+        log("[client] ego control started");
     } catch (error: any) {
         const message = error?.message ?? "Failed to start ego control";
         reportControlStatus("error", "ego-control", message);
+        log(`[client] ego control failed: ${message}`);
         throw error;
     }
 }
@@ -130,30 +152,83 @@ function requestEndAllScenes() {
 }
 
 registerInnerCityScenes();
-log("[client] registering control client session");
-emitNet("control:registerClient");
+registerControlClient("startup");
 reportControlStatus("idle");
 publishAvailableScenes();
 
+setInterval(() => {
+    sendControlClientHeartbeat();
+}, CONTROL_REGISTER_INTERVAL_MS);
+
 let lastTelemetrySentAt = 0;
+let lastRouteForwardDelta = 0;
+let lastRouteHeadingError = 0;
+let lastRouteDistance = 0;
+let lastLeadVehicleDistance = 100;
+let lastTelemetryMissingLogAt = 0;
+let lastTelemetryDebugLogAt = 0;
 setTick(() => {
     const now = GetGameTimer();
     if (now-lastTelemetrySentAt < TELEMETRY_INTERVAL_MS) {
         return;
     }
-    const currentSpeed = sceneManager.currentEgoSpeed();
-    const currentYaw = sceneManager.currentEgoYaw();
-    const routeForwardDelta = sceneManager.currentEgoRouteForwardDelta();
-    if (currentSpeed === null || currentYaw === null || routeForwardDelta === null) {
+    const telemetry = sceneManager.currentEgoControlTelemetry();
+    if (!telemetry) {
+        if (now - lastTelemetryMissingLogAt >= 1000) {
+            lastTelemetryMissingLogAt = now;
+            log(`[client] telemetry unavailable egoActive=${sceneManager.currentEgoSpeed() !== null}`);
+        }
         return;
+    }
+    const routeForwardDelta = telemetry.routeForwardDelta ?? lastRouteForwardDelta;
+    const routeHeadingError = telemetry.routeHeadingError ?? lastRouteHeadingError;
+    const routeDistance = telemetry.routeDistance ?? lastRouteDistance;
+    const leadVehicleDistance = telemetry.hasLeadVehicle
+        ? (telemetry.leadVehicleDistance ?? lastLeadVehicleDistance)
+        : 100;
+    if (telemetry.routeForwardDelta !== null) {
+        lastRouteForwardDelta = telemetry.routeForwardDelta;
+    }
+    if (telemetry.routeHeadingError !== null) {
+        lastRouteHeadingError = telemetry.routeHeadingError;
+    }
+    if (telemetry.routeDistance !== null) {
+        lastRouteDistance = telemetry.routeDistance;
+    }
+    if (telemetry.hasLeadVehicle && telemetry.leadVehicleDistance !== null) {
+        lastLeadVehicleDistance = telemetry.leadVehicleDistance;
     }
     lastTelemetrySentAt = now;
     publishTelemetry({
-        currentSpeed,
-        currentYaw,
+        currentSpeed: telemetry.currentSpeed,
+        currentYaw: telemetry.currentYaw,
+        yawRate: telemetry.yawRate,
+        steering: telemetry.steering,
+        acceleration: telemetry.acceleration,
+        brakePressureAvg: telemetry.brakePressureAvg,
         routeForwardDelta,
+        routeHeadingError,
+        routeDistance,
+        leadVehicleDistance,
+        hasLeadVehicle: telemetry.hasLeadVehicle,
         timestampMs: Date.now(),
+        gameTimeMs: telemetry.gameTimeMs,
     });
+    if (now - lastTelemetryDebugLogAt >= 2000) {
+        lastTelemetryDebugLogAt = now;
+        log(
+            `[client] telemetry publish speed=${telemetry.currentSpeed.toFixed(2)} ` +
+            `yawRate=${telemetry.yawRate.toFixed(2)} ` +
+            `steer=${telemetry.steering.toFixed(2)} ` +
+            `accel=${telemetry.acceleration.toFixed(2)} ` +
+            `brakeAvg=${telemetry.brakePressureAvg.toFixed(2)} ` +
+            `routeFwd=${routeForwardDelta.toFixed(2)} ` +
+            `routeHeading=${routeHeadingError.toFixed(2)} ` +
+            `routeDistance=${routeDistance.toFixed(2)} ` +
+            `hasLead=${String(telemetry.hasLeadVehicle)} ` +
+            `leadDistance=${leadVehicleDistance.toFixed(2)}`
+        );
+    }
 });
 
 RegisterCommand("startScene", async (_source: number, args: string[]) => {
@@ -204,6 +279,7 @@ onNet("demo:responseScenes", async (scene: SceneType) => {
 
 onNet("control:executeCommand", async (command: ControlCommand) => {
     try {
+        log(`[client] received control command id=${command?.id ?? "unknown"} type=${command?.type ?? "unknown"} scene=${command?.sceneName ?? ""}`);
         switch (command?.type) {
             case "startScene":
                 if (!command.sceneName) {
@@ -232,7 +308,7 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
     } catch (error: any) {
         const message = error?.message ?? "Failed to execute control command";
         reportControlStatus("error", command?.sceneName ?? "", message);
-        log(message);
+        log(`[client] command failed: ${message}`);
     }
 });
 

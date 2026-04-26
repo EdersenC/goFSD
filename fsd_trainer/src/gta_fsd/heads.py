@@ -40,10 +40,21 @@ LEGACY_HEAD_NAME_ALIASES: dict[str, str] = {
 }
 
 
+def _flatten_grouped_label_sections(label: dict[str, Any]) -> dict[str, Any]:
+    flat = dict(label)
+    for section_name in ("control", "aux", "raw"):
+        section = label.get(section_name)
+        if isinstance(section, Mapping):
+            for key, value in section.items():
+                flat.setdefault(key, value)
+    return flat
+
+
 def _require_label_key(label: dict[str, Any], raw_key: str) -> Any:
-    if raw_key not in label:
+    flattened = _flatten_grouped_label_sections(label)
+    if raw_key not in flattened:
         raise KeyError(f"missing label key '{raw_key}'")
-    return label[raw_key]
+    return flattened[raw_key]
 
 
 def _build_scalar_target(label: dict[str, Any], *, raw_key: str) -> Tensor:
@@ -113,7 +124,7 @@ CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=1.0,
-        target_source="label.future_yaw_delta",
+        target_source="label.aux.future_yaw_delta",
         target_builder=scalar_target("future_yaw_delta"),
         used_for_control=True,
     ),
@@ -123,7 +134,7 @@ CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=1.0,
-        target_source="label.future_speed_target",
+        target_source="label.aux.future_speed_target",
         target_builder=scalar_target("future_speed_target"),
         used_for_control=True,
     ),
@@ -136,7 +147,7 @@ AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="bce_with_logits",
         loss_weight=0.35,
-        target_source="label.move_intent (bool or 0/1)",
+        target_source="label.aux.move_intent (bool or 0/1)",
         target_builder=binary_target("move_intent"),
         used_for_control=False,
     ),
@@ -146,7 +157,7 @@ AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=0.2,
-        target_source=f"label.{DELTA_SPEED_TARGET_LABEL_KEY}",
+        target_source=f"label.aux.{DELTA_SPEED_TARGET_LABEL_KEY}",
         target_builder=scalar_target(DELTA_SPEED_TARGET_LABEL_KEY),
         used_for_control=False,
     ),
@@ -156,7 +167,7 @@ AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
         output_dim=1,
         loss_type="smooth_l1",
         loss_weight=0.1,
-        target_source="label.yaw_rate",
+        target_source="label.aux.yaw_rate",
         target_builder=scalar_target("yaw_rate"),
         used_for_control=False,
     ),

@@ -20,8 +20,14 @@ func TestLoadInferenceConfigReadsBackendInferenceSection(t *testing.T) {
 image_width = 320
 image_height = 180
 window_size = 5
+image_offsets = [-8, -6, -4, -2, 0]
 frame_stride = 2
 sample_stride = 10
+telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
+future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
+control_target_names = ["steering", "acceleration", "brakePressureAvg"]
+aux_target_names = ["future_speed", "future_yaw_delta", "future_yaw_rate"]
 label_tolerance = "120ms"
 sync_flash_brightness_threshold = 250.0
 sync_flash_frame_limit = 45
@@ -100,7 +106,7 @@ steer_command_rate_per_second = 6.0
 }
 
 func TestLoadInferenceConfigFallsBackToDefaultsWhenFileMissing(t *testing.T) {
-	cfg, err := LoadInferenceConfig(filepath.Join(t.TempDir(), "missing.toml"))
+	cfg, err := LoadInferenceConfig("")
 	if err != nil {
 		t.Fatalf("LoadInferenceConfig returned error: %v", err)
 	}
@@ -131,6 +137,12 @@ func TestLoadInferenceConfigFallsBackToDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.SteerCommandRatePerSec != defaultSteerCommandRatePerSecond {
 		t.Fatalf("unexpected default steer command rate: %f", cfg.SteerCommandRatePerSec)
 	}
+	if cfg.PredictionTimeout != defaultPredictionTimeout {
+		t.Fatalf("unexpected default inference timeout: %s", cfg.PredictionTimeout)
+	}
+	if cfg.AlignmentTolerance != defaultAlignmentTolerance {
+		t.Fatalf("unexpected default alignment tolerance: %s", cfg.AlignmentTolerance)
+	}
 }
 
 func TestLoadInferenceConfigDerivesHysteresisFromLegacyMoveIntentThreshold(t *testing.T) {
@@ -141,8 +153,14 @@ func TestLoadInferenceConfigDerivesHysteresisFromLegacyMoveIntentThreshold(t *te
 image_width = 320
 image_height = 180
 window_size = 5
+image_offsets = [-8, -6, -4, -2, 0]
 frame_stride = 2
 sample_stride = 10
+telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
+future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
+control_target_names = ["steering", "acceleration", "brakePressureAvg"]
+aux_target_names = ["future_speed", "future_yaw_delta", "future_yaw_rate"]
 
 [backend.inference]
 move_intent_threshold = 0.65

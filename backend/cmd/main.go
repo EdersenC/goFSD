@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"awesomeProject/internal/capture"
 	"awesomeProject/internal/control"
 	datasetproc "awesomeProject/internal/dataset"
+	"awesomeProject/internal/translation"
 )
 
 //go:embed web/index.html web/app.ts
@@ -58,6 +60,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load backend actuator config: %v", err)
 	}
+	translationConfig, err := translation.LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("failed to load backend translation config: %v", err)
+	}
 	datasetConfig, err := capture.LoadDatasetConfig(configPath)
 	if err != nil {
 		log.Fatalf("failed to load dataset frame-window config: %v", err)
@@ -66,7 +72,10 @@ func main() {
 	svc := capture.NewService()
 	controlStore := control.NewStore()
 	actuatorService := actuator.NewService(actuatorConfig, configPath)
-	inferencer := capture.NewInferencer(inferenceConfig, controlStore, actuatorService)
+	translationService := translation.NewService(translationConfig, configPath, actuatorService)
+	inferencer := capture.NewInferencer(inferenceConfig, actuatorConfig, controlStore, actuatorService)
+	trainingProxyBaseURL := strings.TrimRight(strings.TrimSpace(inferenceConfig.ModelServerURL), "/")
+	trainingProxyClient := &http.Client{Timeout: inferenceConfig.RequestTimeout}
 	if err := actuatorService.Start(); err != nil {
 		log.Fatalf("failed to start virtual controller actuator: %v", err)
 	}
@@ -289,7 +298,6 @@ func main() {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-
 		writeJSON(w, http.StatusOK, actuatorService.TuningState())
 	})
 
@@ -334,6 +342,66 @@ func main() {
 		}
 
 		writeJSON(w, http.StatusOK, actuatorService.ResetTuning())
+	})
+
+	mux.HandleFunc("/translation/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		writeJSON(w, http.StatusOK, translationService.State())
+	})
+
+	mux.HandleFunc("/translation/tuning", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, translationService.TuningState())
+	})
+
+	mux.HandleFunc("/translation/tuning/apply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var req translation.Tuning
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		state, err := translationService.ApplyTuning(req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("/translation/tuning/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		state, err := translationService.SaveTuning()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("/translation/tuning/reset", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, translationService.ResetTuning())
 	})
 
 	mux.HandleFunc("/control/state", func(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +514,49 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"scenes": controlStore.SetAvailableScenes(req.Scenes),
 		})
+	})
+
+	mux.HandleFunc("/training/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		proxyTrainingRequest(w, r, trainingProxyClient, trainingProxyBaseURL)
+	})
+
+	mux.HandleFunc("/training/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		proxyTrainingRequest(w, r, trainingProxyClient, trainingProxyBaseURL)
+	})
+
+	mux.HandleFunc("/training/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		proxyTrainingRequest(w, r, trainingProxyClient, trainingProxyBaseURL)
+	})
+
+	mux.HandleFunc("/training/history/clear", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		proxyTrainingRequest(w, r, trainingProxyClient, trainingProxyBaseURL)
+	})
+
+	mux.HandleFunc("/training/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodPost:
+			proxyTrainingRequest(w, r, trainingProxyClient, trainingProxyBaseURL)
+			return
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 	})
 
 	mux.HandleFunc("/capture/start", func(w http.ResponseWriter, r *http.Request) {
@@ -867,6 +978,51 @@ func printRunDatasetReportSummaries(reports []datasetproc.GeneratedRunDatasetRep
 			generated.ReportPath,
 		)
 	}
+}
+
+func proxyTrainingRequest(w http.ResponseWriter, r *http.Request, client *http.Client, baseURL string) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		writeError(w, http.StatusBadGateway, "python model server url is not configured")
+		return
+	}
+
+	targetURL := baseURL + r.URL.Path
+	if rawQuery := strings.TrimSpace(r.URL.RawQuery); rawQuery != "" {
+		targetURL += "?" + rawQuery
+	}
+
+	var body []byte
+	if r.Body != nil {
+		readBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "failed to read request body")
+			return
+		}
+		body = readBody
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, strings.NewReader(string(body)))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if contentType := strings.TrimSpace(r.Header.Get("Content-Type")); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("python training proxy failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func defaultBackendDataRoot() string {

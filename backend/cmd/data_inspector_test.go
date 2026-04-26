@@ -74,9 +74,13 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 			"anchor_game_time": 1.1,
 			"anchor_video_pts": 2.2,
 			"label": map[string]any{
-				"future_yaw_delta": 3.5,
-				"currentSpeed":     4.25,
-				"move_intent":      true,
+				"control": map[string]any{
+					"Steering": 0.15,
+				},
+				"aux": map[string]any{
+					"future_yaw_delta": 3.5,
+					"move_intent":      true,
+				},
 			},
 			"frame_paths": []string{"a.jpg"},
 		},
@@ -99,8 +103,9 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadInspectorFields processed: %v", err)
 	}
-	assertFieldKind(t, processedFields, "label.future_yaw_delta", "number")
-	assertFieldKind(t, processedFields, "label.move_intent", "boolean")
+	assertFieldKind(t, processedFields, "label.control.Steering", "number")
+	assertFieldKind(t, processedFields, "label.aux.future_yaw_delta", "number")
+	assertFieldKind(t, processedFields, "label.aux.move_intent", "boolean")
 	assertFieldMissing(t, processedFields, "frame_paths")
 
 	rawSeries, err := loadInspectorSeries(selection, dataSourceRaw, []string{"yaw", "currentSpeed"})
@@ -114,14 +119,14 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 		t.Fatalf("unexpected raw yaw: %#v", got)
 	}
 
-	processedSeries, err := loadInspectorSeries(selection, dataSourceProcessed, []string{"label.future_yaw_delta"})
+	processedSeries, err := loadInspectorSeries(selection, dataSourceProcessed, []string{"label.aux.future_yaw_delta"})
 	if err != nil {
 		t.Fatalf("loadInspectorSeries processed: %v", err)
 	}
 	if processedSeries.RowCount != 1 {
 		t.Fatalf("unexpected processed row count: %d", processedSeries.RowCount)
 	}
-	if got := processedSeries.Rows[0]["label.future_yaw_delta"]; got != 3.5 {
+	if got := processedSeries.Rows[0]["label.aux.future_yaw_delta"]; got != 3.5 {
 		t.Fatalf("unexpected processed yaw delta: %#v", got)
 	}
 }
@@ -142,7 +147,15 @@ func TestDataInspectorHandlers(t *testing.T) {
 		},
 	})
 	writeJSONLinesFile(t, filepath.Join(tripDir, "dataset.jsonl"), []map[string]any{
-		{"anchor_game_time": 1.0, "label": map[string]any{"future_yaw_delta": 2.5}},
+		{
+			"anchor_game_time": 1.0,
+			"label": map[string]any{
+				"control": map[string]any{},
+				"aux": map[string]any{
+					"future_yaw_delta": 2.5,
+				},
+			},
+		},
 	})
 
 	mux := http.NewServeMux()
@@ -162,7 +175,7 @@ func TestDataInspectorHandlers(t *testing.T) {
 		t.Fatalf("unexpected status for fields: %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/data/trip/series?runId=run-123&sceneKey=scene-a_default&tripName=trip-000&source=processed&field=label.future_yaw_delta", nil)
+	req = httptest.NewRequest(http.MethodGet, "/data/trip/series?runId=run-123&sceneKey=scene-a_default&tripName=trip-000&source=processed&field=label.aux.future_yaw_delta", nil)
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

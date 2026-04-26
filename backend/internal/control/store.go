@@ -3,6 +3,7 @@ package control
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -50,18 +51,37 @@ type StatusUpdate struct {
 }
 
 type TelemetryUpdate struct {
-	CurrentSpeed      float64 `json:"currentSpeed"`
-	CurrentYaw        float64 `json:"currentYaw"`
-	RouteForwardDelta float64 `json:"routeForwardDelta"`
-	TimestampMs       int64   `json:"timestampMs,omitempty"`
+	CurrentSpeed        float64 `json:"currentSpeed"`
+	CurrentYaw          float64 `json:"currentYaw"`
+	YawRate             float64 `json:"yawRate"`
+	Steering            float64 `json:"steering"`
+	Acceleration        float64 `json:"acceleration"`
+	BrakePressureAvg    float64 `json:"brakePressureAvg"`
+	RouteForwardDelta   float64 `json:"routeForwardDelta"`
+	RouteHeadingError   float64 `json:"routeHeadingError"`
+	RouteDistance       float64 `json:"routeDistance"`
+	LeadVehicleDistance float64 `json:"leadVehicleDistance"`
+	HasLeadVehicle      bool    `json:"hasLeadVehicle"`
+	TimestampMs         int64   `json:"timestampMs,omitempty"`
+	GameTimeMs          int64   `json:"gameTimeMs,omitempty"`
 }
 
 type RuntimeTelemetry struct {
-	CurrentSpeed      float64 `json:"currentSpeed"`
-	CurrentYaw        float64 `json:"currentYaw"`
-	RouteForwardDelta float64 `json:"routeForwardDelta"`
-	TimestampMs       int64   `json:"timestampMs,omitempty"`
-	UpdatedAt         string  `json:"updatedAt,omitempty"`
+	CurrentSpeed        float64 `json:"currentSpeed"`
+	CurrentYaw          float64 `json:"currentYaw"`
+	YawRate             float64 `json:"yawRate"`
+	Steering            float64 `json:"steering"`
+	Acceleration        float64 `json:"acceleration"`
+	BrakePressureAvg    float64 `json:"brakePressureAvg"`
+	RouteForwardDelta   float64 `json:"routeForwardDelta"`
+	RouteHeadingError   float64 `json:"routeHeadingError"`
+	RouteDistance       float64 `json:"routeDistance"`
+	LeadVehicleDistance float64 `json:"leadVehicleDistance"`
+	HasLeadVehicle      bool    `json:"hasLeadVehicle"`
+	TimestampMs         int64   `json:"timestampMs,omitempty"`
+	GameTimeMs          int64   `json:"gameTimeMs,omitempty"`
+	ReceivedAtMs        int64   `json:"receivedAtMs,omitempty"`
+	UpdatedAt           string  `json:"updatedAt,omitempty"`
 }
 
 type SceneOption struct {
@@ -101,9 +121,12 @@ type Store struct {
 	runtimeUpdatedAt    time.Time
 	telemetry           *RuntimeTelemetry
 	telemetryUpdatedAt  time.Time
+	lastTelemetryLogAt  time.Time
 	availableScenes     []SceneOption
 	commandHistoryLimit int
 	commandSeq          int64
+	telemetryHistory    []RuntimeTelemetry
+	telemetryLimit      int
 }
 
 type Option func(*Store)
@@ -113,6 +136,7 @@ func NewStore(opts ...Option) *Store {
 		nowFunc:             time.Now,
 		runtimeStatus:       StatusIdle,
 		commandHistoryLimit: 32,
+		telemetryLimit:      512,
 	}
 
 	for _, opt := range opts {
@@ -251,13 +275,47 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 
 	now := s.nowFunc()
 	s.telemetry = &RuntimeTelemetry{
-		CurrentSpeed:      update.CurrentSpeed,
-		CurrentYaw:        update.CurrentYaw,
-		RouteForwardDelta: update.RouteForwardDelta,
-		TimestampMs:       update.TimestampMs,
-		UpdatedAt:         now.Format(time.RFC3339),
+		CurrentSpeed:        update.CurrentSpeed,
+		CurrentYaw:          update.CurrentYaw,
+		YawRate:             update.YawRate,
+		Steering:            update.Steering,
+		Acceleration:        update.Acceleration,
+		BrakePressureAvg:    update.BrakePressureAvg,
+		RouteForwardDelta:   update.RouteForwardDelta,
+		RouteHeadingError:   update.RouteHeadingError,
+		RouteDistance:       update.RouteDistance,
+		LeadVehicleDistance: update.LeadVehicleDistance,
+		HasLeadVehicle:      update.HasLeadVehicle,
+		TimestampMs:         update.TimestampMs,
+		GameTimeMs:          update.GameTimeMs,
+		ReceivedAtMs:        now.UnixMilli(),
+		UpdatedAt:           now.Format(time.RFC3339),
+	}
+	if s.telemetry.TimestampMs == 0 {
+		s.telemetry.TimestampMs = now.UnixMilli()
 	}
 	s.telemetryUpdatedAt = now
+	s.telemetryHistory = append(s.telemetryHistory, *s.telemetry)
+	if len(s.telemetryHistory) > s.telemetryLimit {
+		s.telemetryHistory = append([]RuntimeTelemetry(nil), s.telemetryHistory[len(s.telemetryHistory)-s.telemetryLimit:]...)
+	}
+	if s.lastTelemetryLogAt.IsZero() || now.Sub(s.lastTelemetryLogAt) >= 2*time.Second {
+		log.Printf("[control] telemetry recv speed=%.3f yaw=%.3f yawRate=%.3f steer=%.3f accel=%.3f brakeAvg=%.3f routeForward=%.3f routeHeading=%.3f routeDistance=%.3f hasLead=%t leadDistance=%.3f ts=%d",
+			update.CurrentSpeed,
+			update.CurrentYaw,
+			update.YawRate,
+			update.Steering,
+			update.Acceleration,
+			update.BrakePressureAvg,
+			update.RouteForwardDelta,
+			update.RouteHeadingError,
+			update.RouteDistance,
+			update.HasLeadVehicle,
+			update.LeadVehicleDistance,
+			s.telemetry.TimestampMs,
+		)
+		s.lastTelemetryLogAt = now
+	}
 	copyTelemetry := *s.telemetry
 	return &copyTelemetry
 }
@@ -272,6 +330,21 @@ func (s *Store) LatestTelemetrySnapshot() (*RuntimeTelemetry, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.telemetryLocked(), s.telemetryUpdatedAt
+}
+
+func (s *Store) TelemetryHistorySnapshot(limit int) []RuntimeTelemetry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 || limit > len(s.telemetryHistory) {
+		limit = len(s.telemetryHistory)
+	}
+	if limit == 0 {
+		return nil
+	}
+	start := len(s.telemetryHistory) - limit
+	out := make([]RuntimeTelemetry, limit)
+	copy(out, s.telemetryHistory[start:])
+	return out
 }
 
 func (s *Store) runtimeStateLocked() RuntimeState {

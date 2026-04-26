@@ -25,6 +25,7 @@ const (
 	defaultWindowSize               = 3
 	defaultFrameStride              = 2
 	defaultSampleStride             = 2
+	defaultFutureTelemetryCount     = 6
 	defaultLabelTolerance           = 100 * time.Millisecond
 	defaultDeltaSpeedClip           = 2.0
 	defaultDeltaSpeedNormalize      = true
@@ -67,10 +68,63 @@ type ProcessingStatus struct {
 }
 
 type DatasetSample struct {
-	AnchorVideoPTS float64        `json:"anchor_video_pts"`
-	AnchorGameTime float64        `json:"anchor_game_time"`
-	FramePaths     []string       `json:"frame_paths"`
-	Label          map[string]any `json:"label"`
+	AnchorVideoPTS   float64                `json:"anchor_video_pts"`
+	AnchorGameTime   float64                `json:"anchor_game_time"`
+	FramePaths       []string               `json:"frame_paths"`
+	TelemetryHistory []GroupedTelemetryItem `json:"telemetry_history,omitempty"`
+	TelemetryFuture  []GroupedTelemetryItem `json:"telemetry_future,omitempty"`
+	Label            GroupedLabel           `json:"label"`
+}
+
+type GroupedLabel struct {
+	Control GroupedLabelControl `json:"control"`
+	Aux     GroupedLabelAux     `json:"aux"`
+}
+
+type GroupedLabelControl struct {
+	Steering any `json:"Steering,omitempty"`
+}
+
+type GroupedLabelAux struct {
+	DeltaSpeed           any `json:"delta_speed,omitempty"`
+	DeltaSpeedTarget     any `json:"delta_speed_target,omitempty"`
+	FutureSpeed          any `json:"future_speed,omitempty"`
+	FutureSpeedTarget    any `json:"future_speed_target,omitempty"`
+	FutureYawDelta       any `json:"future_yaw_delta,omitempty"`
+	FutureHorizonSeconds any `json:"future_horizon_seconds,omitempty"`
+	YawRate              any `json:"yaw_rate,omitempty"`
+	RouteForwardDelta    any `json:"routeForwardDelta,omitempty"`
+	MoveIntent           any `json:"move_intent,omitempty"`
+}
+
+type GroupedTelemetryItem struct {
+	Control GroupedTelemetryControl `json:"control"`
+	Aux     GroupedTelemetryAux     `json:"aux"`
+	Raw     map[string]any          `json:"raw,omitempty"`
+}
+
+type GroupedTelemetryControl struct {
+	Steering         any `json:"Steering,omitempty"`
+	Acceleration     any `json:"acceleration,omitempty"`
+	BrakePressureAvg any `json:"brakePressureAvg,omitempty"`
+}
+
+type GroupedTelemetryAux struct {
+	CurrentSpeed           any `json:"currentSpeed,omitempty"`
+	Yaw                    any `json:"yaw,omitempty"`
+	YawRate                any `json:"yawRate,omitempty"`
+	RouteForwardDelta      any `json:"routeForwardDelta,omitempty"`
+	RouteHeadingError      any `json:"routeHeadingError,omitempty"`
+	RouteDistance          any `json:"routeDistance,omitempty"`
+	LeadVehicleDistance    any `json:"leadVehicleDistance,omitempty"`
+	HasLeadVehicle         any `json:"hasLeadVehicle,omitempty"`
+	GPS                    any `json:"gps,omitempty"`
+	IsStopped              any `json:"isStopped,omitempty"`
+	RouteGPSValid          any `json:"routeGpsValid,omitempty"`
+	IsStoppedAtTraffic     any `json:"isStoppedAtTrafficLights,omitempty"`
+	LeadVehicleRelSpeed    any `json:"leadVehicleRelativeSpeed,omitempty"`
+	LeadVehicleHeadingDiff any `json:"leadVehicleHeadingDelta,omitempty"`
+	LeadVehicleTTC         any `json:"leadVehicleTTC,omitempty"`
 }
 
 type sampleBuildStats struct {
@@ -734,35 +788,22 @@ func buildDatasetSamplesWithStats(
 		return nil, stats
 	}
 
-	halfWindow := windowSize / 2
-	startIndex := halfWindow * frameStride
-	endIndex := len(frames) - 1 - (halfWindow * frameStride)
-	if startIndex > endIndex {
-		return nil, stats
-	}
-
+	historyTelemetryCount := ((windowSize - 1) * frameStride) + 1
 	toleranceSeconds := tolerance.Seconds()
 	samples := make([]DatasetSample, 0)
-	for center := startIndex; center <= endIndex; center += sampleStride {
-		futureCenter := center + sampleStride
-		if futureCenter > endIndex {
-			break
-		}
+	for anchorIndex := 0; anchorIndex < len(frames); anchorIndex += sampleStride {
 		stats.CandidateWindowCount++
 
-		window := make([]string, 0, windowSize)
-		for offset := -halfWindow; offset <= halfWindow; offset++ {
-			idx := center + offset*frameStride
-			window = append(window, frames[idx].ImagePath)
-		}
-
-		centerFrame := frames[center]
-		relativeSeconds := centerFrame.PTS - anchorPTS
+		window := buildPastOnlyFrameWindow(frames, anchorIndex, windowSize, frameStride)
+		anchorFrame := frames[anchorIndex]
+		relativeSeconds := anchorFrame.PTS - anchorPTS
 		label, labelIndex, ok := nearestLabelWithIndex(labels, relativeSeconds, toleranceSeconds)
 		if !ok {
 			stats.MissingCurrentLabelCount++
 			continue
 		}
+
+		futureCenter := min(anchorIndex+sampleStride, len(frames)-1)
 		futureRelativeSeconds := frames[futureCenter].PTS - anchorPTS
 		futureLabel, futureLabelIndex, ok := nearestLabelWithIndex(labels, futureRelativeSeconds, toleranceSeconds)
 		if !ok {
@@ -815,17 +856,56 @@ func buildDatasetSamplesWithStats(
 			stats.InvalidDerivedLabelCount++
 			continue
 		}
-
 		samples = append(samples, DatasetSample{
-			AnchorVideoPTS: centerFrame.PTS,
-			AnchorGameTime: label.RelativeSeconds,
-			FramePaths:     window,
-			Label:          derivedLabel,
+			AnchorVideoPTS:   anchorFrame.PTS,
+			AnchorGameTime:   label.RelativeSeconds,
+			FramePaths:       window,
+			TelemetryHistory: buildTelemetryHistory(labels, labelIndex, historyTelemetryCount),
+			TelemetryFuture:  buildTelemetryFuture(labels, labelIndex, defaultFutureTelemetryCount),
+			Label:            derivedLabel,
 		})
 		stats.GeneratedSampleCount++
 	}
 
 	return samples, stats
+}
+
+func buildPastOnlyFrameWindow(frames []VideoFrame, anchorIndex int, windowSize int, frameStride int) []string {
+	window := make([]string, 0, windowSize)
+	for slot := 0; slot < windowSize; slot++ {
+		idx := anchorIndex - ((windowSize - 1 - slot) * frameStride)
+		window = append(window, frames[clampInt(idx, 0, len(frames)-1)].ImagePath)
+	}
+	return window
+}
+
+func buildTelemetryHistory(labels []timedLabel, anchorIndex int, count int) []GroupedTelemetryItem {
+	if count <= 0 {
+		return nil
+	}
+	startIndex := anchorIndex - (count - 1)
+	return buildPaddedTelemetryWindow(labels, startIndex, count)
+}
+
+func buildTelemetryFuture(labels []timedLabel, anchorIndex int, count int) []GroupedTelemetryItem {
+	if count <= 0 {
+		return nil
+	}
+	startIndex := anchorIndex + 1
+	return buildPaddedTelemetryWindow(labels, startIndex, count)
+}
+
+func buildPaddedTelemetryWindow(labels []timedLabel, startIndex int, count int) []GroupedTelemetryItem {
+	if len(labels) == 0 || count <= 0 {
+		return nil
+	}
+
+	window := make([]GroupedTelemetryItem, 0, count)
+	for offset := 0; offset < count; offset++ {
+		index := clampInt(startIndex+offset, 0, len(labels)-1)
+		window = append(window, groupTelemetryItem(labels[index].Label))
+	}
+	return window
 }
 
 func buildTrainingLabel(
@@ -839,30 +919,27 @@ func buildTrainingLabel(
 	futureHorizonSeconds float64,
 	deltaSpeedClip float64,
 	deltaSpeedNormalize bool,
-) (map[string]any, bool) {
+) (GroupedLabel, bool) {
 	currentSpeed, ok := numberField(current["currentSpeed"])
 	if !ok {
-		return nil, false
+		return GroupedLabel{}, false
 	}
 	futureSpeed, ok := numberField(future["currentSpeed"])
 	if !ok {
-		return nil, false
+		return GroupedLabel{}, false
 	}
 	currentYaw, ok := numberField(current["yaw"])
 	if !ok || !isFiniteFloat64(currentYaw) || !isFiniteFloat64(futureYawTarget) {
-		return nil, false
+		return GroupedLabel{}, false
 	}
 	if !isFiniteFloat64(yawRateTarget) || !isFiniteFloat64(routeForwardDeltaTarget) ||
 		!isFiniteFloat64(futureHorizonSeconds) || futureHorizonSeconds <= 0 {
-		return nil, false
+		return GroupedLabel{}, false
 	}
 
-	derived := make(map[string]any, len(current))
-	for key, value := range current {
-		if key == "acceleration" {
-			continue
-		}
-		derived[key] = value
+	derived := GroupedLabel{}
+	if steering, ok := current["Steering"]; ok {
+		derived.Control.Steering = cloneValue(steering)
 	}
 	deltaSpeed := futureSpeedTarget - currentSpeed
 	clippedDeltaSpeed := clampFloat64(deltaSpeed, -deltaSpeedClip, deltaSpeedClip)
@@ -870,16 +947,120 @@ func buildTrainingLabel(
 	if deltaSpeedNormalize {
 		deltaSpeedTarget = clippedDeltaSpeed / deltaSpeedClip
 	}
-	derived["delta_speed"] = clippedDeltaSpeed
-	derived["delta_speed_target"] = deltaSpeedTarget
-	derived["future_speed"] = futureSpeed
-	derived["future_speed_target"] = futureSpeedTarget
-	derived["future_yaw_delta"] = wrapHeadingDeltaDegrees(futureYawTarget - currentYaw)
-	derived["future_horizon_seconds"] = futureHorizonSeconds
-	derived["yaw_rate"] = yawRateTarget
-	derived["routeForwardDelta"] = routeForwardDeltaTarget
-	derived["move_intent"] = buildMoveIntentLabel(current, moveIntentSpeedTarget, currentSpeed)
+	derived.Aux.DeltaSpeed = clippedDeltaSpeed
+	derived.Aux.DeltaSpeedTarget = deltaSpeedTarget
+	derived.Aux.FutureSpeed = futureSpeed
+	derived.Aux.FutureSpeedTarget = futureSpeedTarget
+	derived.Aux.FutureYawDelta = wrapHeadingDeltaDegrees(futureYawTarget - currentYaw)
+	derived.Aux.FutureHorizonSeconds = futureHorizonSeconds
+	derived.Aux.YawRate = yawRateTarget
+	derived.Aux.RouteForwardDelta = routeForwardDeltaTarget
+	derived.Aux.MoveIntent = buildMoveIntentLabel(current, moveIntentSpeedTarget, currentSpeed)
 	return derived, true
+}
+
+func groupTelemetryItem(source map[string]any) GroupedTelemetryItem {
+	item := GroupedTelemetryItem{}
+	raw := make(map[string]any)
+
+	for key, value := range source {
+		cloned := cloneValue(value)
+		switch key {
+		case "Steering":
+			item.Control.Steering = cloned
+		case "acceleration":
+			item.Control.Acceleration = cloned
+		case "brakePressureAvg":
+			item.Control.BrakePressureAvg = cloned
+		case "currentSpeed":
+			item.Aux.CurrentSpeed = cloned
+		case "yaw":
+			item.Aux.Yaw = cloned
+		case "yawRate":
+			item.Aux.YawRate = cloned
+		case "routeForwardDelta":
+			item.Aux.RouteForwardDelta = cloned
+		case "routeHeadingError":
+			item.Aux.RouteHeadingError = cloned
+		case "routeDistance":
+			item.Aux.RouteDistance = cloned
+		case "leadVehicleDistance":
+			item.Aux.LeadVehicleDistance = cloned
+		case "hasLeadVehicle":
+			item.Aux.HasLeadVehicle = cloned
+		case "gps":
+			item.Aux.GPS = cloned
+		case "isStopped":
+			item.Aux.IsStopped = cloned
+		case "routeGpsValid":
+			item.Aux.RouteGPSValid = cloned
+		case "isStoppedAtTrafficLights":
+			item.Aux.IsStoppedAtTraffic = cloned
+		case "leadVehicleRelativeSpeed":
+			item.Aux.LeadVehicleRelSpeed = cloned
+		case "leadVehicleHeadingDelta":
+			item.Aux.LeadVehicleHeadingDiff = cloned
+		case "leadVehicleTTC":
+			item.Aux.LeadVehicleTTC = cloned
+		default:
+			raw[key] = cloned
+		}
+	}
+
+	if len(raw) > 0 {
+		item.Raw = raw
+	}
+	return item
+}
+
+func flattenGroupedLabel(label GroupedLabel) map[string]any {
+	flat := make(map[string]any)
+	if label.Control.Steering != nil {
+		flat["Steering"] = cloneValue(label.Control.Steering)
+	}
+	appendIfPresent(flat, "delta_speed", label.Aux.DeltaSpeed)
+	appendIfPresent(flat, "delta_speed_target", label.Aux.DeltaSpeedTarget)
+	appendIfPresent(flat, "future_speed", label.Aux.FutureSpeed)
+	appendIfPresent(flat, "future_speed_target", label.Aux.FutureSpeedTarget)
+	appendIfPresent(flat, "future_yaw_delta", label.Aux.FutureYawDelta)
+	appendIfPresent(flat, "future_horizon_seconds", label.Aux.FutureHorizonSeconds)
+	appendIfPresent(flat, "yaw_rate", label.Aux.YawRate)
+	appendIfPresent(flat, "routeForwardDelta", label.Aux.RouteForwardDelta)
+	appendIfPresent(flat, "move_intent", label.Aux.MoveIntent)
+	return flat
+}
+
+func flattenGroupedTelemetry(item GroupedTelemetryItem) map[string]any {
+	flat := make(map[string]any)
+	appendIfPresent(flat, "Steering", item.Control.Steering)
+	appendIfPresent(flat, "acceleration", item.Control.Acceleration)
+	appendIfPresent(flat, "brakePressureAvg", item.Control.BrakePressureAvg)
+	appendIfPresent(flat, "currentSpeed", item.Aux.CurrentSpeed)
+	appendIfPresent(flat, "yaw", item.Aux.Yaw)
+	appendIfPresent(flat, "yawRate", item.Aux.YawRate)
+	appendIfPresent(flat, "routeForwardDelta", item.Aux.RouteForwardDelta)
+	appendIfPresent(flat, "routeHeadingError", item.Aux.RouteHeadingError)
+	appendIfPresent(flat, "routeDistance", item.Aux.RouteDistance)
+	appendIfPresent(flat, "leadVehicleDistance", item.Aux.LeadVehicleDistance)
+	appendIfPresent(flat, "hasLeadVehicle", item.Aux.HasLeadVehicle)
+	appendIfPresent(flat, "gps", item.Aux.GPS)
+	appendIfPresent(flat, "isStopped", item.Aux.IsStopped)
+	appendIfPresent(flat, "routeGpsValid", item.Aux.RouteGPSValid)
+	appendIfPresent(flat, "isStoppedAtTrafficLights", item.Aux.IsStoppedAtTraffic)
+	appendIfPresent(flat, "leadVehicleRelativeSpeed", item.Aux.LeadVehicleRelSpeed)
+	appendIfPresent(flat, "leadVehicleHeadingDelta", item.Aux.LeadVehicleHeadingDiff)
+	appendIfPresent(flat, "leadVehicleTTC", item.Aux.LeadVehicleTTC)
+	for key, value := range item.Raw {
+		flat[key] = cloneValue(value)
+	}
+	return flat
+}
+
+func appendIfPresent(target map[string]any, key string, value any) {
+	if value == nil {
+		return
+	}
+	target[key] = cloneValue(value)
 }
 
 func buildMoveIntentLabel(current map[string]any, moveIntentSpeedTarget float64, currentSpeed float64) bool {
@@ -1167,6 +1348,55 @@ func radiansToDegrees(value float64) float64 {
 	return value * 180.0 / math.Pi
 }
 
+func clampInt(value int, minimum int, maximum int) int {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func cloneMap(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = cloneValue(value)
+	}
+	return cloned
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneValue(item)
+		}
+		return cloned
+	case []float64:
+		cloned := make([]float64, len(typed))
+		copy(cloned, typed)
+		return cloned
+	case []string:
+		cloned := make([]string, len(typed))
+		copy(cloned, typed)
+		return cloned
+	case []int:
+		cloned := make([]int, len(typed))
+		copy(cloned, typed)
+		return cloned
+	default:
+		return value
+	}
+}
+
 func thinStoppedSamples(samples []DatasetSample, initialBurst int, spacingSeconds float64) []DatasetSample {
 	if len(samples) == 0 || initialBurst < 1 || spacingSeconds <= 0 {
 		return samples
@@ -1178,7 +1408,7 @@ func thinStoppedSamples(samples []DatasetSample, initialBurst int, spacingSecond
 	lastStoppedKeepTime := 0.0
 
 	for _, sample := range samples {
-		if isStoppedLabelValue(sample.Label["isStopped"]) {
+		if isStoppedLabelValue(sampleCurrentTelemetryValue(sample, "isStopped")) {
 			if !inStoppedRun {
 				inStoppedRun = true
 				stoppedKept = 1
@@ -1202,6 +1432,26 @@ func thinStoppedSamples(samples []DatasetSample, initialBurst int, spacingSecond
 	}
 
 	return filtered
+}
+
+func sampleCurrentTelemetry(sample DatasetSample) *GroupedTelemetryItem {
+	if len(sample.TelemetryHistory) > 0 {
+		return &sample.TelemetryHistory[len(sample.TelemetryHistory)-1]
+	}
+	return nil
+}
+
+func sampleCurrentTelemetryValue(sample DatasetSample, key string) any {
+	current := sampleCurrentTelemetry(sample)
+	if current != nil {
+		if value, ok := flattenGroupedTelemetry(*current)[key]; ok {
+			return value
+		}
+	}
+	if value, ok := flattenGroupedLabel(sample.Label)[key]; ok {
+		return value
+	}
+	return nil
 }
 
 func isStoppedLabelValue(value any) bool {

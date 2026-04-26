@@ -11,52 +11,68 @@ import (
 )
 
 const (
-	defaultTickHz              = 60
-	defaultSteerDeadzone       = 0.02
-	defaultMaxSteerScale       = 1.0
-	defaultSteerInputGain      = 1.0
-	defaultThrottleInputGain   = 1.0
-	defaultBrakeInputGain      = 1.0
-	defaultModelSteerScale     = 1.0
-	defaultModelAccelScale     = 1.0
-	defaultSteerRatePerSecond  = 6.0
-	defaultThrottleRatePerSec  = 4.0
-	defaultBrakeRatePerSecond  = 6.0
-	defaultActuatorURL         = "http://127.0.0.1:8080"
-	defaultActuatorHTTPTimeout = 500 * time.Millisecond
-	defaultStaleTimeout        = 250 * time.Millisecond
-	defaultHoldLastCommand     = false
+	defaultTickHz                = 60
+	defaultActuatorURL           = "http://127.0.0.1:8080"
+	defaultActuatorHTTPTimeout   = 500 * time.Millisecond
+	defaultStaleTimeout          = 250 * time.Millisecond
+	defaultHoldLastCommand       = false
+	defaultActuatorProfile       = "smooth"
+	defaultSteeringDeadzone      = 0.02
+	defaultThrottleDeadzone      = 0.03
+	defaultBrakeDeadzone         = 0.03
+	defaultSteeringMaxDelta      = 0.06
+	defaultThrottleMaxDelta      = 0.04
+	defaultBrakeMaxDelta         = 0.04
+	defaultSteeringAlpha         = 0.30
+	defaultThrottleAlpha         = 0.20
+	defaultBrakeAlpha            = 0.20
+	defaultFallbackDecay         = true
+	defaultFallbackSteerDecay    = 0.85
+	defaultFallbackThrottleDecay = 0.65
+	defaultFallbackBrakeDecay    = 0.65
+	defaultRecentCommandWindow   = 64
+	defaultSteeringGain          = 1.0
+	defaultThrottleGain          = 1.0
+	defaultThrottleFloor         = 0.0
 )
 
 type Config struct {
-	TickHz             int
-	StaleTimeout       time.Duration
-	HoldLastCommand    bool
-	SteerDeadzone      float64
-	MaxSteerScale      float64
-	SteerInputGain     float64
-	ThrottleInputGain  float64
-	BrakeInputGain     float64
-	ModelSteerScale    float64
-	ModelAccelScale    float64
-	SteerRatePerSecond float64
-	ThrottleRatePerSec float64
-	BrakeRatePerSecond float64
-	URL                string
-	RequestTimeout     time.Duration
+	TickHz                int
+	StaleTimeout          time.Duration
+	HoldLastCommand       bool
+	URL                   string
+	RequestTimeout        time.Duration
+	Profile               string
+	SteeringDeadzone      float64
+	ThrottleDeadzone      float64
+	BrakeDeadzone         float64
+	SteeringMaxDelta      float64
+	ThrottleMaxDelta      float64
+	BrakeMaxDelta         float64
+	SteeringAlpha         float64
+	ThrottleAlpha         float64
+	BrakeAlpha            float64
+	FallbackDecayEnabled  bool
+	FallbackSteeringDecay float64
+	FallbackThrottleDecay float64
+	FallbackBrakeDecay    float64
+	RecentCommandWindow   int
+	SteeringGain          float64
+	ThrottleGain          float64
+	ThrottleFloor         float64
 }
 
 type Tuning struct {
-	SteerDeadzone      float64 `json:"steerDeadzone"`
-	MaxSteerScale      float64 `json:"maxSteerScale"`
-	SteerInputGain     float64 `json:"steerInputGain"`
-	ThrottleInputGain  float64 `json:"throttleInputGain"`
-	BrakeInputGain     float64 `json:"brakeInputGain"`
-	ModelSteerScale    float64 `json:"modelSteerScale"`
-	ModelAccelScale    float64 `json:"modelAccelScale"`
-	SteerRatePerSecond float64 `json:"steerRatePerSecond"`
-	ThrottleRatePerSec float64 `json:"throttleRatePerSecond"`
-	BrakeRatePerSecond float64 `json:"brakeRatePerSecond"`
+	SteeringGain  float64 `json:"steeringGain"`
+	ThrottleGain  float64 `json:"throttleGain"`
+	ThrottleFloor float64 `json:"throttleFloor"`
+}
+
+type TuningState struct {
+	Live          Tuning `json:"live"`
+	Saved         Tuning `json:"saved"`
+	ConfigPath    string `json:"configPath,omitempty"`
+	SaveSupported bool   `json:"saveSupported"`
 }
 
 type configFile struct {
@@ -68,40 +84,56 @@ type backendSection struct {
 }
 
 type actuatorSection struct {
-	TickHz             int     `toml:"tick_hz"`
-	StaleTimeout       string  `toml:"stale_timeout"`
-	HoldLastCommand    *bool   `toml:"hold_last_command"`
-	SteerDeadzone      float64 `toml:"steer_deadzone"`
-	MaxSteerScale      float64 `toml:"max_steer_scale"`
-	SteerInputGain     float64 `toml:"steer_input_gain"`
-	ThrottleInputGain  float64 `toml:"throttle_input_gain"`
-	BrakeInputGain     float64 `toml:"brake_input_gain"`
-	ModelSteerScale    float64 `toml:"model_steer_scale"`
-	ModelAccelScale    float64 `toml:"model_accel_scale"`
-	SteerRatePerSecond float64 `toml:"steer_rate_per_second"`
-	ThrottleRatePerSec float64 `toml:"throttle_rate_per_second"`
-	BrakeRatePerSecond float64 `toml:"brake_rate_per_second"`
-	URL                string  `toml:"url"`
-	RequestTimeout     string  `toml:"request_timeout"`
+	TickHz                int      `toml:"tick_hz"`
+	StaleTimeout          string   `toml:"stale_timeout"`
+	HoldLastCommand       *bool    `toml:"hold_last_command"`
+	URL                   string   `toml:"url"`
+	RequestTimeout        string   `toml:"request_timeout"`
+	Profile               string   `toml:"profile"`
+	SteeringDeadzone      *float64 `toml:"steering_deadzone"`
+	ThrottleDeadzone      *float64 `toml:"throttle_deadzone"`
+	BrakeDeadzone         *float64 `toml:"brake_deadzone"`
+	SteeringMaxDelta      *float64 `toml:"steering_max_delta"`
+	ThrottleMaxDelta      *float64 `toml:"throttle_max_delta"`
+	BrakeMaxDelta         *float64 `toml:"brake_max_delta"`
+	SteeringAlpha         *float64 `toml:"steering_alpha"`
+	ThrottleAlpha         *float64 `toml:"throttle_alpha"`
+	BrakeAlpha            *float64 `toml:"brake_alpha"`
+	FallbackDecayEnabled  *bool    `toml:"fallback_decay_enabled"`
+	FallbackSteeringDecay *float64 `toml:"fallback_steering_decay"`
+	FallbackThrottleDecay *float64 `toml:"fallback_throttle_decay"`
+	FallbackBrakeDecay    *float64 `toml:"fallback_brake_decay"`
+	RecentCommandWindow   *int     `toml:"recent_command_window"`
+	SteeringGain          *float64 `toml:"steering_gain"`
+	ThrottleGain          *float64 `toml:"throttle_gain"`
+	ThrottleFloor         *float64 `toml:"throttle_floor"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		TickHz:             defaultTickHz,
-		StaleTimeout:       defaultStaleTimeout,
-		HoldLastCommand:    defaultHoldLastCommand,
-		SteerDeadzone:      defaultSteerDeadzone,
-		MaxSteerScale:      defaultMaxSteerScale,
-		SteerInputGain:     defaultSteerInputGain,
-		ThrottleInputGain:  defaultThrottleInputGain,
-		BrakeInputGain:     defaultBrakeInputGain,
-		ModelSteerScale:    defaultModelSteerScale,
-		ModelAccelScale:    defaultModelAccelScale,
-		SteerRatePerSecond: defaultSteerRatePerSecond,
-		ThrottleRatePerSec: defaultThrottleRatePerSec,
-		BrakeRatePerSecond: defaultBrakeRatePerSecond,
-		URL:                defaultActuatorURL,
-		RequestTimeout:     defaultActuatorHTTPTimeout,
+		TickHz:                defaultTickHz,
+		StaleTimeout:          defaultStaleTimeout,
+		HoldLastCommand:       defaultHoldLastCommand,
+		URL:                   defaultActuatorURL,
+		RequestTimeout:        defaultActuatorHTTPTimeout,
+		Profile:               defaultActuatorProfile,
+		SteeringDeadzone:      defaultSteeringDeadzone,
+		ThrottleDeadzone:      defaultThrottleDeadzone,
+		BrakeDeadzone:         defaultBrakeDeadzone,
+		SteeringMaxDelta:      defaultSteeringMaxDelta,
+		ThrottleMaxDelta:      defaultThrottleMaxDelta,
+		BrakeMaxDelta:         defaultBrakeMaxDelta,
+		SteeringAlpha:         defaultSteeringAlpha,
+		ThrottleAlpha:         defaultThrottleAlpha,
+		BrakeAlpha:            defaultBrakeAlpha,
+		FallbackDecayEnabled:  defaultFallbackDecay,
+		FallbackSteeringDecay: defaultFallbackSteerDecay,
+		FallbackThrottleDecay: defaultFallbackThrottleDecay,
+		FallbackBrakeDecay:    defaultFallbackBrakeDecay,
+		RecentCommandWindow:   defaultRecentCommandWindow,
+		SteeringGain:          defaultSteeringGain,
+		ThrottleGain:          defaultThrottleGain,
+		ThrottleFloor:         defaultThrottleFloor,
 	}
 }
 
@@ -131,35 +163,8 @@ func LoadConfig(path string) (Config, error) {
 	if section.HoldLastCommand != nil {
 		cfg.HoldLastCommand = *section.HoldLastCommand
 	}
-	if section.SteerDeadzone > 0 {
-		cfg.SteerDeadzone = section.SteerDeadzone
-	}
-	if section.MaxSteerScale > 0 {
-		cfg.MaxSteerScale = section.MaxSteerScale
-	}
-	if section.SteerInputGain > 0 {
-		cfg.SteerInputGain = section.SteerInputGain
-	}
-	if section.ThrottleInputGain > 0 {
-		cfg.ThrottleInputGain = section.ThrottleInputGain
-	}
-	if section.BrakeInputGain > 0 {
-		cfg.BrakeInputGain = section.BrakeInputGain
-	}
-	if section.ModelSteerScale > 0 {
-		cfg.ModelSteerScale = section.ModelSteerScale
-	}
-	if section.ModelAccelScale > 0 {
-		cfg.ModelAccelScale = section.ModelAccelScale
-	}
-	if section.SteerRatePerSecond > 0 {
-		cfg.SteerRatePerSecond = section.SteerRatePerSecond
-	}
-	if section.ThrottleRatePerSec > 0 {
-		cfg.ThrottleRatePerSec = section.ThrottleRatePerSec
-	}
-	if section.BrakeRatePerSecond > 0 {
-		cfg.BrakeRatePerSecond = section.BrakeRatePerSecond
+	if value := strings.TrimSpace(section.Profile); value != "" {
+		cfg.Profile = value
 	}
 	if value := strings.TrimSpace(section.URL); value != "" {
 		cfg.URL = strings.TrimRight(value, "/")
@@ -178,6 +183,58 @@ func LoadConfig(path string) (Config, error) {
 		}
 		cfg.RequestTimeout = duration
 	}
+	applyActuatorProfile(&cfg, cfg.Profile)
+	if section.SteeringDeadzone != nil {
+		cfg.SteeringDeadzone = *section.SteeringDeadzone
+	}
+	if section.ThrottleDeadzone != nil {
+		cfg.ThrottleDeadzone = *section.ThrottleDeadzone
+	}
+	if section.BrakeDeadzone != nil {
+		cfg.BrakeDeadzone = *section.BrakeDeadzone
+	}
+	if section.SteeringMaxDelta != nil {
+		cfg.SteeringMaxDelta = *section.SteeringMaxDelta
+	}
+	if section.ThrottleMaxDelta != nil {
+		cfg.ThrottleMaxDelta = *section.ThrottleMaxDelta
+	}
+	if section.BrakeMaxDelta != nil {
+		cfg.BrakeMaxDelta = *section.BrakeMaxDelta
+	}
+	if section.SteeringAlpha != nil {
+		cfg.SteeringAlpha = *section.SteeringAlpha
+	}
+	if section.ThrottleAlpha != nil {
+		cfg.ThrottleAlpha = *section.ThrottleAlpha
+	}
+	if section.BrakeAlpha != nil {
+		cfg.BrakeAlpha = *section.BrakeAlpha
+	}
+	if section.FallbackDecayEnabled != nil {
+		cfg.FallbackDecayEnabled = *section.FallbackDecayEnabled
+	}
+	if section.FallbackSteeringDecay != nil {
+		cfg.FallbackSteeringDecay = *section.FallbackSteeringDecay
+	}
+	if section.FallbackThrottleDecay != nil {
+		cfg.FallbackThrottleDecay = *section.FallbackThrottleDecay
+	}
+	if section.FallbackBrakeDecay != nil {
+		cfg.FallbackBrakeDecay = *section.FallbackBrakeDecay
+	}
+	if section.RecentCommandWindow != nil {
+		cfg.RecentCommandWindow = *section.RecentCommandWindow
+	}
+	if section.SteeringGain != nil {
+		cfg.SteeringGain = *section.SteeringGain
+	}
+	if section.ThrottleGain != nil {
+		cfg.ThrottleGain = *section.ThrottleGain
+	}
+	if section.ThrottleFloor != nil {
+		cfg.ThrottleFloor = *section.ThrottleFloor
+	}
 
 	if cfg.TickHz < 1 {
 		return Config{}, fmt.Errorf("backend actuator tick_hz must be > 0")
@@ -185,74 +242,134 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.StaleTimeout <= 0 {
 		return Config{}, fmt.Errorf("backend actuator stale_timeout must be > 0")
 	}
-	if err := ValidateTuning(cfg.Tuning()); err != nil {
-		return Config{}, err
-	}
 	if cfg.RequestTimeout <= 0 {
 		return Config{}, fmt.Errorf("backend actuator request_timeout must be > 0")
+	}
+	if err := validateProcessorConfig(cfg); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil
 }
 
+func applyActuatorProfile(cfg *Config, rawProfile string) {
+	profile := strings.ToLower(strings.TrimSpace(rawProfile))
+	switch profile {
+	case "", "smooth":
+		cfg.Profile = "smooth"
+		cfg.SteeringDeadzone = 0.02
+		cfg.ThrottleDeadzone = 0.03
+		cfg.BrakeDeadzone = 0.03
+		cfg.SteeringMaxDelta = 0.06
+		cfg.ThrottleMaxDelta = 0.04
+		cfg.BrakeMaxDelta = 0.04
+		cfg.SteeringAlpha = 0.30
+		cfg.ThrottleAlpha = 0.20
+		cfg.BrakeAlpha = 0.20
+	case "responsive":
+		cfg.Profile = "responsive"
+		cfg.SteeringDeadzone = 0.02
+		cfg.ThrottleDeadzone = 0.03
+		cfg.BrakeDeadzone = 0.03
+		cfg.SteeringMaxDelta = 0.08
+		cfg.ThrottleMaxDelta = 0.05
+		cfg.BrakeMaxDelta = 0.05
+		cfg.SteeringAlpha = 0.35
+		cfg.ThrottleAlpha = 0.25
+		cfg.BrakeAlpha = 0.25
+	case "debug_raw":
+		cfg.Profile = "debug_raw"
+		cfg.SteeringDeadzone = 0
+		cfg.ThrottleDeadzone = 0
+		cfg.BrakeDeadzone = 0
+		cfg.SteeringMaxDelta = 0
+		cfg.ThrottleMaxDelta = 0
+		cfg.BrakeMaxDelta = 0
+		cfg.SteeringAlpha = 1
+		cfg.ThrottleAlpha = 1
+		cfg.BrakeAlpha = 1
+	default:
+		cfg.Profile = profile
+	}
+}
+
+func validateProcessorConfig(cfg Config) error {
+	switch cfg.Profile {
+	case "smooth", "responsive", "debug_raw":
+	default:
+		return fmt.Errorf("backend actuator profile must be one of smooth, responsive, debug_raw")
+	}
+	for name, value := range map[string]float64{
+		"steering_deadzone":       cfg.SteeringDeadzone,
+		"throttle_deadzone":       cfg.ThrottleDeadzone,
+		"brake_deadzone":          cfg.BrakeDeadzone,
+		"steering_max_delta":      cfg.SteeringMaxDelta,
+		"throttle_max_delta":      cfg.ThrottleMaxDelta,
+		"brake_max_delta":         cfg.BrakeMaxDelta,
+		"fallback_steering_decay": cfg.FallbackSteeringDecay,
+		"fallback_throttle_decay": cfg.FallbackThrottleDecay,
+		"fallback_brake_decay":    cfg.FallbackBrakeDecay,
+		"steering_gain":           cfg.SteeringGain,
+		"throttle_gain":           cfg.ThrottleGain,
+		"throttle_floor":          cfg.ThrottleFloor,
+	} {
+		if value < 0 {
+			return fmt.Errorf("backend actuator %s must be >= 0", name)
+		}
+	}
+	for name, value := range map[string]float64{
+		"steering_alpha": cfg.SteeringAlpha,
+		"throttle_alpha": cfg.ThrottleAlpha,
+		"brake_alpha":    cfg.BrakeAlpha,
+	} {
+		if value < 0 || value > 1 {
+			return fmt.Errorf("backend actuator %s must be in [0,1]", name)
+		}
+	}
+	if cfg.SteeringDeadzone >= 1 || cfg.ThrottleDeadzone >= 1 || cfg.BrakeDeadzone >= 1 {
+		return fmt.Errorf("backend actuator deadzones must be < 1")
+	}
+	if cfg.FallbackSteeringDecay > 1 || cfg.FallbackThrottleDecay > 1 || cfg.FallbackBrakeDecay > 1 {
+		return fmt.Errorf("backend actuator fallback decay values must be <= 1")
+	}
+	if cfg.SteeringGain == 0 {
+		return fmt.Errorf("backend actuator steering_gain must be > 0")
+	}
+	if cfg.ThrottleGain == 0 {
+		return fmt.Errorf("backend actuator throttle_gain must be > 0")
+	}
+	if cfg.ThrottleFloor > 1 {
+		return fmt.Errorf("backend actuator throttle_floor must be in [0,1]")
+	}
+	if cfg.RecentCommandWindow < 1 {
+		return fmt.Errorf("backend actuator recent_command_window must be > 0")
+	}
+	return nil
+}
+
 func (c Config) Tuning() Tuning {
 	return Tuning{
-		SteerDeadzone:      c.SteerDeadzone,
-		MaxSteerScale:      c.MaxSteerScale,
-		SteerInputGain:     c.SteerInputGain,
-		ThrottleInputGain:  c.ThrottleInputGain,
-		BrakeInputGain:     c.BrakeInputGain,
-		ModelSteerScale:    c.ModelSteerScale,
-		ModelAccelScale:    c.ModelAccelScale,
-		SteerRatePerSecond: c.SteerRatePerSecond,
-		ThrottleRatePerSec: c.ThrottleRatePerSec,
-		BrakeRatePerSecond: c.BrakeRatePerSecond,
+		SteeringGain:  c.SteeringGain,
+		ThrottleGain:  c.ThrottleGain,
+		ThrottleFloor: c.ThrottleFloor,
 	}
 }
 
 func (c *Config) ApplyTuning(tuning Tuning) {
-	c.SteerDeadzone = tuning.SteerDeadzone
-	c.MaxSteerScale = tuning.MaxSteerScale
-	c.SteerInputGain = tuning.SteerInputGain
-	c.ThrottleInputGain = tuning.ThrottleInputGain
-	c.BrakeInputGain = tuning.BrakeInputGain
-	c.ModelSteerScale = tuning.ModelSteerScale
-	c.ModelAccelScale = tuning.ModelAccelScale
-	c.SteerRatePerSecond = tuning.SteerRatePerSecond
-	c.ThrottleRatePerSec = tuning.ThrottleRatePerSec
-	c.BrakeRatePerSecond = tuning.BrakeRatePerSecond
+	c.SteeringGain = tuning.SteeringGain
+	c.ThrottleGain = tuning.ThrottleGain
+	c.ThrottleFloor = tuning.ThrottleFloor
 }
 
 func ValidateTuning(tuning Tuning) error {
-	if tuning.SteerDeadzone < 0 || tuning.SteerDeadzone >= 1 {
-		return fmt.Errorf("backend actuator steer_deadzone must be in [0,1)")
+	if tuning.SteeringGain <= 0 {
+		return fmt.Errorf("backend actuator steering_gain must be > 0")
 	}
-	if tuning.MaxSteerScale <= 0 || tuning.MaxSteerScale > 1 {
-		return fmt.Errorf("backend actuator max_steer_scale must be in (0,1]")
+	if tuning.ThrottleGain <= 0 {
+		return fmt.Errorf("backend actuator throttle_gain must be > 0")
 	}
-	if tuning.SteerInputGain <= 0 {
-		return fmt.Errorf("backend actuator steer_input_gain must be > 0")
-	}
-	if tuning.ThrottleInputGain <= 0 {
-		return fmt.Errorf("backend actuator throttle_input_gain must be > 0")
-	}
-	if tuning.BrakeInputGain <= 0 {
-		return fmt.Errorf("backend actuator brake_input_gain must be > 0")
-	}
-	if tuning.ModelSteerScale <= 0 {
-		return fmt.Errorf("backend actuator model_steer_scale must be > 0")
-	}
-	if tuning.ModelAccelScale <= 0 {
-		return fmt.Errorf("backend actuator model_accel_scale must be > 0")
-	}
-	if tuning.SteerRatePerSecond <= 0 {
-		return fmt.Errorf("backend actuator steer_rate_per_second must be > 0")
-	}
-	if tuning.ThrottleRatePerSec <= 0 {
-		return fmt.Errorf("backend actuator throttle_rate_per_second must be > 0")
-	}
-	if tuning.BrakeRatePerSecond <= 0 {
-		return fmt.Errorf("backend actuator brake_rate_per_second must be > 0")
+	if tuning.ThrottleFloor < 0 || tuning.ThrottleFloor > 1 {
+		return fmt.Errorf("backend actuator throttle_floor must be in [0,1]")
 	}
 	return nil
 }
@@ -276,24 +393,16 @@ func SaveTuning(path string, tuning Tuning) error {
 	}
 
 	backend := ensureMap(parsed, "backend")
-	actuatorSection := ensureMap(backend, "actuator")
-	actuatorSection["steer_deadzone"] = tuning.SteerDeadzone
-	actuatorSection["max_steer_scale"] = tuning.MaxSteerScale
-	actuatorSection["steer_input_gain"] = tuning.SteerInputGain
-	actuatorSection["throttle_input_gain"] = tuning.ThrottleInputGain
-	actuatorSection["brake_input_gain"] = tuning.BrakeInputGain
-	actuatorSection["model_steer_scale"] = tuning.ModelSteerScale
-	actuatorSection["model_accel_scale"] = tuning.ModelAccelScale
-	actuatorSection["steer_rate_per_second"] = tuning.SteerRatePerSecond
-	actuatorSection["throttle_rate_per_second"] = tuning.ThrottleRatePerSec
-	actuatorSection["brake_rate_per_second"] = tuning.BrakeRatePerSecond
+	section := ensureMap(backend, "actuator")
+	section["steering_gain"] = tuning.SteeringGain
+	section["throttle_gain"] = tuning.ThrottleGain
+	section["throttle_floor"] = tuning.ThrottleFloor
 
 	encoded, err := toml.Marshal(parsed)
 	if err != nil {
 		return err
 	}
-
-	return os.WriteFile(path, encoded, 0644)
+	return os.WriteFile(path, encoded, 0o644)
 }
 
 func ensureMap(target map[string]any, key string) map[string]any {
@@ -302,7 +411,6 @@ func ensureMap(target map[string]any, key string) map[string]any {
 			return typed
 		}
 	}
-
 	next := map[string]any{}
 	target[key] = next
 	return next

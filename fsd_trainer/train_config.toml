@@ -1,4 +1,9 @@
 [backend]
+[backend.training]
+python_bin = 'python'
+train_script = 'fsd_trainer/src/gta_fsd/train.py'
+jobs_dir = 'S:\fsd_fivem_data\training_jobs'
+
 [backend.actuator]
 brake_input_gain = 2.0
 brake_rate_per_second = 3.0
@@ -14,6 +19,39 @@ throttle_input_gain = 10.0
 throttle_rate_per_second = 10.0
 tick_hz = 15
 url = 'http://127.0.0.1:8080'
+
+[backend.translation]
+steer_deadzone = 0.0
+max_steer_scale = 1.0
+steer_output_gain = 10.0
+throttle_gain = 10.0
+brake_gain = 1.0
+brake_activation_threshold = 0.18
+overspeed_brake_margin_mps = 0.75
+brake_release_margin_mps = 0.20
+brake_enter_hold_seconds = 0.18
+throttle_hold_min = 0.12
+throttle_ramp_up_per_second = 0.75
+throttle_decay_per_second = 0.90
+heading_deadband_deg = 2.5
+heading_full_lock_deg = 45.0
+low_speed_steer_gain = 1.35
+high_speed_steer_gain = 0.75
+steer_gain_fade_speed_mps = 5.0
+steer_response_blend = 0.55
+steer_command_rate_per_second = 4.0
+target_speed_error_gain = 0.7
+target_accel_gain = 0.25
+longitudinal_deadband = 0.05
+launch_throttle_min = 0.22
+launch_speed_threshold = 1.0
+launch_target_speed_margin = 0.75
+max_target_speed_kph = 17.0
+motion_confidence_on_threshold = 0.6
+motion_confidence_off_threshold = 0.4
+motion_hold_speed_max = 4.0
+min_lateral_confidence = 0.05
+min_longitudinal_confidence = 0.05
 
 [backend.inference]
 auto_load = true
@@ -37,6 +75,8 @@ move_intent_off_threshold = 0.4
 move_intent_on_threshold = 0.6
 move_intent_threshold = 0.55
 request_timeout = '5s'
+inference_timeout = '250ms'
+alignment_tolerance = '125ms'
 source_id = 'monitor-2'
 steer_gain_fade_speed_mps = 5.0
 steer_command_rate_per_second = 4.0
@@ -48,19 +88,29 @@ target_speed_error_gain = 0.7
 data_root = 'S:\fsd_fivem_data'
 delta_speed_clip = 2.0
 delta_speed_normalize = true
-frame_stride = 2
 image_height = 480
 image_width = 480
+window_size = 5
+image_offsets = [-8, -6, -4, -2, 0]
 label_tolerance = '100ms'
+telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
+future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_feature_names = ['current_speed', 'yaw_sin', 'yaw_cos', 'yaw_rate', 'steering', 'acceleration']
+control_target_names = ['steering', 'acceleration', 'brakePressureAvg']
+aux_target_names = ['future_speed', 'future_yaw_delta', 'future_yaw_rate']
+frame_stride = 2
 sample_stride = 10
 sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
-train_run_ids = ['2026-04-17_02-40-43AM_i79xhm', '2026-04-17_03-49-45AM_sdx54h', '2026-04-17_04-22-50AM_z4122y', '2026-04-17_06-43-20AM_l9iojs', '2026-04-17_07-15-43AM_uq6bn9', '2026-04-19_05-02-23AM_kovr34', '2026-04-20_08-44-45AM_1mvu7z']
-val_run_ids = ['2026-04-17_03-06-46AM_kv6jng', '2026-04-17_08-12-45AM_0zz7wc', '2026-04-17_08-52-20AM_fpkezz', '2026-04-17_09-15-03AM_qm66eg']
-window_size = 5
+train_run_ids = [
+    '2026-04-22_07-59-55AM_ebuyil'
+]
+val_run_ids = [
+    '2026-04-21_06-36-44PM_dkq5gb'
+]
 
 [inference]
-checkpoint = 'fsd_trainer/src/gta_fsd/fsd_trainer/training_runs/run-20260419-230810/epoch-001.pt'
+checkpoint = 'fsd_trainer/training_runs/run-20260422-043856/epoch-010.pt'
 data_root = 'S:\fsd_fivem_data'
 device = 'cuda'
 output_json = false
@@ -70,8 +120,8 @@ sample_index = 400
 [loader]
 cpu_batch_size = 32
 log_every_n_batches = 10
-train_batch_size = 40
-train_num_workers = 8
+train_batch_size = 32
+train_num_workers = 6
 train_persistent_workers = false
 train_pin_memory = true
 train_prefetch_factor = 1
@@ -84,10 +134,10 @@ val_split = 1.0
 
 [loader.turn_oversampling]
 enabled = true
-straight_weight = 1.0
-light_turn_weight = 1.5
-medium_turn_weight = 2.5
-sharp_turn_weight = 2.0
+straight_weight = 0.4
+light_turn_weight = 2.5
+medium_turn_weight = 1.5
+sharp_turn_weight = 0.4
 light_turn_threshold = 0.05
 medium_turn_threshold = 0.15
 sharp_turn_threshold = 0.30
@@ -95,42 +145,16 @@ sharp_turn_threshold = 0.30
 [output]
 base_dir = 'fsd_trainer/training_runs'
 
-[state_inputs.current_speed]
-enabled = true
-cap = 25.0
-fusion = 'legacy'
-
-[state_inputs.route_forward_delta]
-enabled = true
-cap = 1.5
-fusion = 'legacy'
+[model]
+width_multiplier = 1.5
+telemetry_hidden_dim = 128
 
 [training]
 device = 'auto'
-early_stopping_metric = 'control_overall_mae'
+early_stopping_metric = 'val_loss'
 early_stopping_min_delta = 0.0
 early_stopping_patience = 3
-epochs = 15
+epochs = 150
 learning_rate = 0.001
-
-[training.consistency]
-future_speed_vs_delta_speed_weight = 0.5
-yaw_delta_vs_yaw_rate_weight = 1.5
-yaw_rate_scale_to_degrees = 57.29577951308232
-
-[training.yaw_loss_weighting]
-enabled = false
-base_weight = 1.0
-alpha = 2.0
-tau = 0.25
-max_scale = 3.0
-
-[training.loss_weights]
-delta_speed = 0.5
-future_speed = 1.5
-future_yaw_delta = 2.2
-is_stopped = 0.0
-move_intent = 0.8
-route_xy = 0.0
-speed = 0.0
-yaw_rate = 0.6
+aux_loss_weight = 0.3
+horizon_loss_weights = [1.0, 0.9, 0.8, 0.65, 0.5, 0.4]

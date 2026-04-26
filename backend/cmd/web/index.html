@@ -39,7 +39,7 @@
                 linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%);
         }
 
-        button, input, select {
+        button, input, select, textarea {
             font: inherit;
         }
 
@@ -275,6 +275,16 @@
             line-height: 1.34;
             font-weight: 500;
             word-break: break-word;
+            transition: color 140ms ease, text-shadow 140ms ease;
+        }
+
+        .status-value.live-change {
+            color: #f8fdff;
+            text-shadow: 0 0 14px rgba(56, 189, 248, 0.45);
+        }
+
+        .status-value.stale {
+            color: #fdba74;
         }
 
         .pill {
@@ -321,6 +331,11 @@
             grid-template-columns: minmax(0, 1fr) auto;
         }
 
+        .controls-row.controls-row-halves {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            align-items: start;
+        }
+
         .field {
             display: grid;
             gap: 8px;
@@ -331,16 +346,21 @@
             color: var(--muted);
         }
 
-        select, input, button {
+        select, input, textarea, button {
             width: 100%;
             border-radius: 14px;
             border: 1px solid var(--line);
         }
 
-        select, input {
+        select, input, textarea {
             padding: 14px 16px;
             background: #0b1220;
             color: var(--text);
+        }
+
+        textarea {
+            min-height: 140px;
+            resize: vertical;
         }
 
         input[type="number"] {
@@ -441,9 +461,23 @@
             font-size: 13px;
         }
 
+        .tuning-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
         .inspector-grid {
             display: grid;
             grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.55fr);
+            gap: 18px;
+            align-items: start;
+        }
+
+        .training-grid {
+            display: grid;
+            grid-template-columns: minmax(340px, 1fr) minmax(420px, 1.2fr);
             gap: 18px;
             align-items: start;
         }
@@ -492,6 +526,50 @@
             text-transform: uppercase;
             border: 1px solid var(--line-strong);
             color: var(--muted);
+        }
+
+        .training-run-list {
+            max-height: 320px;
+            overflow: auto;
+            padding-right: 4px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .training-run-option {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 12px;
+            align-items: start;
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+        }
+
+        .training-run-option input {
+            margin-top: 2px;
+            width: 18px;
+            height: 18px;
+        }
+
+        .training-run-body {
+            display: grid;
+            gap: 4px;
+            min-width: 0;
+        }
+
+        .training-run-title {
+            color: var(--text);
+            font-size: 14px;
+            font-weight: 600;
+            word-break: break-word;
+        }
+
+        .training-run-meta {
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.4;
         }
 
         .field-actions {
@@ -588,6 +666,151 @@
             border: 1px solid var(--line);
         }
 
+        .key-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .key-grid.single-column {
+            grid-template-columns: 1fr;
+        }
+
+        .key-card {
+            display: grid;
+            gap: 8px;
+            padding: 12px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+        }
+
+        .key-card.override {
+            border-color: rgba(56, 189, 248, 0.34);
+            box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.12);
+        }
+
+        .key-card .field-note {
+            display: block;
+        }
+
+        .runtime-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .runtime-meta-item {
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            display: grid;
+            gap: 6px;
+        }
+
+        .runtime-meta-item strong {
+            font-size: 14px;
+        }
+
+        .runtime-meta-item span {
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .job-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 10px;
+        }
+
+        .job-row {
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            display: grid;
+            gap: 10px;
+        }
+
+        .job-row-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .job-row-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .job-title {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .job-summary,
+        .job-meta {
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .job-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .job-detail-item {
+            padding: 12px 14px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+            display: grid;
+            gap: 6px;
+        }
+
+        .job-detail-item strong {
+            font-size: 12px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .job-detail-item span {
+            font-size: 14px;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .log-frame {
+            min-height: 220px;
+            max-height: 420px;
+            overflow: auto;
+            padding: 14px;
+            border-radius: 16px;
+            background: #08111f;
+            border: 1px solid var(--line);
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        #training-selected-log {
+            min-height: 420px;
+            max-height: 760px;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
@@ -629,7 +852,8 @@
 
         @media (max-width: 1080px) {
             .grid-2,
-            .inspector-grid {
+            .inspector-grid,
+            .training-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -639,7 +863,10 @@
             .tuning-grid,
             .stats-grid,
             .controls-row,
-            .inspector-toolbar {
+            .inspector-toolbar,
+            .key-grid,
+            .runtime-meta-grid,
+            .job-detail-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -674,7 +901,7 @@
             .page-nav {
                 width: 100%;
                 display: grid;
-                grid-template-columns: 1fr 1fr;
+                grid-template-columns: repeat(3, 1fr);
             }
 
             .page-tab {
@@ -695,13 +922,14 @@
 
     <section class="hero">
         <span class="eyebrow">FiveM Local Control</span>
-        <h1>Run scenes and inspect trip data.</h1>
+        <h1>Run scenes, inspect data, and manage training.</h1>
         <p class="lead">
-            Keep scene control, inference, and actuator tuning on one page, then switch to the data inspector to compare raw run telemetry and processed training labels from the same run.
+            Keep scene control, inference, translation tuning, run inspection, and backend training jobs in one place without leaving the local control UI.
         </p>
         <nav class="page-nav" aria-label="Primary">
             <button id="page-tab-control" class="page-tab active" data-page-tab="control" type="button">Control</button>
             <button id="page-tab-inspector" class="page-tab" data-page-tab="inspector" type="button">Data Inspector</button>
+            <button id="page-tab-training" class="page-tab" data-page-tab="training" type="button">Training</button>
         </nav>
     </section>
 
@@ -787,53 +1015,53 @@
 
         <section class="card">
             <div class="card-title-row">
-                <h2>Latest Prediction</h2>
-                <span class="subtle">Planner outputs, runtime context, and actuator state.</span>
+                <h2>Live Control Loop</h2>
+                <span class="subtle">Only live telemetry, planner output, actuator processing, and controller output. Values pulse when they change.</span>
             </div>
             <div class="prediction-sections">
                 <div>
-                    <h3 class="section-heading">Planner Signals</h3>
+                    <h3 class="section-heading">Live Telemetry</h3>
                     <div class="inference-grid">
                         <div class="status-item">
-                            <span class="status-label">Inference State</span>
+                            <span class="status-label">Loop State</span>
                             <div id="inference-state" class="status-value">idle</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Steer Command</span>
+                            <span class="status-label">Speed</span>
                             <div id="inference-steering" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Future Yaw Delta</span>
+                            <span class="status-label">Yaw</span>
                             <div id="inference-future-yaw-delta" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Derived Future Yaw</span>
+                            <span class="status-label">Yaw Rate</span>
                             <div id="inference-future-yaw" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Current Yaw</span>
+                            <span class="status-label">Steering</span>
                             <div id="inference-current-yaw" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Heading Error Deg</span>
+                            <span class="status-label">Acceleration</span>
                             <div id="inference-heading-error" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Future Speed</span>
+                            <span class="status-label">Telemetry Age</span>
                             <div id="inference-future-speed" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Delta Speed</span>
+                            <span class="status-label">Game Time</span>
                             <div id="inference-delta-speed" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Move Intent</span>
+                            <span class="status-label">FiveM Link</span>
                             <div id="inference-move-intent" class="status-value">None</div>
                         </div>
                     </div>
                 </div>
                 <div>
-                    <h3 class="section-heading">Runtime Context</h3>
+                    <h3 class="section-heading">Planner Output</h3>
                     <div class="inference-grid">
                         <div class="status-item">
                             <span class="status-label">Prediction Seq</span>
@@ -848,11 +1076,11 @@
                             <div id="inference-predicted-at" class="status-value">None</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Control Semantics</span>
+                            <span class="status-label">Raw Blend</span>
                             <div id="inference-control-semantics" class="status-value">unknown</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Debug Frames</span>
+                            <span class="status-label">Final Command</span>
                             <div id="inference-debug-frames" class="status-value">0 / 0</div>
                         </div>
                         <div class="status-item span-2">
@@ -860,16 +1088,49 @@
                             <div id="inference-window-indices" class="status-value">None</div>
                         </div>
                         <div class="status-item span-4">
-                            <span class="status-label">Frame Hashes</span>
+                            <span class="status-label">Telemetry Window</span>
                             <div id="inference-frame-hashes" class="status-value">None</div>
                         </div>
                         <div class="status-item span-2">
-                            <span class="status-label">Debug Dump Dir</span>
+                            <span class="status-label">Raw Horizons</span>
                             <div id="inference-debug-dir" class="status-value">None</div>
                         </div>
                         <div class="status-item span-2">
                             <span class="status-label">Inference Error</span>
                             <div id="inference-error" class="status-value">None</div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="section-heading">Actuator Processor</h3>
+                    <div class="inference-grid">
+                        <div class="status-item">
+                            <span class="status-label">Source</span>
+                            <div id="translation-mode" class="status-value">idle</div>
+                        </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Raw Input</span>
+                            <div id="translation-command" class="status-value">None</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Final Output</span>
+                            <div id="translation-submit-status" class="status-value">idle</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Clamp / Deadzone</span>
+                            <div id="translation-heading" class="status-value">0.000 / 0.000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Rate / Smooth</span>
+                            <div id="translation-longitudinal" class="status-value">0.000 / 0.000 / 0.000 / 0.000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Recent Range</span>
+                            <div id="translation-drive-state" class="status-value">hold=0.000 throttle-only</div>
+                        </div>
+                        <div class="status-item span-4">
+                            <span class="status-label">Processor Counters</span>
+                            <div id="translation-reasons" class="status-value">None</div>
                         </div>
                     </div>
                 </div>
@@ -890,11 +1151,11 @@
                         </div>
                         <div class="status-item span-2">
                             <span class="status-label">Target Input</span>
-                            <div id="actuator-target" class="status-value">steer=0.000 throttle=0.000 brake=0.000</div>
+                            <div id="actuator-target" class="status-value">steer=0.000 throttle=0.000</div>
                         </div>
                         <div class="status-item span-2">
                             <span class="status-label">Applied Input</span>
-                            <div id="actuator-applied" class="status-value">steer=0.000 throttle=0.000 brake=0.000</div>
+                            <div id="actuator-applied" class="status-value">steer=0.000 throttle=0.000</div>
                         </div>
                     </div>
                 </div>
@@ -903,70 +1164,65 @@
 
         <section class="card">
             <div class="card-title-row">
-                <h2>Actuator Tuning</h2>
-                <span class="subtle">Live gains, rates, and raw-model normalization.</span>
+                <h2>Live Actuator Tuning</h2>
+                <span class="subtle">Scale normalized planner output before it reaches the controller.</span>
             </div>
-            <p class="muted">Edit the raw-model scales and live driving gains, apply them immediately to the running controller loop, then save the values that feel right.</p>
+            <p class="muted">These controls are on the active planner path. Increase steering gain and throttle gain if the controller feels too weak. Use throttle floor to keep small positive throttle from collapsing to zero.</p>
             <div class="tuning-grid">
-                <label class="field" for="tuning-steer-input-gain">
-                    <span class="status-label">Steer Gain</span>
-                    <input id="tuning-steer-input-gain" type="number" step="0.001">
-                    <span id="saved-steer-input-gain" class="field-note">Saved: --</span>
+                <label class="field" for="translation-tuning-target-speed-gain">
+                    <span class="status-label">Steering Gain</span>
+                    <input id="translation-tuning-target-speed-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="translation-saved-target-speed-gain">1.000</span></span>
                 </label>
-                <label class="field" for="tuning-steer-deadzone">
-                    <span class="status-label">Steer Deadzone</span>
-                    <input id="tuning-steer-deadzone" type="number" step="0.001" min="0">
-                    <span id="saved-steer-deadzone" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-max-steer-scale">
-                    <span class="status-label">Max Steer Scale</span>
-                    <input id="tuning-max-steer-scale" type="number" step="0.001" min="0">
-                    <span id="saved-max-steer-scale" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-steer-rate">
-                    <span class="status-label">Steer Rate</span>
-                    <input id="tuning-steer-rate" type="number" step="0.001" min="0">
-                    <span id="saved-steer-rate" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-throttle-input-gain">
+                <label class="field" for="translation-tuning-throttle-gain">
                     <span class="status-label">Throttle Gain</span>
-                    <input id="tuning-throttle-input-gain" type="number" step="0.001" min="0">
-                    <span id="saved-throttle-input-gain" class="field-note">Saved: --</span>
+                    <input id="translation-tuning-throttle-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="translation-saved-throttle-gain">1.000</span></span>
                 </label>
-                <label class="field" for="tuning-throttle-rate">
-                    <span class="status-label">Throttle Rate</span>
-                    <input id="tuning-throttle-rate" type="number" step="0.001" min="0">
-                    <span id="saved-throttle-rate" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-brake-input-gain">
-                    <span class="status-label">Brake Gain</span>
-                    <input id="tuning-brake-input-gain" type="number" step="0.001" min="0">
-                    <span id="saved-brake-input-gain" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-model-steer-scale">
-                    <span class="status-label">Raw Steer Scale</span>
-                    <input id="tuning-model-steer-scale" type="number" step="0.001" min="0">
-                    <span id="saved-model-steer-scale" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-model-accel-scale">
-                    <span class="status-label">Raw Accel Scale</span>
-                    <input id="tuning-model-accel-scale" type="number" step="0.001" min="0">
-                    <span id="saved-model-accel-scale" class="field-note">Saved: --</span>
-                </label>
-                <label class="field" for="tuning-brake-rate">
-                    <span class="status-label">Brake Rate</span>
-                    <input id="tuning-brake-rate" type="number" step="0.001" min="0">
-                    <span id="saved-brake-rate" class="field-note">Saved: --</span>
+                <label class="field" for="translation-tuning-throttle-hold-min">
+                    <span class="status-label">Throttle Floor</span>
+                    <input id="translation-tuning-throttle-hold-min" type="number" step="0.01" min="0" max="1">
+                    <span class="field-note">Saved <span id="translation-saved-throttle-hold-min">0.000</span></span>
                 </label>
             </div>
-            <div class="button-grid">
-                <button id="actuator-apply" class="primary">Apply Live</button>
-                <button id="actuator-reset" class="secondary">Reset to Saved</button>
-                <button id="actuator-save" class="secondary">Save to Config</button>
+            <div class="tuning-actions">
+                <button id="translation-tuning-apply" class="secondary">Apply Live Tuning</button>
+                <button id="translation-tuning-reset" class="secondary">Reset Live Tuning</button>
+                <button id="translation-tuning-save" class="secondary">Save Tuning</button>
             </div>
             <div class="tuning-meta">
-                <span id="actuator-config-path">Config file: unavailable</span>
-                <span class="muted">Live changes take effect on the next actuator tick.</span>
+                <span id="translation-tuning-status">Live tuning unavailable.</span>
+                <span id="translation-tuning-config">Config file: unavailable</span>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-title-row">
+                <h2>Error Surface</h2>
+                <span class="subtle">Every active runtime/backend error in one place while the hot panel handles live tuning.</span>
+            </div>
+            <p class="muted">Traceability stays visible even while you tune the translation layer live. Runtime, inference, translator, and actuator failures stay grouped here.</p>
+            <div class="inference-grid">
+                <div class="status-item span-2">
+                    <span class="status-label">Runtime Error</span>
+                    <div id="ui-error-runtime" class="status-value">None</div>
+                </div>
+                <div class="status-item span-2">
+                    <span class="status-label">Inference Error</span>
+                    <div id="ui-error-inference" class="status-value">None</div>
+                </div>
+                <div class="status-item span-2">
+                    <span class="status-label">Translation Error</span>
+                    <div id="ui-error-translation" class="status-value">None</div>
+                </div>
+                <div class="status-item span-2">
+                    <span class="status-label">Actuator Error</span>
+                    <div id="ui-error-actuator" class="status-value">None</div>
+                </div>
+                <div class="status-item span-4">
+                    <span class="status-label">Translation Config</span>
+                    <div id="ui-translation-config" class="status-value">Config file: unavailable</div>
+                </div>
             </div>
         </section>
     </section>
@@ -1068,6 +1324,194 @@
                         </table>
                     </div>
                     <div id="data-table-empty" class="empty-state">Choose fields and load a trip to render the history table.</div>
+                </article>
+            </div>
+        </section>
+    </section>
+
+    <section id="page-training" class="page-panel" hidden>
+        <section class="training-grid">
+            <div class="stack">
+                <article class="card">
+                    <div class="card-title-row">
+                        <h2>Training Defaults</h2>
+                        <span class="subtle">Base config values and runtime paths for queued training jobs.</span>
+                    </div>
+                    <div id="training-runtime-meta" class="runtime-meta-grid"></div>
+                </article>
+
+                <article class="card">
+                    <div class="card-title-row">
+                        <h2>Create Job</h2>
+                        <span class="subtle">Queue one training run with optimizer, sampling, fusion, and dataset split overrides.</span>
+                    </div>
+                    <div class="controls">
+                        <div class="controls-row">
+                            <label class="field" for="training-name">
+                                <span class="status-label">Name</span>
+                                <input id="training-name" type="text" placeholder="future-yaw sweep a">
+                            </label>
+                            <label class="field" for="training-learning-rate">
+                                <span class="status-label">Learning Rate</span>
+                                <input id="training-learning-rate" type="number" step="0.000001" min="0">
+                            </label>
+                            <label class="field" for="training-epochs">
+                                <span class="status-label">Epochs</span>
+                                <input id="training-epochs" type="number" step="1" min="1">
+                            </label>
+                        </div>
+                        <label class="field" for="training-notes">
+                            <span class="status-label">Notes</span>
+                            <textarea id="training-notes" placeholder="Why this run exists, what changed, and what you expect to learn."></textarea>
+                        </label>
+                        <div class="stack">
+                            <div>
+                                <h3 class="section-heading">Head Loss Weights</h3>
+                                <div id="training-loss-weights" class="key-grid"></div>
+                            </div>
+                            <div>
+                                <h3 class="section-heading">Consistency Weights</h3>
+                                <div id="training-consistency" class="key-grid"></div>
+                            </div>
+                            <div>
+                                <div class="card-title-row">
+                                    <h3 class="section-heading">Yaw Loss Weighting</h3>
+                                    <label class="status-label">
+                                        <input id="training-yaw-loss-weighting-enabled" type="checkbox">
+                                        Enabled
+                                    </label>
+                                </div>
+                                <div id="training-yaw-loss-weighting" class="key-grid"></div>
+                            </div>
+                            <div>
+                                <div class="card-title-row">
+                                    <h3 class="section-heading">Turn Oversampling</h3>
+                                    <label class="status-label">
+                                        <input id="training-turn-oversampling-enabled" type="checkbox">
+                                        Enabled
+                                    </label>
+                                </div>
+                                <div id="training-turn-oversampling" class="key-grid"></div>
+                            </div>
+                            <div>
+                                <h3 class="section-heading">Dataset Split</h3>
+                            <div class="controls-row controls-row-halves">
+                                <div class="field">
+                                    <span class="status-label">Width Multiplier</span>
+                                    <input id="training-width-multiplier" type="number" step="0.1" min="0.1" placeholder="1.5">
+                                </div>
+                                <div class="field">
+                                    <span class="status-label">Training Runs</span>
+                                    <div id="training-train-run-list" class="training-run-list"></div>
+                                </div>
+                                <div class="field">
+                                    <span class="status-label">Validation Runs</span>
+                                        <div id="training-val-run-list" class="training-run-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <h3 class="section-heading">State Inputs</h3>
+                                <div id="training-state-inputs" class="stack"></div>
+                            </div>
+                        </div>
+                        <div class="button-grid">
+                            <button id="training-queue-job" class="primary" type="button">Queue Job</button>
+                            <button id="training-reset-defaults" class="secondary" type="button">Reset to Defaults</button>
+                            <button id="training-use-last" class="ghost" type="button">Use Last Values</button>
+                        </div>
+                        <div id="training-banner" class="banner" aria-live="polite"></div>
+                    </div>
+                </article>
+
+                <article class="card">
+                    <div class="card-title-row">
+                        <h2>Batch Queue JSON</h2>
+                        <span class="subtle">Paste one job object or an array of job objects for quick sweeps.</span>
+                    </div>
+                    <div class="controls">
+                        <label class="field" for="training-batch-json">
+                            <span class="status-label">Job Spec JSON</span>
+                            <textarea id="training-batch-json" placeholder='[{"name":"yaw","epochs":15,"learningRate":0.001,"widthMultiplier":1.5,"trainRunIds":["2026-04-21_07-35-15PM_tga5xm"],"valRunIds":["2026-04-21_01-15-24AM_3t2ph2"],"turnOversampling":{"enabled":true},"stateInputs":{"currentSpeed":{"enabled":true,"heads":["future_speed","delta_speed"]}}}]'></textarea>
+                        </label>
+                        <div class="button-grid">
+                            <button id="training-load-yaw-batch" class="ghost" type="button">Load 4 Yaw Samples</button>
+                            <button id="training-queue-batch" class="secondary" type="button">Queue Batch</button>
+                        </div>
+                    </div>
+                </article>
+            </div>
+
+            <div class="stack">
+                <article class="card">
+                    <div class="card-title-row">
+                        <h2>Queue And Active Job</h2>
+                        <span class="subtle">Monitor FIFO queue state and stop the active trainer if needed.</span>
+                    </div>
+                    <div class="stack">
+                        <div>
+                            <h3 class="section-heading">Queued Jobs</h3>
+                            <ul id="training-queue-list" class="job-list"></ul>
+                            <div id="training-queue-empty" class="empty-state">No queued training jobs.</div>
+                        </div>
+                        <div>
+                            <div class="card-title-row">
+                                <h3>Active Job</h3>
+                                <button id="training-stop-active" class="danger" type="button">Stop Active Job</button>
+                            </div>
+                            <div id="training-active-summary" class="job-detail-grid"></div>
+                            <div id="training-active-empty" class="empty-state">No active training job.</div>
+                        </div>
+                        <div>
+                            <h3 class="section-heading">Active Log Tail</h3>
+                            <pre id="training-active-log" class="log-frame">No active log.</pre>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="card">
+                    <div class="card-title-row">
+                        <h2>Recent Jobs</h2>
+                        <span class="subtle">Inspect terminal jobs, derived config paths, and captured logs.</span>
+                    </div>
+                    <div class="stack">
+                        <div class="controls-row">
+                            <label class="field" for="training-recent-search">
+                                <span class="status-label">Search</span>
+                                <input id="training-recent-search" type="search" placeholder="Filter by name, id, or error">
+                            </label>
+                            <label class="field" for="training-recent-status">
+                                <span class="status-label">Status Filter</span>
+                                <select id="training-recent-status">
+                                    <option value="all">All Terminal Jobs</option>
+                                    <option value="completed">Completed</option>
+                                    <option value="failed">Failed</option>
+                                    <option value="canceled">Canceled</option>
+                                    <option value="stopped">Stopped</option>
+                                </select>
+                            </label>
+                            <div class="field-actions">
+                                <button id="training-clear-history" class="ghost" type="button">Clear History</button>
+                            </div>
+                        </div>
+                        <ul id="training-recent-list" class="job-list"></ul>
+                        <div id="training-recent-empty" class="empty-state">No completed, failed, canceled, or stopped jobs yet.</div>
+                        <div>
+                            <div class="card-title-row">
+                                <h3>Selected Job Details</h3>
+                                <div class="field-actions">
+                                    <button id="training-requeue-selected" class="ghost" type="button">Requeue Selected</button>
+                                    <button id="training-delete-selected" class="ghost" type="button">Delete Selected</button>
+                                </div>
+                            </div>
+                            <div id="training-selected-summary" class="job-detail-grid"></div>
+                            <div id="training-selected-empty" class="empty-state">Select a recent or queued job to inspect its full details.</div>
+                        </div>
+                        <div>
+                            <h3 class="section-heading">Selected Job Log</h3>
+                            <pre id="training-selected-log" class="log-frame">No job selected.</pre>
+                        </div>
+                    </div>
                 </article>
             </div>
         </section>

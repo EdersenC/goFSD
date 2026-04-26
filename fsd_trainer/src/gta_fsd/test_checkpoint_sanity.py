@@ -13,7 +13,7 @@ from checkpoint_sanity import (
     resolve_latest_debug_dir,
     summarize_control_ranges,
 )
-from train import DatasetConfig, LoaderConfig, OutputConfig, TrainConfig, TrainingConfig
+from train import DatasetConfig, LoaderConfig, ModelConfig, OutputConfig, TrainConfig, TrainingConfig
 
 
 def make_train_config() -> TrainConfig:
@@ -31,17 +31,14 @@ def make_train_config() -> TrainConfig:
             sample_stride=10,
         ),
         output=OutputConfig(base_dir="/tmp/out"),
+        model=ModelConfig(width_multiplier=1.0, telemetry_hidden_dim=128),
         training=TrainingConfig(
             device="cpu",
             epochs=1,
             learning_rate=1e-3,
-            early_stopping_metric="control_overall_mae",
+            early_stopping_metric="val_loss",
             early_stopping_patience=1,
             early_stopping_min_delta=0.0,
-            head_loss_weights={},
-            yaw_consistency_weight=0.0,
-            yaw_rate_scale_to_degrees=57.29577951308232,
-            speed_consistency_weight=0.0,
         ),
         loader=LoaderConfig(
             train_batch_size=1,

@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import sys
 import time
 import tomllib
-from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,95 +15,41 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, Dataset as TorchDataset, Sampler, Subset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset as TorchDataset, Subset
 
 from config import (
+    DEFAULT_AUX_LOSS_WEIGHT,
+    DEFAULT_AUX_TARGET_NAMES,
+    DEFAULT_CONTROL_TARGET_NAMES,
+    DEFAULT_FUTURE_OFFSETS,
+    DEFAULT_HORIZON_LOSS_WEIGHTS,
     DEFAULT_IMAGE_HEIGHT,
+    DEFAULT_IMAGE_OFFSETS,
     DEFAULT_IMAGE_WIDTH,
+    DEFAULT_SAMPLE_STRIDE,
+    DEFAULT_TELEMETRY_FEATURE_NAMES,
+    DEFAULT_TELEMETRY_HIDDEN_DIM,
+    DEFAULT_TELEMETRY_OFFSETS,
     normalize_windows_drive_path,
-    parse_delta_speed_target_transform,
-    parse_dataset_window,
+    parse_temporal_dataset_config,
 )
-from dataset import DatasetStateInputs, DatasetTargets, FsdDataset
-from heads import (
-    CURRENT_SPEED_TARGET_KEY,
-    DELTA_SPEED_HEAD_NAME,
-    FUTURE_HORIZON_SECONDS_TARGET_KEY,
-    FUTURE_SPEED_HEAD_NAME,
-    FUTURE_YAW_DELTA_HEAD_NAME,
-    YAW_RATE_HEAD_NAME,
-    HEAD_SPECS,
-    HeadSpec,
-    apply_loss_weight_overrides,
-    compute_head_loss,
-    head_layout_metadata,
-    head_specs_metadata,
-    inactive_loss_weight_override_names,
-    normalize_head_tensor,
-    supported_metric_names,
-)
+from dataset import DatasetItem, FsdDataset
 from models.planner import DrivingCNN
-from state_inputs import (
-    CURRENT_SPEED_KEY,
-    ROUTE_FORWARD_DELTA_KEY,
-    StateInputConfig,
-    current_speed_fused_head_names,
-    route_forward_delta_fused_head_names,
-    state_inputs_metadata,
-    training_state_input_config,
-)
-from target_transforms import (
-    DeltaSpeedTargetTransform,
-    default_delta_speed_target_transform,
-    denormalize_delta_speed_tensor,
-)
 
 
 MetricPayload = dict[str, Any]
+PLANNER_FORMAT = "temporal_telemetry_gru_v1"
+DEFAULT_WIDTH_MULTIPLIER = 1.0
 
 
 try:
     import psutil  # type: ignore[import-not-found]
 except ImportError:
     psutil = None
-
-
-@dataclass(frozen=True)
-class DatasetConfig:
-    data_root: str
-    train_run_ids: tuple[str, ...]
-    val_run_ids: tuple[str, ...]
-    train_run_paths: tuple[str, ...]
-    val_run_paths: tuple[str, ...]
-    image_width: int
-    image_height: int
-    window_size: int
-    frame_stride: int
-    sample_stride: int
-    delta_speed_transform: DeltaSpeedTargetTransform = field(default_factory=default_delta_speed_target_transform)
-
-
-@dataclass(frozen=True)
-class OutputConfig:
-    base_dir: str
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    device: str
-    epochs: int
-    learning_rate: float
-    early_stopping_metric: str
-    early_stopping_patience: int
-    early_stopping_min_delta: float
-    head_loss_weights: dict[str, float]
-    yaw_consistency_weight: float
-    yaw_rate_scale_to_degrees: float
-    speed_consistency_weight: float
-    yaw_loss_weighting: "YawLossWeightingConfig" = field(default_factory=lambda: YawLossWeightingConfig())
 
 
 @dataclass(frozen=True)
@@ -128,6 +74,54 @@ class TurnOversamplingConfig:
 
 
 @dataclass(frozen=True)
+class DatasetConfig:
+    data_root: str
+    train_run_ids: tuple[str, ...]
+    val_run_ids: tuple[str, ...]
+    train_run_paths: tuple[str, ...]
+    val_run_paths: tuple[str, ...]
+    image_width: int = DEFAULT_IMAGE_WIDTH
+    image_height: int = DEFAULT_IMAGE_HEIGHT
+    image_offsets: tuple[int, ...] = DEFAULT_IMAGE_OFFSETS
+    telemetry_offsets: tuple[int, ...] = DEFAULT_TELEMETRY_OFFSETS
+    future_offsets: tuple[int, ...] = DEFAULT_FUTURE_OFFSETS
+    telemetry_feature_names: tuple[str, ...] = DEFAULT_TELEMETRY_FEATURE_NAMES
+    control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES
+    aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES
+    window_size: int = len(DEFAULT_IMAGE_OFFSETS)
+    frame_stride: int = 2
+    sample_stride: int = DEFAULT_SAMPLE_STRIDE
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    base_dir: str
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    width_multiplier: float = DEFAULT_WIDTH_MULTIPLIER
+    telemetry_hidden_dim: int = DEFAULT_TELEMETRY_HIDDEN_DIM
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    device: str
+    epochs: int
+    learning_rate: float
+    early_stopping_metric: str = "val_loss"
+    early_stopping_patience: int = 3
+    early_stopping_min_delta: float = 0.0
+    aux_loss_weight: float = DEFAULT_AUX_LOSS_WEIGHT
+    horizon_loss_weights: tuple[float, ...] = DEFAULT_HORIZON_LOSS_WEIGHTS
+    head_loss_weights: dict[str, float] = field(default_factory=dict)
+    yaw_consistency_weight: float = 0.0
+    yaw_rate_scale_to_degrees: float = 57.29577951308232
+    speed_consistency_weight: float = 0.0
+    yaw_loss_weighting: YawLossWeightingConfig = field(default_factory=lambda: YawLossWeightingConfig())
+
+
+@dataclass(frozen=True)
 class LoaderConfig:
     train_batch_size: int
     train_num_workers: int
@@ -149,9 +143,10 @@ class LoaderConfig:
 class TrainConfig:
     dataset: DatasetConfig
     output: OutputConfig
+    model: ModelConfig
     training: TrainingConfig
     loader: LoaderConfig
-    state_inputs: StateInputConfig = field(default_factory=training_state_input_config)
+    state_inputs: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -163,22 +158,17 @@ class TrainingContext:
     data_root: Path
     train_dataset: FsdDataset
     val_dataset: FsdDataset
-    val_subset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]
+    val_subset: TorchDataset[DatasetItem]
     selected_val_trip_count: int
     total_val_trip_count: int
-    head_specs: tuple[HeadSpec, ...]
     model: Module
     device: torch.device
     optimizer: Optimizer
     scaler: torch.amp.GradScaler
-    train_sample_shape: tuple[int, ...]
-    train_state_input_shapes: dict[str, tuple[int, ...]]
-    train_target_shapes: dict[str, tuple[int, ...]]
-    ignored_loss_weight_overrides: tuple[str, ...]
-    state_input_config: StateInputConfig
-    delta_speed_transform: DeltaSpeedTargetTransform
-    train_sampler_weights: Tensor | None = None
-    train_sampler_summary: dict[str, Any] = field(default_factory=dict)
+    train_image_shape: tuple[int, ...]
+    train_telemetry_shape: tuple[int, ...]
+    train_target_control_shape: tuple[int, ...]
+    train_target_aux_shape: tuple[int, ...]
 
 
 @dataclass
@@ -224,7 +214,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "train_config.toml"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the GTA FSD planner model.")
+    parser = argparse.ArgumentParser(description="Train the GTA temporal telemetry GRU planner model.")
     parser.add_argument(
         "--config",
         type=Path,
@@ -232,135 +222,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Path to the training TOML config. Default: {DEFAULT_CONFIG_PATH}",
     )
     return parser.parse_args()
-
-
-def load_config(path: Path) -> TrainConfig:
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    dataset_raw = raw["dataset"]
-    output_raw = raw["output"]
-    training_raw = raw["training"]
-    loader_raw = raw["loader"]
-    state_inputs_raw = raw.get("state_inputs")
-    window_size, frame_stride, sample_stride = parse_dataset_window(raw)
-    data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
-    train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
-    val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
-
-    legacy_batch_size = loader_raw.get("batch_size", loader_raw["cpu_batch_size"])
-    legacy_num_workers = loader_raw.get("num_workers", 0)
-    legacy_pin_memory = loader_raw.get("pin_memory", False)
-    legacy_prefetch_factor = loader_raw.get("prefetch_factor", 1)
-    legacy_persistent_workers = loader_raw.get("persistent_workers", False)
-
-    return TrainConfig(
-        dataset=DatasetConfig(
-            data_root=data_root,
-            train_run_ids=train_run_ids,
-            val_run_ids=val_run_ids,
-            train_run_paths=_resolve_run_paths_from_ids(data_root, train_run_ids),
-            val_run_paths=_resolve_run_paths_from_ids(data_root, val_run_ids),
-            image_width=int(dataset_raw.get("image_width", DEFAULT_IMAGE_WIDTH)),
-            image_height=int(dataset_raw.get("image_height", DEFAULT_IMAGE_HEIGHT)),
-            window_size=window_size,
-            frame_stride=frame_stride,
-            sample_stride=sample_stride,
-            delta_speed_transform=parse_delta_speed_target_transform(raw),
-        ),
-        output=OutputConfig(base_dir=str(output_raw["base_dir"])),
-        training=TrainingConfig(
-            device=str(training_raw["device"]).strip().lower(),
-            epochs=int(training_raw["epochs"]),
-            learning_rate=float(training_raw["learning_rate"]),
-            early_stopping_metric=str(training_raw.get("early_stopping_metric", "overall_mae")).strip(),
-            early_stopping_patience=int(training_raw.get("early_stopping_patience", 3)),
-            early_stopping_min_delta=float(training_raw.get("early_stopping_min_delta", 0.0)),
-            head_loss_weights={
-                str(name): float(weight)
-                for name, weight in dict(training_raw.get("loss_weights", {})).items()
-            },
-            yaw_consistency_weight=float(
-                dict(training_raw.get("consistency", {})).get("yaw_delta_vs_yaw_rate_weight", 0.0)
-            ),
-            yaw_rate_scale_to_degrees=float(
-                dict(training_raw.get("consistency", {})).get("yaw_rate_scale_to_degrees", 57.29577951308232)
-            ),
-            speed_consistency_weight=float(
-                dict(training_raw.get("consistency", {})).get("future_speed_vs_delta_speed_weight", 0.0)
-            ),
-            yaw_loss_weighting=_load_yaw_loss_weighting_config(training_raw),
-        ),
-        loader=LoaderConfig(
-            train_batch_size=int(loader_raw.get("train_batch_size", legacy_batch_size)),
-            train_num_workers=int(loader_raw.get("train_num_workers", legacy_num_workers)),
-            train_pin_memory=bool(loader_raw.get("train_pin_memory", legacy_pin_memory)),
-            train_prefetch_factor=int(loader_raw.get("train_prefetch_factor", legacy_prefetch_factor)),
-            train_persistent_workers=bool(
-                loader_raw.get("train_persistent_workers", legacy_persistent_workers)
-            ),
-            val_batch_size=int(loader_raw.get("val_batch_size", legacy_batch_size)),
-            val_num_workers=int(loader_raw.get("val_num_workers", legacy_num_workers)),
-            val_pin_memory=bool(loader_raw.get("val_pin_memory", legacy_pin_memory)),
-            val_prefetch_factor=int(loader_raw.get("val_prefetch_factor", legacy_prefetch_factor)),
-            val_persistent_workers=bool(
-                loader_raw.get("val_persistent_workers", legacy_persistent_workers)
-            ),
-            log_every_n_batches=max(1, int(loader_raw.get("log_every_n_batches", 10))),
-            val_split=float(loader_raw["val_split"]),
-            cpu_batch_size=int(loader_raw["cpu_batch_size"]),
-            turn_oversampling=_load_turn_oversampling_config(loader_raw),
-        ),
-        state_inputs=training_state_input_config(state_inputs_raw),
-    )
-
-
-def _load_yaw_loss_weighting_config(training_raw: dict[str, Any]) -> YawLossWeightingConfig:
-    raw = training_raw.get("yaw_loss_weighting", {})
-    if not isinstance(raw, dict):
-        raise ValueError("training.yaw_loss_weighting must be a table")
-
-    config = YawLossWeightingConfig(
-        enabled=bool(raw.get("enabled", False)),
-        base_weight=float(raw.get("base_weight", 1.0)),
-        alpha=float(raw.get("alpha", 2.0)),
-        tau=float(raw.get("tau", 0.25)),
-        max_scale=float(raw.get("max_scale", 3.0)),
-    )
-    if config.base_weight <= 0.0:
-        raise ValueError("training.yaw_loss_weighting.base_weight must be > 0")
-    if config.alpha < 0.0:
-        raise ValueError("training.yaw_loss_weighting.alpha must be >= 0")
-    if config.tau <= 0.0:
-        raise ValueError("training.yaw_loss_weighting.tau must be > 0")
-    if config.max_scale <= 0.0:
-        raise ValueError("training.yaw_loss_weighting.max_scale must be > 0")
-    return config
-
-
-def _load_turn_oversampling_config(loader_raw: dict[str, Any]) -> TurnOversamplingConfig:
-    raw = loader_raw.get("turn_oversampling", {})
-    if not isinstance(raw, dict):
-        raise ValueError("loader.turn_oversampling must be a table")
-
-    config = TurnOversamplingConfig(
-        enabled=bool(raw.get("enabled", False)),
-        straight_weight=float(raw.get("straight_weight", 1.0)),
-        light_turn_weight=float(raw.get("light_turn_weight", 1.5)),
-        medium_turn_weight=float(raw.get("medium_turn_weight", 2.5)),
-        sharp_turn_weight=float(raw.get("sharp_turn_weight", 4.0)),
-        light_turn_threshold=float(raw.get("light_turn_threshold", 0.05)),
-        medium_turn_threshold=float(raw.get("medium_turn_threshold", 0.15)),
-        sharp_turn_threshold=float(raw.get("sharp_turn_threshold", 0.30)),
-    )
-    for field_name in ("straight_weight", "light_turn_weight", "medium_turn_weight", "sharp_turn_weight"):
-        if getattr(config, field_name) <= 0.0:
-            raise ValueError(f"loader.turn_oversampling.{field_name} must be > 0")
-    if config.light_turn_threshold < 0.0:
-        raise ValueError("loader.turn_oversampling.light_turn_threshold must be >= 0")
-    if config.medium_turn_threshold < config.light_turn_threshold:
-        raise ValueError("loader.turn_oversampling.medium_turn_threshold must be >= light_turn_threshold")
-    if config.sharp_turn_threshold < config.medium_turn_threshold:
-        raise ValueError("loader.turn_oversampling.sharp_turn_threshold must be >= medium_turn_threshold")
-    return config
 
 
 def _optional_str(value: Any) -> str | None:
@@ -380,11 +241,7 @@ def _resolve_training_run_ids(
     if raw_value is not None:
         if not isinstance(raw_value, list):
             raise ValueError(f"dataset.{key} must be a TOML array of run ids")
-        run_ids = tuple(
-            str(item).strip()
-            for item in raw_value
-            if str(item).strip()
-        )
+        run_ids = tuple(str(item).strip() for item in raw_value if str(item).strip())
         if not run_ids:
             raise ValueError(f"dataset.{key} must contain at least one run id")
         return run_ids
@@ -399,6 +256,116 @@ def _resolve_run_paths_from_ids(data_root: str, run_ids: tuple[str, ...]) -> tup
     return tuple(str(Path(data_root) / "runs" / run_id) for run_id in run_ids)
 
 
+def _infer_frame_stride(image_offsets: tuple[int, ...]) -> int:
+    if len(image_offsets) < 2:
+        return 1
+    strides = {image_offsets[index + 1] - image_offsets[index] for index in range(len(image_offsets) - 1)}
+    if len(strides) == 1:
+        return max(1, int(next(iter(strides))))
+    return 1
+
+
+def _parse_horizon_loss_weights(training_raw: dict[str, Any], horizon: int) -> tuple[float, ...]:
+    raw_weights = training_raw.get("horizon_loss_weights", list(DEFAULT_HORIZON_LOSS_WEIGHTS))
+    if not isinstance(raw_weights, list) or not raw_weights:
+        raise ValueError("training.horizon_loss_weights must be a non-empty TOML array")
+    weights = tuple(float(item) for item in raw_weights)
+    if len(weights) != horizon:
+        raise ValueError(
+            "training.horizon_loss_weights must match dataset.future_offsets length: "
+            f"weights={len(weights)} future_offsets={horizon}"
+        )
+    if any(weight <= 0.0 for weight in weights):
+        raise ValueError("training.horizon_loss_weights must contain only positive values")
+    return weights
+
+
+def load_config(path: Path) -> TrainConfig:
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    dataset_raw = raw["dataset"]
+    output_raw = raw["output"]
+    model_raw = raw.get("model", {})
+    training_raw = raw["training"]
+    loader_raw = raw["loader"]
+
+    data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
+    train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
+    val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
+    (
+        image_offsets,
+        telemetry_offsets,
+        future_offsets,
+        telemetry_feature_names,
+        control_target_names,
+        aux_target_names,
+    ) = parse_temporal_dataset_config(raw)
+
+    legacy_batch_size = loader_raw.get("batch_size", loader_raw["cpu_batch_size"])
+    legacy_num_workers = loader_raw.get("num_workers", 0)
+    legacy_pin_memory = loader_raw.get("pin_memory", False)
+    legacy_prefetch_factor = loader_raw.get("prefetch_factor", 1)
+    legacy_persistent_workers = loader_raw.get("persistent_workers", False)
+
+    return TrainConfig(
+        dataset=DatasetConfig(
+            data_root=data_root,
+            train_run_ids=train_run_ids,
+            val_run_ids=val_run_ids,
+            train_run_paths=_resolve_run_paths_from_ids(data_root, train_run_ids),
+            val_run_paths=_resolve_run_paths_from_ids(data_root, val_run_ids),
+            image_width=int(dataset_raw.get("image_width", DEFAULT_IMAGE_WIDTH)),
+            image_height=int(dataset_raw.get("image_height", DEFAULT_IMAGE_HEIGHT)),
+            image_offsets=image_offsets,
+            telemetry_offsets=telemetry_offsets,
+            future_offsets=future_offsets,
+            telemetry_feature_names=telemetry_feature_names,
+            control_target_names=control_target_names,
+            aux_target_names=aux_target_names,
+            window_size=len(image_offsets),
+            frame_stride=int(dataset_raw.get("frame_stride", _infer_frame_stride(image_offsets))),
+            sample_stride=int(dataset_raw.get("sample_stride", max(future_offsets))),
+        ),
+        output=OutputConfig(base_dir=str(output_raw["base_dir"])),
+        model=ModelConfig(
+            width_multiplier=float(model_raw.get("width_multiplier", DEFAULT_WIDTH_MULTIPLIER)),
+            telemetry_hidden_dim=int(model_raw.get("telemetry_hidden_dim", DEFAULT_TELEMETRY_HIDDEN_DIM)),
+        ),
+        training=TrainingConfig(
+            device=str(training_raw.get("device", "auto")).strip().lower(),
+            epochs=int(training_raw["epochs"]),
+            learning_rate=float(training_raw["learning_rate"]),
+            early_stopping_metric=str(training_raw.get("early_stopping_metric", "val_loss")).strip(),
+            early_stopping_patience=int(training_raw.get("early_stopping_patience", 3)),
+            early_stopping_min_delta=float(training_raw.get("early_stopping_min_delta", 0.0)),
+            aux_loss_weight=float(training_raw.get("aux_loss_weight", DEFAULT_AUX_LOSS_WEIGHT)),
+            horizon_loss_weights=_parse_horizon_loss_weights(training_raw, len(future_offsets)),
+            head_loss_weights={
+                str(name): float(weight)
+                for name, weight in dict(training_raw.get("loss_weights", {})).items()
+            },
+        ),
+        loader=LoaderConfig(
+            train_batch_size=int(loader_raw.get("train_batch_size", legacy_batch_size)),
+            train_num_workers=int(loader_raw.get("train_num_workers", legacy_num_workers)),
+            train_pin_memory=bool(loader_raw.get("train_pin_memory", legacy_pin_memory)),
+            train_prefetch_factor=int(loader_raw.get("train_prefetch_factor", legacy_prefetch_factor)),
+            train_persistent_workers=bool(
+                loader_raw.get("train_persistent_workers", legacy_persistent_workers)
+            ),
+            val_batch_size=int(loader_raw.get("val_batch_size", legacy_batch_size)),
+            val_num_workers=int(loader_raw.get("val_num_workers", legacy_num_workers)),
+            val_pin_memory=bool(loader_raw.get("val_pin_memory", legacy_pin_memory)),
+            val_prefetch_factor=int(loader_raw.get("val_prefetch_factor", legacy_prefetch_factor)),
+            val_persistent_workers=bool(
+                loader_raw.get("val_persistent_workers", legacy_persistent_workers)
+            ),
+            log_every_n_batches=max(1, int(loader_raw.get("log_every_n_batches", 10))),
+            val_split=float(loader_raw["val_split"]),
+            cpu_batch_size=int(loader_raw["cpu_batch_size"]),
+        ),
+    )
+
+
 def prepare_output_paths(base_output_dir: Path) -> tuple[Path, Path]:
     run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = base_output_dir / f"run-{run_stamp}"
@@ -411,9 +378,7 @@ def save_epoch_artifacts(
     epoch_index: int,
     model: Module,
     optimizer: Optimizer,
-    frame_window_size: int,
-    frame_stride: int,
-    sample_stride: int,
+    config: TrainConfig,
     train_metrics: MetricPayload,
     val_metrics: MetricPayload,
     train_epoch_time: float,
@@ -424,56 +389,39 @@ def save_epoch_artifacts(
     avg_forward_backward_time: float,
     avg_optimizer_time: float,
     avg_iteration_time: float,
-    head_specs: tuple[HeadSpec, ...],
-    state_input_config: StateInputConfig,
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-    speed_consistency_weight: float,
-    yaw_loss_weighting: YawLossWeightingConfig,
-    turn_oversampling: TurnOversamplingConfig,
-    state_input_fusion_heads: dict[str, list[str]],
-    train_sampler_summary: dict[str, Any],
 ) -> dict[str, Any]:
     checkpoint_path = run_dir / f"epoch-{epoch_index:03d}.pt"
-    checkpoint_payload = {
+    metadata = {
         "epoch": epoch_index,
+        "planner_format": PLANNER_FORMAT,
+        "planner_format_version": 1,
+        "frame_window_size": config.dataset.window_size,
+        "frame_stride": config.dataset.frame_stride,
+        "sample_stride": config.dataset.sample_stride,
+        "input_channels": config.dataset.window_size * 3,
+        "image_size": {
+            "width": config.dataset.image_width,
+            "height": config.dataset.image_height,
+        },
+        "image_offsets": list(config.dataset.image_offsets),
+        "telemetry_offsets": list(config.dataset.telemetry_offsets),
+        "future_offsets": list(config.dataset.future_offsets),
+        "telemetry_feature_names": list(config.dataset.telemetry_feature_names),
+        "control_target_names": list(config.dataset.control_target_names),
+        "aux_target_names": list(config.dataset.aux_target_names),
+        "model": {
+            "width_multiplier": config.model.width_multiplier,
+            "telemetry_hidden_dim": config.model.telemetry_hidden_dim,
+        },
+        "training": {
+            "aux_loss_weight": config.training.aux_loss_weight,
+            "horizon_loss_weights": list(config.training.horizon_loss_weights),
+            "early_stopping_metric": config.training.early_stopping_metric,
+            "early_stopping_patience": config.training.early_stopping_patience,
+            "early_stopping_min_delta": config.training.early_stopping_min_delta,
+        },
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "frame_window_size": frame_window_size,
-        "frame_stride": frame_stride,
-        "sample_stride": sample_stride,
-        "input_channels": frame_window_size * 3,
-        "state_inputs": state_inputs_metadata(state_input_config),
-        "delta_speed_target_transform": delta_speed_transform.metadata(),
-        "yaw_consistency": {
-            "yaw_delta_vs_yaw_rate_weight": yaw_consistency_weight,
-            "yaw_rate_scale_to_degrees": yaw_rate_scale_to_degrees,
-        },
-        "speed_consistency": {
-            "future_speed_vs_delta_speed_weight": speed_consistency_weight,
-        },
-        "yaw_loss_weighting": {
-            "enabled": yaw_loss_weighting.enabled,
-            "base_weight": yaw_loss_weighting.base_weight,
-            "alpha": yaw_loss_weighting.alpha,
-            "tau": yaw_loss_weighting.tau,
-            "max_scale": yaw_loss_weighting.max_scale,
-        },
-        "turn_oversampling": {
-            "enabled": turn_oversampling.enabled,
-            "straight_weight": turn_oversampling.straight_weight,
-            "light_turn_weight": turn_oversampling.light_turn_weight,
-            "medium_turn_weight": turn_oversampling.medium_turn_weight,
-            "sharp_turn_weight": turn_oversampling.sharp_turn_weight,
-            "light_turn_threshold": turn_oversampling.light_turn_threshold,
-            "medium_turn_threshold": turn_oversampling.medium_turn_threshold,
-            "sharp_turn_threshold": turn_oversampling.sharp_turn_threshold,
-        },
-        "state_input_fusion_heads": state_input_fusion_heads,
-        "train_sampler": train_sampler_summary,
-        "head_specs": head_specs_metadata(head_specs),
-        "head_layout": head_layout_metadata(head_specs),
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
         "train_epoch_s": train_epoch_time,
@@ -485,54 +433,11 @@ def save_epoch_artifacts(
         "avg_optimizer_s": avg_optimizer_time,
         "avg_iteration_s": avg_iteration_time,
     }
-    torch.save(checkpoint_payload, checkpoint_path)
+    torch.save(metadata, checkpoint_path)
     return {
         "epoch": epoch_index,
         "checkpoint": str(checkpoint_path),
-        "frame_window_size": frame_window_size,
-        "frame_stride": frame_stride,
-        "sample_stride": sample_stride,
-        "input_channels": frame_window_size * 3,
-        "state_inputs": state_inputs_metadata(state_input_config),
-        "delta_speed_target_transform": delta_speed_transform.metadata(),
-        "yaw_consistency": {
-            "yaw_delta_vs_yaw_rate_weight": yaw_consistency_weight,
-            "yaw_rate_scale_to_degrees": yaw_rate_scale_to_degrees,
-        },
-        "speed_consistency": {
-            "future_speed_vs_delta_speed_weight": speed_consistency_weight,
-        },
-        "yaw_loss_weighting": {
-            "enabled": yaw_loss_weighting.enabled,
-            "base_weight": yaw_loss_weighting.base_weight,
-            "alpha": yaw_loss_weighting.alpha,
-            "tau": yaw_loss_weighting.tau,
-            "max_scale": yaw_loss_weighting.max_scale,
-        },
-        "turn_oversampling": {
-            "enabled": turn_oversampling.enabled,
-            "straight_weight": turn_oversampling.straight_weight,
-            "light_turn_weight": turn_oversampling.light_turn_weight,
-            "medium_turn_weight": turn_oversampling.medium_turn_weight,
-            "sharp_turn_weight": turn_oversampling.sharp_turn_weight,
-            "light_turn_threshold": turn_oversampling.light_turn_threshold,
-            "medium_turn_threshold": turn_oversampling.medium_turn_threshold,
-            "sharp_turn_threshold": turn_oversampling.sharp_turn_threshold,
-        },
-        "state_input_fusion_heads": state_input_fusion_heads,
-        "train_sampler": train_sampler_summary,
-        "head_specs": head_specs_metadata(head_specs),
-        "head_layout": head_layout_metadata(head_specs),
-        "train_metrics": train_metrics,
-        "val_metrics": val_metrics,
-        "train_epoch_s": train_epoch_time,
-        "val_epoch_s": val_epoch_time,
-        "avg_batch_s": avg_batch_time,
-        "avg_loader_wait_s": avg_loader_wait_time,
-        "avg_h2d_s": avg_h2d_time,
-        "avg_forward_backward_s": avg_forward_backward_time,
-        "avg_optimizer_s": avg_optimizer_time,
-        "avg_iteration_s": avg_iteration_time,
+        **{key: value for key, value in metadata.items() if key not in {"model_state_dict", "optimizer_state_dict"}},
     }
 
 
@@ -553,27 +458,20 @@ def select_device(requested: str) -> torch.device:
 def probe_device(
     model: Module,
     device: torch.device,
+    *,
     image_size: tuple[int, int],
     frame_count: int,
-    state_input_config: StateInputConfig,
+    telemetry_length: int,
+    telemetry_feature_dim: int,
 ) -> bool:
     if device.type != "cuda":
         return True
     try:
         image_width, image_height = image_size
-        probe_batch = torch.zeros((1, frame_count * 3, image_height, image_width), device=device)
-        probe_speed = None
-        probe_route_forward_delta = None
-        if state_input_config.current_speed_enabled:
-            probe_speed = torch.zeros((1,), device=device)
-        if state_input_config.route_forward_delta_enabled:
-            probe_route_forward_delta = torch.zeros((1,), device=device)
+        probe_images = torch.zeros((1, frame_count, 3, image_height, image_width), device=device)
+        probe_telemetry = torch.zeros((1, telemetry_length, telemetry_feature_dim), device=device)
         with torch.no_grad():
-            _ = model(
-                probe_batch,
-                current_speed=probe_speed,
-                route_forward_delta=probe_route_forward_delta,
-            )
+            _ = model(probe_images, probe_telemetry)
         return True
     except RuntimeError as exc:
         message = str(exc).lower()
@@ -583,25 +481,22 @@ def probe_device(
 
 
 def _build_phase_loader(
-    dataset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+    dataset: TorchDataset[DatasetItem],
     *,
     device: torch.device,
     batch_size: int,
     shuffle: bool,
-    sampler: Sampler[int] | None,
     num_workers: int,
     pin_memory: bool,
     prefetch_factor: int,
     persistent_workers: bool,
     cpu_batch_size: int,
-) -> DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]]:
-    resolved_shuffle = shuffle and sampler is None
+) -> DataLoader[DatasetItem]:
     if device.type != "cuda":
         return DataLoader(
-            dataset=dataset,
+            dataset,
             batch_size=cpu_batch_size,
-            shuffle=resolved_shuffle,
-            sampler=sampler,
+            shuffle=shuffle,
             num_workers=0,
             pin_memory=False,
         )
@@ -614,8 +509,7 @@ def _build_phase_loader(
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=resolved_shuffle,
-        sampler=sampler,
+        shuffle=shuffle,
         num_workers=resolved_num_workers,
         pin_memory=resolved_pin_memory,
         persistent_workers=resolved_persistent_workers,
@@ -625,16 +519,14 @@ def _build_phase_loader(
 
 def _format_loader_summary(
     phase_name: str,
-    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+    loader: DataLoader[DatasetItem],
 ) -> str:
     prefetch_factor = getattr(loader, "prefetch_factor", None)
-    sampler_name = type(loader.sampler).__name__ if getattr(loader, "sampler", None) is not None else "None"
     return (
         f"{phase_name}_loader batch_size={loader.batch_size} "
         f"num_workers={loader.num_workers} pin_memory={loader.pin_memory} "
         f"persistent_workers={loader.persistent_workers} "
-        f"prefetch_factor={prefetch_factor} sampler={sampler_name} "
-        f"samples={_loader_dataset_len(loader)}"
+        f"prefetch_factor={prefetch_factor} samples={_loader_dataset_len(loader)}"
     )
 
 
@@ -643,7 +535,7 @@ def build_validation_subset(
     val_split: float,
     *,
     seed: int = 42,
-) -> tuple[FsdDataset | Subset[tuple[Tensor, DatasetTargets]], int, int]:
+) -> tuple[FsdDataset | Subset[DatasetItem], int, int]:
     total_trip_count = dataset.trip_count
     if total_trip_count <= 0:
         raise ValueError("Validation dataset has no trips")
@@ -664,101 +556,13 @@ def build_validation_subset(
     return Subset(dataset, subset_indices), selected_trip_count, total_trip_count
 
 
-def _loader_dataset_len(dataset: TorchDataset[tuple[Tensor, DatasetStateInputs, DatasetTargets]]) -> int:
+def _loader_dataset_len(dataset: TorchDataset[DatasetItem]) -> int:
     return len(dataset)
-
-
-def _bucket_turn_magnitude(magnitude: float, config: TurnOversamplingConfig) -> tuple[str, float]:
-    if magnitude < config.light_turn_threshold:
-        return "straight", config.straight_weight
-    if magnitude < config.medium_turn_threshold:
-        return "light_turn", config.light_turn_weight
-    if magnitude < config.sharp_turn_threshold:
-        return "medium_turn", config.medium_turn_weight
-    return "sharp_turn", config.sharp_turn_weight
-
-
-def build_turn_oversampling_weights(
-    dataset: FsdDataset,
-    config: TurnOversamplingConfig,
-) -> tuple[Tensor | None, dict[str, Any]]:
-    summary: dict[str, Any] = {
-        "enabled": config.enabled,
-        "sample_count": len(dataset),
-        "thresholds": {
-            "light_turn": config.light_turn_threshold,
-            "medium_turn": config.medium_turn_threshold,
-            "sharp_turn": config.sharp_turn_threshold,
-        },
-        "weights": {
-            "straight": config.straight_weight,
-            "light_turn": config.light_turn_weight,
-            "medium_turn": config.medium_turn_weight,
-            "sharp_turn": config.sharp_turn_weight,
-        },
-        "bucket_counts": {
-            "straight": 0,
-            "light_turn": 0,
-            "medium_turn": 0,
-            "sharp_turn": 0,
-        },
-    }
-    if not config.enabled:
-        summary["sampler"] = "disabled"
-        return None, summary
-
-    magnitudes = dataset.scalar_target_values(FUTURE_YAW_DELTA_HEAD_NAME)
-    bucket_counts: Counter[str] = Counter()
-    weights: list[float] = []
-    for raw_value in magnitudes:
-        bucket_name, weight = _bucket_turn_magnitude(abs(raw_value), config)
-        bucket_counts[bucket_name] += 1
-        weights.append(weight)
-    for bucket_name in summary["bucket_counts"]:
-        summary["bucket_counts"][bucket_name] = int(bucket_counts.get(bucket_name, 0))
-    summary["sampler"] = "WeightedRandomSampler"
-    return torch.tensor(weights, dtype=torch.double), summary
-
-
-def _turn_oversampling_sampler(weights: Tensor | None) -> Sampler[int] | None:
-    if weights is None:
-        return None
-    return WeightedRandomSampler(weights, num_samples=int(weights.numel()), replacement=True)
 
 
 def _process_rss_bytes() -> int | None:
     if psutil is not None:
         return int(psutil.Process(os.getpid()).memory_info().rss)
-
-    if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                    ("PrivateUsage", ctypes.c_size_t),
-                ]
-
-            counters = PROCESS_MEMORY_COUNTERS_EX()
-            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
-            process = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb)
-            if ok:
-                return int(counters.WorkingSetSize)
-        except Exception:
-            return None
-        return None
 
     if sys.platform.startswith("linux"):
         try:
@@ -798,9 +602,7 @@ def _format_memory_snapshot(label: str, snapshot: dict[str, float | None]) -> st
     return " ".join(parts)
 
 
-def _shutdown_loader_iterator(
-    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None,
-) -> None:
+def _shutdown_loader_iterator(loader_iter: Iterator[DatasetItem] | None) -> None:
     if loader_iter is None:
         return
     shutdown = getattr(loader_iter, "_shutdown_workers", None)
@@ -811,8 +613,8 @@ def _shutdown_loader_iterator(
 def _release_phase_resources(
     device: torch.device,
     *,
-    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None,
-    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None,
+    loader: DataLoader[DatasetItem] | None = None,
+    loader_iter: Iterator[DatasetItem] | None = None,
 ) -> None:
     _shutdown_loader_iterator(loader_iter)
     del loader_iter
@@ -822,45 +624,8 @@ def _release_phase_resources(
         torch.cuda.empty_cache()
 
 
-def _empty_metric_totals(head_specs: tuple[HeadSpec, ...]) -> dict[str, Any]:
-    return {
-        "weighted_loss_sum": 0.0,
-        "control_weighted_loss_sum": 0.0,
-        "aux_weighted_loss_sum": 0.0,
-        "yaw_consistency_loss_sum": 0.0,
-        "yaw_consistency_weighted_loss_sum": 0.0,
-        "yaw_consistency_batch_count": 0,
-        "speed_consistency_loss_sum": 0.0,
-        "speed_consistency_weighted_loss_sum": 0.0,
-        "speed_consistency_batch_count": 0,
-        "future_yaw_delta_weighted_sample_loss_sum": 0.0,
-        "future_yaw_delta_weighted_sample_batch_count": 0,
-        "loss_sum_by_head": {spec.name: 0.0 for spec in head_specs},
-        "weighted_loss_sum_by_head": {spec.name: 0.0 for spec in head_specs},
-        "abs_error_sum_by_head": {spec.name: 0.0 for spec in head_specs},
-        "sq_error_sum_by_head": {spec.name: 0.0 for spec in head_specs},
-        "element_count_by_head": {spec.name: 0 for spec in head_specs},
-        "correct_count_by_head": {spec.name: 0.0 for spec in head_specs},
-        "overall_abs_error_sum": 0.0,
-        "overall_sq_error_sum": 0.0,
-        "overall_element_count": 0,
-        "control_abs_error_sum": 0.0,
-        "control_sq_error_sum": 0.0,
-        "control_element_count": 0,
-        "aux_abs_error_sum": 0.0,
-        "aux_sq_error_sum": 0.0,
-        "aux_element_count": 0,
-        "sample_count": 0,
-        "batch_count": 0,
-    }
-
-
 def _mean_or_zero(total: float, count: int) -> float:
     return 0.0 if count <= 0 else float(total / count)
-
-
-def _rmse_or_zero(total: float, count: int) -> float:
-    return 0.0 if count <= 0 else float((total / count) ** 0.5)
 
 
 def _empty_timing_totals() -> dict[str, float]:
@@ -887,417 +652,350 @@ def _mean_timing(total: float, batch_count: int) -> float:
     return 0.0 if batch_count <= 0 else total / batch_count
 
 
-def _move_targets_to_device(
-    targets: DatasetTargets,
-    device: torch.device,
-    head_specs: tuple[HeadSpec, ...],
-) -> DatasetTargets:
-    head_specs_by_name = {spec.name: spec for spec in head_specs}
-    moved: DatasetTargets = {}
-    for name, value in targets.items():
-        if name in head_specs_by_name:
-            moved[name] = normalize_head_tensor(name, value, head_specs_by_name[name]).to(
-                device,
-                non_blocking=device.type == "cuda",
-            )
-            continue
-        moved[name] = value.to(device, non_blocking=device.type == "cuda")
-    return moved
+def _weighted_elementwise_mean(loss_tensor: Tensor, horizon_weights: tuple[float, ...] | None) -> Tensor:
+    if loss_tensor.ndim < 2:
+        raise ValueError(f"loss tensor must have at least rank 2 [B, H, ...], got {tuple(loss_tensor.shape)}")
+    if horizon_weights is None:
+        return loss_tensor.mean()
+
+    weight_tensor = torch.as_tensor(horizon_weights, dtype=loss_tensor.dtype, device=loss_tensor.device)
+    if weight_tensor.ndim != 1 or weight_tensor.numel() != loss_tensor.shape[1]:
+        raise ValueError(
+            "horizon_weights must be rank 1 and match the horizon dimension: "
+            f"weights={tuple(weight_tensor.shape)} loss={tuple(loss_tensor.shape)}"
+        )
+    trailing_count = math.prod(loss_tensor.shape[2:]) if loss_tensor.ndim > 2 else 1
+    if trailing_count <= 0:
+        raise ValueError("loss tensor must have at least one element per horizon")
+
+    view_shape = [1] * loss_tensor.ndim
+    view_shape[1] = int(weight_tensor.numel())
+    weighted_loss = loss_tensor * weight_tensor.view(*view_shape)
+    denominator = loss_tensor.shape[0] * trailing_count * float(weight_tensor.sum().item())
+    if denominator <= 0.0:
+        raise ValueError("horizon loss weights must sum to > 0")
+    return weighted_loss.sum() / denominator
 
 
-def _move_state_inputs_to_device(
-    state_inputs: DatasetStateInputs,
-    device: torch.device,
-) -> DatasetStateInputs:
+def compute_planner_losses(
+    pred_controls: Tensor,
+    target_controls: Tensor,
+    pred_aux: Tensor,
+    target_aux: Tensor,
+    *,
+    aux_loss_weight: float,
+    horizon_loss_weights: tuple[float, ...] | None,
+) -> dict[str, Tensor]:
+    control_loss = _weighted_elementwise_mean(
+        F.smooth_l1_loss(pred_controls.float(), target_controls.float(), reduction="none"),
+        horizon_loss_weights,
+    )
+    aux_loss = _weighted_elementwise_mean(
+        F.smooth_l1_loss(pred_aux.float(), target_aux.float(), reduction="none"),
+        horizon_loss_weights,
+    )
+    total_loss = control_loss + (aux_loss_weight * aux_loss)
     return {
-        name: value.to(device, non_blocking=device.type == "cuda")
-        for name, value in state_inputs.items()
+        "loss": total_loss,
+        "control_loss": control_loss,
+        "aux_loss": aux_loss,
     }
 
 
-def _metric_tensor_for_head(
-    spec: HeadSpec,
-    value: Tensor,
+def initialize_metric_totals(
+    horizon: int,
     *,
-    delta_speed_transform: DeltaSpeedTargetTransform,
-) -> Tensor:
-    tensor = normalize_head_tensor(spec.name, value, spec)
-    if spec.name == "delta_speed":
-        return denormalize_delta_speed_tensor(tensor, delta_speed_transform)
-    return tensor
+    control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
+    aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
+) -> dict[str, Any]:
+    totals = {
+        "loss_sum": 0.0,
+        "control_loss_sum": 0.0,
+        "aux_loss_sum": 0.0,
+        "control_abs_sum": 0.0,
+        "control_count": 0,
+        "aux_abs_sum": 0.0,
+        "aux_count": 0,
+        "control_horizon_abs_sum": [0.0 for _ in range(horizon)],
+        "control_horizon_count": [0 for _ in range(horizon)],
+        "aux_horizon_abs_sum": [0.0 for _ in range(horizon)],
+        "aux_horizon_count": [0 for _ in range(horizon)],
+        "sample_count": 0,
+        "batch_count": 0,
+    }
+    for name in control_target_names:
+        totals[f"{name}_abs_sum"] = 0.0
+        totals[f"{name}_count"] = 0
+    for name in aux_target_names:
+        totals[f"{name}_abs_sum"] = 0.0
+        totals[f"{name}_count"] = 0
+    return totals
 
 
-def _compute_weighted_future_yaw_delta_loss(
-    prediction: Tensor,
-    target: Tensor,
-    config: YawLossWeightingConfig,
-) -> tuple[Tensor, Tensor]:
-    pred = prediction.float()
-    truth = target.to(dtype=pred.dtype)
-    base_loss = torch.nn.functional.smooth_l1_loss(pred, truth)
-    if not config.enabled:
-        return base_loss, base_loss
-
-    per_sample = torch.nn.functional.smooth_l1_loss(pred, truth, reduction="none")
-    turn_strength = (truth.abs() / config.tau).clamp(min=0.0, max=1.0)
-    sample_weight = (config.base_weight + config.alpha * turn_strength).clamp(max=config.max_scale)
-    weighted_loss = (per_sample * sample_weight).mean()
-    return base_loss, weighted_loss
-
-
-def _compute_yaw_consistency_loss(
-    outputs: dict[str, Tensor],
-    targets: DatasetTargets,
-    *,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-) -> Tensor | None:
-    if yaw_consistency_weight <= 0.0:
-        return None
-    if FUTURE_YAW_DELTA_HEAD_NAME not in outputs or YAW_RATE_HEAD_NAME not in outputs:
-        return None
-    if FUTURE_HORIZON_SECONDS_TARGET_KEY not in targets:
-        return None
-    horizon = targets[FUTURE_HORIZON_SECONDS_TARGET_KEY].float()
-    if horizon.ndim > 1 and horizon.shape[-1] == 1:
-        horizon = horizon.squeeze(-1)
-    if horizon.ndim != 1:
-        raise ValueError(
-            f"{FUTURE_HORIZON_SECONDS_TARGET_KEY} expected shape (batch,) or (batch, 1), got {tuple(horizon.shape)}"
-        )
-    if bool((horizon <= 0).any().item()):
-        raise ValueError(f"{FUTURE_HORIZON_SECONDS_TARGET_KEY} must be > 0 for every sample")
-    if yaw_rate_scale_to_degrees <= 0.0:
-        raise ValueError("training.consistency.yaw_rate_scale_to_degrees must be > 0")
-
-    future_yaw_delta = outputs[FUTURE_YAW_DELTA_HEAD_NAME].float()
-    yaw_rate = outputs[YAW_RATE_HEAD_NAME].float()
-    if future_yaw_delta.ndim > 1 and future_yaw_delta.shape[-1] == 1:
-        future_yaw_delta = future_yaw_delta.squeeze(-1)
-    if yaw_rate.ndim > 1 and yaw_rate.shape[-1] == 1:
-        yaw_rate = yaw_rate.squeeze(-1)
-    expected_yaw_delta = yaw_rate * horizon.to(dtype=yaw_rate.dtype) * yaw_rate_scale_to_degrees
-    return torch.nn.functional.smooth_l1_loss(future_yaw_delta, expected_yaw_delta.to(dtype=future_yaw_delta.dtype))
-
-
-def _compute_speed_consistency_loss(
-    outputs: dict[str, Tensor],
-    targets: DatasetTargets,
-    *,
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    speed_consistency_weight: float,
-) -> Tensor | None:
-    if speed_consistency_weight <= 0.0:
-        return None
-    if FUTURE_SPEED_HEAD_NAME not in outputs or DELTA_SPEED_HEAD_NAME not in outputs:
-        return None
-    if CURRENT_SPEED_TARGET_KEY not in targets:
-        return None
-
-    future_speed = outputs[FUTURE_SPEED_HEAD_NAME].float()
-    delta_speed = outputs[DELTA_SPEED_HEAD_NAME].float()
-    current_speed = targets[CURRENT_SPEED_TARGET_KEY].float()
-
-    if future_speed.ndim > 1 and future_speed.shape[-1] == 1:
-        future_speed = future_speed.squeeze(-1)
-    if delta_speed.ndim > 1 and delta_speed.shape[-1] == 1:
-        delta_speed = delta_speed.squeeze(-1)
-    if current_speed.ndim > 1 and current_speed.shape[-1] == 1:
-        current_speed = current_speed.squeeze(-1)
-    if current_speed.ndim != 1:
-        raise ValueError(
-            f"{CURRENT_SPEED_TARGET_KEY} expected shape (batch,) or (batch, 1), got {tuple(current_speed.shape)}"
-        )
-
-    delta_speed_raw = denormalize_delta_speed_tensor(delta_speed, delta_speed_transform).to(dtype=future_speed.dtype)
-    expected_future_speed = current_speed.to(dtype=future_speed.dtype) + delta_speed_raw
-    return torch.nn.functional.smooth_l1_loss(future_speed, expected_future_speed)
-
-
-def _compute_loss_and_update_totals(
-    outputs: dict[str, Tensor],
-    targets: DatasetTargets,
+def update_metric_totals(
     totals: dict[str, Any],
     *,
-    sample_count: int,
-    head_specs: tuple[HeadSpec, ...],
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-    speed_consistency_weight: float,
-    yaw_loss_weighting: YawLossWeightingConfig,
-    apply_yaw_loss_weighting: bool,
-) -> Tensor:
-    loss_terms: list[Tensor] = []
+    pred_controls: Tensor,
+    target_controls: Tensor,
+    pred_aux: Tensor,
+    target_aux: Tensor,
+    losses: dict[str, Tensor],
+    control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
+    aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
+) -> None:
+    control_abs = (pred_controls.float() - target_controls.float()).abs()
+    aux_abs = (pred_aux.float() - target_aux.float()).abs()
 
-    totals["sample_count"] += sample_count
+    totals["loss_sum"] += float(losses["loss"].item())
+    totals["control_loss_sum"] += float(losses["control_loss"].item())
+    totals["aux_loss_sum"] += float(losses["aux_loss"].item())
+
+    totals["control_abs_sum"] += float(control_abs.sum().item())
+    totals["control_count"] += int(control_abs.numel())
+    totals["aux_abs_sum"] += float(aux_abs.sum().item())
+    totals["aux_count"] += int(aux_abs.numel())
+
+    for index, name in enumerate(control_target_names):
+        totals[f"{name}_abs_sum"] += float(control_abs[..., index].sum().item())
+        totals[f"{name}_count"] += int(control_abs[..., index].numel())
+    for index, name in enumerate(aux_target_names):
+        totals[f"{name}_abs_sum"] += float(aux_abs[..., index].sum().item())
+        totals[f"{name}_count"] += int(aux_abs[..., index].numel())
+
+    for index in range(control_abs.shape[1]):
+        totals["control_horizon_abs_sum"][index] += float(control_abs[:, index, :].sum().item())
+        totals["control_horizon_count"][index] += int(control_abs[:, index, :].numel())
+        totals["aux_horizon_abs_sum"][index] += float(aux_abs[:, index, :].sum().item())
+        totals["aux_horizon_count"][index] += int(aux_abs[:, index, :].numel())
+
+    totals["sample_count"] += int(pred_controls.shape[0])
     totals["batch_count"] += 1
 
-    for spec in head_specs:
-        if spec.name not in outputs:
-            raise KeyError(f"model output is missing head '{spec.name}'")
-        if spec.name not in targets:
-            if spec.required_target:
-                raise KeyError(f"batch targets are missing required head '{spec.name}'")
-            continue
 
-        prediction = normalize_head_tensor(spec.name, outputs[spec.name], spec)
-        target = normalize_head_tensor(spec.name, targets[spec.name], spec).to(dtype=prediction.dtype)
-
-        if spec.name == FUTURE_YAW_DELTA_HEAD_NAME:
-            head_loss, optimized_head_loss = _compute_weighted_future_yaw_delta_loss(
-                prediction,
-                target,
-                yaw_loss_weighting,
-            )
-            weighted_sample_loss_value = float(optimized_head_loss.item())
-            totals["future_yaw_delta_weighted_sample_loss_sum"] += weighted_sample_loss_value
-            totals["future_yaw_delta_weighted_sample_batch_count"] += 1
-            effective_head_loss = optimized_head_loss if apply_yaw_loss_weighting else head_loss
-        else:
-            head_loss = compute_head_loss(spec, prediction, target)
-            optimized_head_loss = head_loss
-            effective_head_loss = head_loss
-
-        if head_loss is not None:
-            head_loss_value = float(head_loss.item())
-            weighted_loss_value = float(effective_head_loss.item()) * spec.loss_weight
-            totals["loss_sum_by_head"][spec.name] += head_loss_value
-            totals["weighted_loss_sum_by_head"][spec.name] += weighted_loss_value
-            totals["weighted_loss_sum"] += weighted_loss_value
-            if spec.kind == "control":
-                totals["control_weighted_loss_sum"] += weighted_loss_value
-            else:
-                totals["aux_weighted_loss_sum"] += weighted_loss_value
-            if spec.loss_weight > 0.0:
-                loss_terms.append(effective_head_loss * spec.loss_weight)
-
-        if spec.loss_type == "bce_with_logits":
-            prediction_binary = (torch.sigmoid(prediction) >= 0.5).to(dtype=target.dtype)
-            totals["correct_count_by_head"][spec.name] += float((prediction_binary == target).sum().item())
-            totals["element_count_by_head"][spec.name] += int(target.numel())
-            continue
-
-        metric_prediction = _metric_tensor_for_head(
-            spec,
-            prediction,
-            delta_speed_transform=delta_speed_transform,
-        )
-        metric_target = _metric_tensor_for_head(
-            spec,
-            target,
-            delta_speed_transform=delta_speed_transform,
-        ).to(dtype=metric_prediction.dtype)
-
-        error = (metric_prediction - metric_target).float()
-        abs_error_sum = float(error.abs().sum().item())
-        sq_error_sum = float(error.pow(2).sum().item())
-        element_count = int(error.numel())
-
-        totals["abs_error_sum_by_head"][spec.name] += abs_error_sum
-        totals["sq_error_sum_by_head"][spec.name] += sq_error_sum
-        totals["element_count_by_head"][spec.name] += element_count
-
-        totals["overall_abs_error_sum"] += abs_error_sum
-        totals["overall_sq_error_sum"] += sq_error_sum
-        totals["overall_element_count"] += element_count
-        if spec.kind == "control":
-            totals["control_abs_error_sum"] += abs_error_sum
-            totals["control_sq_error_sum"] += sq_error_sum
-            totals["control_element_count"] += element_count
-        else:
-            totals["aux_abs_error_sum"] += abs_error_sum
-            totals["aux_sq_error_sum"] += sq_error_sum
-            totals["aux_element_count"] += element_count
-
-    yaw_consistency_loss = _compute_yaw_consistency_loss(
-        outputs,
-        targets,
-        yaw_consistency_weight=yaw_consistency_weight,
-        yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
-    )
-    if yaw_consistency_loss is not None:
-        yaw_consistency_loss_value = float(yaw_consistency_loss.item())
-        weighted_yaw_consistency_loss = yaw_consistency_loss_value * yaw_consistency_weight
-        totals["yaw_consistency_loss_sum"] += yaw_consistency_loss_value
-        totals["yaw_consistency_weighted_loss_sum"] += weighted_yaw_consistency_loss
-        totals["yaw_consistency_batch_count"] += 1
-        totals["weighted_loss_sum"] += weighted_yaw_consistency_loss
-        loss_terms.append(yaw_consistency_loss * yaw_consistency_weight)
-
-    speed_consistency_loss = _compute_speed_consistency_loss(
-        outputs,
-        targets,
-        delta_speed_transform=delta_speed_transform,
-        speed_consistency_weight=speed_consistency_weight,
-    )
-    if speed_consistency_loss is not None:
-        speed_consistency_loss_value = float(speed_consistency_loss.item())
-        weighted_speed_consistency_loss = speed_consistency_loss_value * speed_consistency_weight
-        totals["speed_consistency_loss_sum"] += speed_consistency_loss_value
-        totals["speed_consistency_weighted_loss_sum"] += weighted_speed_consistency_loss
-        totals["speed_consistency_batch_count"] += 1
-        totals["weighted_loss_sum"] += weighted_speed_consistency_loss
-        loss_terms.append(speed_consistency_loss * speed_consistency_weight)
-
-    if loss_terms:
-        return torch.stack(loss_terms).sum()
-
-    first_output = next(iter(outputs.values()))
-    return torch.zeros((), dtype=first_output.dtype, device=first_output.device)
-
-
-def finalize_metrics(totals: dict[str, Any], head_specs: tuple[HeadSpec, ...]) -> MetricPayload:
+def finalize_metrics(
+    totals: dict[str, Any],
+    future_offsets: tuple[int, ...],
+    *,
+    control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
+    aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
+) -> MetricPayload:
     batch_count = int(totals["batch_count"])
-    yaw_consistency_batch_count = int(totals["yaw_consistency_batch_count"])
-    speed_consistency_batch_count = int(totals["speed_consistency_batch_count"])
-    weighted_yaw_batch_count = int(totals["future_yaw_delta_weighted_sample_batch_count"])
-    control_specs = tuple(spec for spec in head_specs if spec.kind == "control")
-    aux_specs = tuple(spec for spec in head_specs if spec.kind == "aux")
     metrics: MetricPayload = {
-        "loss": _mean_or_zero(float(totals["weighted_loss_sum"]), batch_count),
-        "overall_mae": _mean_or_zero(float(totals["overall_abs_error_sum"]), int(totals["overall_element_count"])),
-        "overall_rmse": _rmse_or_zero(float(totals["overall_sq_error_sum"]), int(totals["overall_element_count"])),
+        "loss": _mean_or_zero(float(totals["loss_sum"]), batch_count),
+        "val_loss": _mean_or_zero(float(totals["loss_sum"]), batch_count),
+        "control_loss": _mean_or_zero(float(totals["control_loss_sum"]), batch_count),
+        "aux_loss": _mean_or_zero(float(totals["aux_loss_sum"]), batch_count),
+        "control_mae_overall": _mean_or_zero(float(totals["control_abs_sum"]), int(totals["control_count"])),
+        "control_overall_mae": _mean_or_zero(float(totals["control_abs_sum"]), int(totals["control_count"])),
+        "aux_mae_overall": _mean_or_zero(float(totals["aux_abs_sum"]), int(totals["aux_count"])),
+        "aux_overall_mae": _mean_or_zero(float(totals["aux_abs_sum"]), int(totals["aux_count"])),
+        "sample_count": int(totals["sample_count"]),
+        "batch_count": batch_count,
     }
-    if control_specs:
-        metrics.update({
-            "control_loss": _mean_or_zero(float(totals["control_weighted_loss_sum"]), batch_count),
-            "control_overall_mae": _mean_or_zero(
-                float(totals["control_abs_error_sum"]), int(totals["control_element_count"])
-            ),
-            "control_overall_rmse": _rmse_or_zero(
-                float(totals["control_sq_error_sum"]), int(totals["control_element_count"])
-            ),
-        })
-    if aux_specs:
-        metrics.update({
-            "aux_loss": _mean_or_zero(float(totals["aux_weighted_loss_sum"]), batch_count),
-            "aux_overall_mae": _mean_or_zero(
-                float(totals["aux_abs_error_sum"]), int(totals["aux_element_count"])
-            ),
-            "aux_overall_rmse": _rmse_or_zero(
-                float(totals["aux_sq_error_sum"]), int(totals["aux_element_count"])
-            ),
-        })
-    metrics["yaw_consistency_loss"] = _mean_or_zero(float(totals["yaw_consistency_loss_sum"]), yaw_consistency_batch_count)
-    metrics["yaw_consistency_weighted_loss"] = _mean_or_zero(
-        float(totals["yaw_consistency_weighted_loss_sum"]),
-        yaw_consistency_batch_count,
-    )
-    metrics["speed_consistency_loss"] = _mean_or_zero(
-        float(totals["speed_consistency_loss_sum"]),
-        speed_consistency_batch_count,
-    )
-    metrics["speed_consistency_weighted_loss"] = _mean_or_zero(
-        float(totals["speed_consistency_weighted_loss_sum"]),
-        speed_consistency_batch_count,
-    )
-    metrics["future_yaw_delta_weighted_sample_loss"] = _mean_or_zero(
-        float(totals["future_yaw_delta_weighted_sample_loss_sum"]),
-        weighted_yaw_batch_count,
-    )
-
-    per_head: dict[str, dict[str, Any]] = {}
-    control_head_metrics: dict[str, dict[str, Any]] = {}
-    aux_head_metrics: dict[str, dict[str, Any]] = {}
-
-    for spec in head_specs:
-        head_metrics: dict[str, Any] = {
-            "kind": spec.kind,
-            "output_dim": spec.output_dim,
-            "loss_type": spec.loss_type,
-            "loss_weight": spec.loss_weight,
-            "used_for_control": spec.used_for_control,
-            "loss": _mean_or_zero(float(totals["loss_sum_by_head"][spec.name]), batch_count),
-            "weighted_loss": _mean_or_zero(float(totals["weighted_loss_sum_by_head"][spec.name]), batch_count),
-        }
-        metrics[f"{spec.name}_loss"] = head_metrics["loss"]
-        metrics[f"{spec.name}_weighted_loss"] = head_metrics["weighted_loss"]
-
-        element_count = int(totals["element_count_by_head"][spec.name])
-        if spec.loss_type == "bce_with_logits":
-            accuracy = _mean_or_zero(float(totals["correct_count_by_head"][spec.name]), element_count)
-            head_metrics["accuracy"] = accuracy
-            metrics[f"{spec.name}_accuracy"] = accuracy
-        else:
-            mae = _mean_or_zero(float(totals["abs_error_sum_by_head"][spec.name]), element_count)
-            rmse = _rmse_or_zero(float(totals["sq_error_sum_by_head"][spec.name]), element_count)
-            head_metrics["mae"] = mae
-            head_metrics["rmse"] = rmse
-            metrics[f"{spec.name}_mae"] = mae
-            metrics[f"{spec.name}_rmse"] = rmse
-            if spec.name == FUTURE_YAW_DELTA_HEAD_NAME:
-                metrics["yaw_delta_mae"] = mae
-                metrics["yaw_delta_rmse"] = rmse
-
-        per_head[spec.name] = head_metrics
-        if spec.kind == "control":
-            control_head_metrics[spec.name] = head_metrics
-        else:
-            aux_head_metrics[spec.name] = head_metrics
-
-    metrics["per_head"] = per_head
-    metrics["control_heads"] = control_head_metrics
-    if aux_specs:
-        metrics["aux_heads"] = aux_head_metrics
-    metrics["sample_count"] = int(totals["sample_count"])
-    metrics["batch_count"] = batch_count
+    for name in control_target_names:
+        metrics[f"{name}_mae"] = _mean_or_zero(float(totals[f"{name}_abs_sum"]), int(totals[f"{name}_count"]))
+    for name in aux_target_names:
+        metrics[f"{name}_mae"] = _mean_or_zero(float(totals[f"{name}_abs_sum"]), int(totals[f"{name}_count"]))
+    for index, offset in enumerate(future_offsets):
+        metrics[f"control_mae_t+{offset}"] = _mean_or_zero(
+            float(totals["control_horizon_abs_sum"][index]),
+            int(totals["control_horizon_count"][index]),
+        )
+        metrics[f"aux_mae_t+{offset}"] = _mean_or_zero(
+            float(totals["aux_horizon_abs_sum"][index]),
+            int(totals["aux_horizon_count"][index]),
+        )
     return metrics
 
 
+def format_first_batch_debug(
+    images: Tensor,
+    telemetry: Tensor,
+    target_controls: Tensor,
+    target_aux: Tensor,
+) -> str:
+    return (
+        "first_train_batch "
+        f"images_shape={tuple(images.shape)} "
+        f"telemetry_shape={tuple(telemetry.shape)} "
+        f"target_controls_shape={tuple(target_controls.shape)} "
+        f"target_aux_shape={tuple(target_aux.shape)} "
+        f"dtype={images.dtype}"
+    )
+
+
+def _round_nested(values: Any, digits: int = 4) -> Any:
+    if isinstance(values, float):
+        return round(values, digits)
+    if isinstance(values, list):
+        return [_round_nested(item, digits=digits) for item in values]
+    return values
+
+
+def _format_named_horizon_rows(
+    values: Tensor,
+    names: tuple[str, ...],
+    future_offsets: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    sample0 = values[0].detach().float().cpu().tolist()
+    rows: list[dict[str, Any]] = []
+    for horizon_index, offset in enumerate(future_offsets):
+        row = {"horizon": f"t+{offset}"}
+        for value_index, name in enumerate(names):
+            row[name] = _round_nested(sample0[horizon_index][value_index])
+        rows.append(row)
+    return rows
+
+
+def _format_named_horizon_section(
+    title: str,
+    values: Tensor,
+    names: tuple[str, ...],
+    future_offsets: tuple[int, ...],
+) -> str:
+    lines = [title]
+    for row in _format_named_horizon_rows(values, names, future_offsets):
+        horizon = str(row["horizon"])
+        parts = [f"{name}={row[name]}" for name in names]
+        lines.append(f"  {horizon}: " + " ".join(parts))
+    return "\n".join(lines)
+
+
+def format_first_batch_predictions(
+    pred_controls: Tensor,
+    target_controls: Tensor,
+    pred_aux: Tensor,
+    target_aux: Tensor,
+    *,
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    future_offsets: tuple[int, ...],
+    batch_index: int | None = None,
+) -> str:
+    header = "train_batch_predictions sample=0"
+    if batch_index is not None:
+        header += f" batch={batch_index}"
+    return "\n".join((
+        header,
+        _format_named_horizon_section("pred_controls:", pred_controls, control_target_names, future_offsets),
+        _format_named_horizon_section("target_controls:", target_controls, control_target_names, future_offsets),
+        _format_named_horizon_section("pred_aux:", pred_aux, aux_target_names, future_offsets),
+        _format_named_horizon_section("target_aux:", target_aux, aux_target_names, future_offsets),
+    ))
+
+
+def _merge_metric_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in (
+        "loss_sum",
+        "control_loss_sum",
+        "aux_loss_sum",
+        "control_abs_sum",
+        "control_count",
+        "aux_abs_sum",
+        "aux_count",
+        "sample_count",
+        "batch_count",
+    ):
+        target[key] += source[key]
+
+    for key, value in source.items():
+        if key.endswith("_abs_sum") or key.endswith("_count"):
+            if key in target and key not in {
+                "loss_sum",
+                "control_loss_sum",
+                "aux_loss_sum",
+                "control_abs_sum",
+                "control_count",
+                "aux_abs_sum",
+                "aux_count",
+                "control_horizon_abs_sum",
+                "control_horizon_count",
+                "aux_horizon_abs_sum",
+                "aux_horizon_count",
+                "sample_count",
+                "batch_count",
+            }:
+                target[key] += value
+
+    for key in ("control_horizon_abs_sum", "control_horizon_count", "aux_horizon_abs_sum", "aux_horizon_count"):
+        for index, value in enumerate(source[key]):
+            target[key][index] += value
+
+
 def train_batch(
-    x_batch: Tensor,
-    state_inputs: DatasetStateInputs,
-    targets: DatasetTargets,
+    images: Tensor,
+    telemetry: Tensor,
+    target_controls: Tensor,
+    target_aux: Tensor,
     model: Module,
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
     device: torch.device,
-    head_specs: tuple[HeadSpec, ...],
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-    speed_consistency_weight: float,
-    yaw_loss_weighting: YawLossWeightingConfig,
-) -> tuple[float, BatchTiming, dict[str, Any]]:
+    *,
+    aux_loss_weight: float,
+    horizon_loss_weights: tuple[float, ...],
+    future_offsets: tuple[int, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    batch_index: int | None = None,
+    capture_prediction_debug: bool = False,
+) -> tuple[float, BatchTiming, dict[str, Any], str | None]:
     step_start = time.perf_counter()
     transfer_start = time.perf_counter()
-    x_batch = x_batch.to(device, non_blocking=device.type == "cuda", memory_format=torch.channels_last)
-    state_inputs = _move_state_inputs_to_device(state_inputs, device)
-    y_batch = _move_targets_to_device(targets, device, head_specs)
+    images = images.to(device, non_blocking=device.type == "cuda")
+    telemetry = telemetry.to(device, non_blocking=device.type == "cuda")
+    target_controls = target_controls.to(device, non_blocking=device.type == "cuda")
+    target_aux = target_aux.to(device, non_blocking=device.type == "cuda")
     h2d_time = time.perf_counter() - transfer_start
 
     optimizer.zero_grad(set_to_none=True)
+    batch_totals = initialize_metric_totals(
+        target_controls.shape[1],
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    )
 
-    batch_totals = _empty_metric_totals(head_specs)
     forward_backward_start = time.perf_counter()
     with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-        model_output = model(
-            x_batch,
-            current_speed=state_inputs.get(CURRENT_SPEED_KEY),
-            route_forward_delta=state_inputs.get(ROUTE_FORWARD_DELTA_KEY),
+        output = model(images, telemetry)
+        losses = compute_planner_losses(
+            output["pred_controls"],
+            target_controls,
+            output["pred_aux"],
+            target_aux,
+            aux_loss_weight=aux_loss_weight,
+            horizon_loss_weights=horizon_loss_weights,
         )
-        loss = _compute_loss_and_update_totals(
-            model_output,
-            y_batch,
-            batch_totals,
-            sample_count=int(x_batch.shape[0]),
-            head_specs=head_specs,
-            delta_speed_transform=delta_speed_transform,
-            yaw_consistency_weight=yaw_consistency_weight,
-            yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
-            speed_consistency_weight=speed_consistency_weight,
-            yaw_loss_weighting=yaw_loss_weighting,
-            apply_yaw_loss_weighting=True,
-        )
-
-    scaler.scale(loss).backward()
+    scaler.scale(losses["loss"]).backward()
     forward_backward_time = time.perf_counter() - forward_backward_start
 
     optimizer_start = time.perf_counter()
     scaler.step(optimizer)
     scaler.update()
     optimizer_time = time.perf_counter() - optimizer_start
+
+    update_metric_totals(
+        batch_totals,
+        pred_controls=output["pred_controls"].detach(),
+        target_controls=target_controls.detach(),
+        pred_aux=output["pred_aux"].detach(),
+        target_aux=target_aux.detach(),
+        losses=losses,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    )
+    prediction_debug = None
+    if capture_prediction_debug:
+        prediction_debug = format_first_batch_predictions(
+            output["pred_controls"],
+            target_controls,
+            output["pred_aux"],
+            target_aux,
+            control_target_names=control_target_names,
+            aux_target_names=aux_target_names,
+            future_offsets=future_offsets,
+            batch_index=batch_index,
+        )
 
     timing = BatchTiming(
         loader_wait_s=0.0,
@@ -1306,7 +1004,7 @@ def train_batch(
         optimizer_s=optimizer_time,
         step_s=time.perf_counter() - step_start,
     )
-    return float(loss.item()), timing, batch_totals
+    return float(losses["loss"].item()), timing, batch_totals, prediction_debug
 
 
 def format_batch_timing(timing: BatchTiming) -> str:
@@ -1320,57 +1018,57 @@ def format_batch_timing(timing: BatchTiming) -> str:
 
 
 def train_epoch(
-    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+    loader: DataLoader[DatasetItem],
     optimizer: Optimizer,
     model: Module,
     scaler: torch.amp.GradScaler,
     device: torch.device,
-    head_specs: tuple[HeadSpec, ...],
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-    speed_consistency_weight: float,
-    yaw_loss_weighting: YawLossWeightingConfig,
+    *,
+    future_offsets: tuple[int, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    aux_loss_weight: float,
+    horizon_loss_weights: tuple[float, ...],
     log_every_n_batches: int,
 ) -> tuple[MetricPayload, float, dict[str, float]]:
     epoch_start = time.perf_counter()
     model.train()
-    totals = _empty_metric_totals(head_specs)
+    totals = initialize_metric_totals(
+        len(future_offsets),
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    )
     timing_totals = _empty_timing_totals()
-    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None
+    loader_iter: Iterator[DatasetItem] | None = None
     total_batches = len(loader)
 
     try:
         loader_iter = iter(loader)
         for batch_index in range(1, total_batches + 1):
             wait_start = time.perf_counter()
-            x_batch, state_inputs, targets = next(loader_iter)
+            images, telemetry, target_controls, target_aux = next(loader_iter)
             loader_wait_time = time.perf_counter() - wait_start
             if batch_index == 1:
-                state_input_shapes = {name: tuple(value.shape) for name, value in state_inputs.items()}
-                target_shapes = {name: tuple(value.shape) for name, value in targets.items()}
-                print(
-                    "first_train_batch "
-                    f"x_shape={tuple(x_batch.shape)} "
-                    f"state_input_shapes={state_input_shapes} "
-                    f"target_shapes={target_shapes} "
-                    f"dtype={x_batch.dtype}"
-                )
-            batch_loss, batch_timing, batch_totals = train_batch(
-                x_batch,
-                state_inputs,
-                targets,
+                print(format_first_batch_debug(images, telemetry, target_controls, target_aux))
+            batch_loss, batch_timing, batch_totals, prediction_debug = train_batch(
+                images,
+                telemetry,
+                target_controls,
+                target_aux,
                 model,
                 optimizer,
                 scaler,
                 device,
-                head_specs,
-                delta_speed_transform,
-                yaw_consistency_weight,
-                yaw_rate_scale_to_degrees,
-                speed_consistency_weight,
-                yaw_loss_weighting,
+                aux_loss_weight=aux_loss_weight,
+                horizon_loss_weights=horizon_loss_weights,
+                future_offsets=future_offsets,
+                control_target_names=control_target_names,
+                aux_target_names=aux_target_names,
+                batch_index=batch_index,
+                capture_prediction_debug=batch_index == 1 or batch_index % 30 == 0 or batch_index == total_batches,
             )
+            if prediction_debug is not None:
+                print(prediction_debug)
             batch_timing = BatchTiming(
                 loader_wait_s=loader_wait_time,
                 h2d_s=batch_timing.h2d_s,
@@ -1380,17 +1078,19 @@ def train_epoch(
             )
             _update_timing_totals(timing_totals, batch_timing)
             _merge_metric_totals(totals, batch_totals)
-            should_log = (
-                batch_index == 1
-                or batch_index == total_batches
-                or batch_index % log_every_n_batches == 0
-            )
-            if should_log:
+            if batch_index == 1 or batch_index == total_batches or batch_index % log_every_n_batches == 0:
+                batch_metrics = finalize_metrics(
+                    batch_totals,
+                    future_offsets,
+                    control_target_names=control_target_names,
+                    aux_target_names=aux_target_names,
+                )
                 print(
                     f"batch={batch_index}/{total_batches} "
                     f"loss={batch_loss:.6f} "
-                    f"{format_batch_timing(batch_timing)} "
-                    f"weighted_heads={format_batch_weighted_losses(batch_totals, head_specs)}"
+                    f"control_loss={float(batch_metrics['control_loss']):.6f} "
+                    f"aux_loss={float(batch_metrics['aux_loss']):.6f} "
+                    f"{format_batch_timing(batch_timing)}"
                 )
     finally:
         _shutdown_loader_iterator(loader_iter)
@@ -1399,120 +1099,87 @@ def train_epoch(
         torch.cuda.synchronize(device)
 
     epoch_time = time.perf_counter() - epoch_start
-    metrics = finalize_metrics(totals, head_specs)
+    metrics = finalize_metrics(
+        totals,
+        future_offsets,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    )
     batch_count = int(totals["batch_count"])
-    avg_timings = {
-        key: _mean_timing(total, batch_count)
-        for key, total in timing_totals.items()
-    }
+    avg_timings = {key: _mean_timing(total, batch_count) for key, total in timing_totals.items()}
     return metrics, epoch_time, avg_timings
 
 
-def _merge_metric_totals(target: dict[str, Any], source: dict[str, Any]) -> None:
-    for key in (
-        "weighted_loss_sum",
-        "control_weighted_loss_sum",
-        "aux_weighted_loss_sum",
-        "yaw_consistency_loss_sum",
-        "yaw_consistency_weighted_loss_sum",
-        "yaw_consistency_batch_count",
-        "speed_consistency_loss_sum",
-        "speed_consistency_weighted_loss_sum",
-        "speed_consistency_batch_count",
-        "future_yaw_delta_weighted_sample_loss_sum",
-        "future_yaw_delta_weighted_sample_batch_count",
-        "overall_abs_error_sum",
-        "overall_sq_error_sum",
-        "overall_element_count",
-        "control_abs_error_sum",
-        "control_sq_error_sum",
-        "control_element_count",
-        "aux_abs_error_sum",
-        "aux_sq_error_sum",
-        "aux_element_count",
-        "sample_count",
-        "batch_count",
-    ):
-        target[key] += source[key]
-
-    for key in (
-        "loss_sum_by_head",
-        "weighted_loss_sum_by_head",
-        "abs_error_sum_by_head",
-        "sq_error_sum_by_head",
-        "element_count_by_head",
-        "correct_count_by_head",
-    ):
-        for head_name, value in source[key].items():
-            target[key][head_name] += value
-
-
 def evaluate_epoch(
-    loader: DataLoader[tuple[Tensor, DatasetStateInputs, DatasetTargets]],
+    loader: DataLoader[DatasetItem],
     model: Module,
     device: torch.device,
-    head_specs: tuple[HeadSpec, ...],
-    delta_speed_transform: DeltaSpeedTargetTransform,
-    yaw_consistency_weight: float,
-    yaw_rate_scale_to_degrees: float,
-    speed_consistency_weight: float,
-    yaw_loss_weighting: YawLossWeightingConfig,
+    *,
+    future_offsets: tuple[int, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    aux_loss_weight: float,
+    horizon_loss_weights: tuple[float, ...],
 ) -> tuple[MetricPayload, float]:
     eval_start = time.perf_counter()
     model.eval()
-    totals = _empty_metric_totals(head_specs)
+    totals = initialize_metric_totals(
+        len(future_offsets),
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    )
 
-    loader_iter: Iterator[tuple[Tensor, DatasetStateInputs, DatasetTargets]] | None = None
+    loader_iter: Iterator[DatasetItem] | None = None
     try:
         loader_iter = iter(loader)
         with torch.inference_mode():
-            for x_batch, state_inputs, targets in loader_iter:
-                x_batch = x_batch.to(device, non_blocking=device.type == "cuda", memory_format=torch.channels_last)
-                state_inputs = _move_state_inputs_to_device(state_inputs, device)
-                y_batch = _move_targets_to_device(targets, device, head_specs)
+            for images, telemetry, target_controls, target_aux in loader_iter:
+                images = images.to(device, non_blocking=device.type == "cuda")
+                telemetry = telemetry.to(device, non_blocking=device.type == "cuda")
+                target_controls = target_controls.to(device, non_blocking=device.type == "cuda")
+                target_aux = target_aux.to(device, non_blocking=device.type == "cuda")
                 with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                    model_output = model(
-                        x_batch,
-                        current_speed=state_inputs.get(CURRENT_SPEED_KEY),
-                        route_forward_delta=state_inputs.get(ROUTE_FORWARD_DELTA_KEY),
+                    output = model(images, telemetry)
+                    losses = compute_planner_losses(
+                        output["pred_controls"],
+                        target_controls,
+                        output["pred_aux"],
+                        target_aux,
+                        aux_loss_weight=aux_loss_weight,
+                        horizon_loss_weights=horizon_loss_weights,
                     )
-                    _compute_loss_and_update_totals(
-                        model_output,
-                        y_batch,
-                        totals,
-                        sample_count=int(x_batch.shape[0]),
-                        head_specs=head_specs,
-                        delta_speed_transform=delta_speed_transform,
-                        yaw_consistency_weight=yaw_consistency_weight,
-                        yaw_rate_scale_to_degrees=yaw_rate_scale_to_degrees,
-                        speed_consistency_weight=speed_consistency_weight,
-                        yaw_loss_weighting=yaw_loss_weighting,
-                        apply_yaw_loss_weighting=False,
-                    )
-                del model_output
-                del y_batch
-                del state_inputs
-                del targets
-                del x_batch
+                update_metric_totals(
+                    totals,
+                    pred_controls=output["pred_controls"],
+                    target_controls=target_controls,
+                    pred_aux=output["pred_aux"],
+                    target_aux=target_aux,
+                    losses=losses,
+                    control_target_names=control_target_names,
+                    aux_target_names=aux_target_names,
+                )
     finally:
         _shutdown_loader_iterator(loader_iter)
 
     if int(totals["batch_count"]) <= 0 or int(totals["sample_count"]) <= 0:
         raise ValueError(
             "Validation produced zero batches/samples. "
-            "Check processed validation runs for empty dataset.jsonl files or missing required label fields."
+            "Check processed validation runs for empty dataset.jsonl files or missing temporal telemetry windows."
         )
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
     eval_time = time.perf_counter() - eval_start
-    return finalize_metrics(totals, head_specs), eval_time
+    return finalize_metrics(
+        totals,
+        future_offsets,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+    ), eval_time
 
 
 def build_run_summary(context: TrainingContext) -> dict[str, object]:
-    current_speed_fused_heads = current_speed_fused_head_names(context.state_input_config)
-    route_forward_delta_fused_heads = route_forward_delta_fused_head_names(context.state_input_config)
     return {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "completed_at": None,
@@ -1520,6 +1187,7 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
         "elapsed_hms": "00:00:00",
         "config_path": str(context.config_path),
         "dataset_root": str(context.data_root),
+        "planner_format": PLANNER_FORMAT,
         "train_run_ids": list(context.config.dataset.train_run_ids),
         "val_run_ids": list(context.config.dataset.val_run_ids),
         "train_run_paths": list(context.config.dataset.train_run_paths),
@@ -1528,30 +1196,35 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "width": context.config.dataset.image_width,
             "height": context.config.dataset.image_height,
         },
-        "frame_window": {
-            "size": context.config.dataset.window_size,
-            "frame_stride": context.config.dataset.frame_stride,
-            "sample_stride": context.config.dataset.sample_stride,
-            "input_channels": context.config.dataset.window_size * 3,
+        "image_offsets": list(context.config.dataset.image_offsets),
+        "telemetry_offsets": list(context.config.dataset.telemetry_offsets),
+        "future_offsets": list(context.config.dataset.future_offsets),
+        "telemetry_feature_names": list(context.config.dataset.telemetry_feature_names),
+        "control_target_names": list(context.config.dataset.control_target_names),
+        "aux_target_names": list(context.config.dataset.aux_target_names),
+        "model": {
+            "width_multiplier": context.config.model.width_multiplier,
+            "telemetry_hidden_dim": context.config.model.telemetry_hidden_dim,
         },
-        "state_inputs": state_inputs_metadata(context.state_input_config),
-        "state_input_fusion_heads": {
-            "current_speed": list(current_speed_fused_heads),
-            "route_forward_delta": list(route_forward_delta_fused_heads),
+        "training": {
+            "epochs_total": context.config.training.epochs,
+            "learning_rate": context.config.training.learning_rate,
+            "aux_loss_weight": context.config.training.aux_loss_weight,
+            "horizon_loss_weights": list(context.config.training.horizon_loss_weights),
+            "early_stopping_metric": context.config.training.early_stopping_metric,
+            "early_stopping_patience": context.config.training.early_stopping_patience,
+            "early_stopping_min_delta": context.config.training.early_stopping_min_delta,
         },
-        "delta_speed_target_transform": context.delta_speed_transform.metadata(),
-        "head_specs": head_specs_metadata(context.head_specs),
-        "head_layout": head_layout_metadata(context.head_specs),
-        "inactive_loss_weight_overrides": list(context.ignored_loss_weight_overrides),
         "device": str(context.device),
         "dataset_samples": len(context.train_dataset),
         "dataset_trips": context.train_dataset.trip_count,
         "validation_dataset_samples": len(context.val_dataset),
         "validation_dataset_trips": context.val_dataset.trip_count,
         "validation_selected_trips": context.selected_val_trip_count,
-        "train_sample_shape": list(context.train_sample_shape),
-        "train_state_input_shapes": {name: list(shape) for name, shape in context.train_state_input_shapes.items()},
-        "train_target_shapes": {name: list(shape) for name, shape in context.train_target_shapes.items()},
+        "train_image_shape": list(context.train_image_shape),
+        "train_telemetry_shape": list(context.train_telemetry_shape),
+        "train_target_control_shape": list(context.train_target_control_shape),
+        "train_target_aux_shape": list(context.train_target_aux_shape),
         "train_loader_samples": len(context.train_dataset),
         "validation_loader_samples": _loader_dataset_len(context.val_subset),
         "loader": {
@@ -1567,55 +1240,40 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "val_persistent_workers": context.config.loader.val_persistent_workers,
             "cpu_batch_size": context.config.loader.cpu_batch_size,
             "log_every_n_batches": context.config.loader.log_every_n_batches,
-            "turn_oversampling": {
-                "enabled": context.config.loader.turn_oversampling.enabled,
-                "straight_weight": context.config.loader.turn_oversampling.straight_weight,
-                "light_turn_weight": context.config.loader.turn_oversampling.light_turn_weight,
-                "medium_turn_weight": context.config.loader.turn_oversampling.medium_turn_weight,
-                "sharp_turn_weight": context.config.loader.turn_oversampling.sharp_turn_weight,
-                "light_turn_threshold": context.config.loader.turn_oversampling.light_turn_threshold,
-                "medium_turn_threshold": context.config.loader.turn_oversampling.medium_turn_threshold,
-                "sharp_turn_threshold": context.config.loader.turn_oversampling.sharp_turn_threshold,
-            },
         },
-        "epochs_total": context.config.training.epochs,
-        "early_stopping": {
-            "metric": context.config.training.early_stopping_metric,
-            "patience": context.config.training.early_stopping_patience,
-            "min_delta": context.config.training.early_stopping_min_delta,
-        },
-        "yaw_consistency": {
-            "yaw_delta_vs_yaw_rate_weight": context.config.training.yaw_consistency_weight,
-            "yaw_rate_scale_to_degrees": context.config.training.yaw_rate_scale_to_degrees,
-        },
-        "speed_consistency": {
-            "future_speed_vs_delta_speed_weight": context.config.training.speed_consistency_weight,
-        },
-        "yaw_loss_weighting": {
-            "enabled": context.config.training.yaw_loss_weighting.enabled,
-            "base_weight": context.config.training.yaw_loss_weighting.base_weight,
-            "alpha": context.config.training.yaw_loss_weighting.alpha,
-            "tau": context.config.training.yaw_loss_weighting.tau,
-            "max_scale": context.config.training.yaw_loss_weighting.max_scale,
-        },
-        "train_sampler": context.train_sampler_summary,
         "epochs": [],
     }
 
 
 def prepare_model(
     device: torch.device,
+    *,
     image_size: tuple[int, int],
     frame_count: int,
-    head_specs: tuple[HeadSpec, ...],
-    state_input_config: StateInputConfig,
+    telemetry_length: int,
+    telemetry_feature_dim: int,
+    telemetry_hidden_dim: int,
+    horizon: int,
+    control_dim: int,
+    width_multiplier: float,
 ) -> tuple[Module, torch.device]:
     model = DrivingCNN(
         frame_count=frame_count,
-        head_specs=head_specs,
-        state_input_config=state_input_config,
+        telemetry_feature_dim=telemetry_feature_dim,
+        telemetry_hidden_dim=telemetry_hidden_dim,
+        telemetry_sequence_length=telemetry_length,
+        horizon=horizon,
+        control_dim=control_dim,
+        width_multiplier=width_multiplier,
     ).to(device)
-    if probe_device(model, device, image_size, frame_count, state_input_config):
+    if probe_device(
+        model,
+        device,
+        image_size=image_size,
+        frame_count=frame_count,
+        telemetry_length=telemetry_length,
+        telemetry_feature_dim=telemetry_feature_dim,
+    ):
         return model, device
 
     print(
@@ -1625,8 +1283,12 @@ def prepare_model(
     fallback_device = torch.device("cpu")
     return DrivingCNN(
         frame_count=frame_count,
-        head_specs=head_specs,
-        state_input_config=state_input_config,
+        telemetry_feature_dim=telemetry_feature_dim,
+        telemetry_hidden_dim=telemetry_hidden_dim,
+        telemetry_sequence_length=telemetry_length,
+        horizon=horizon,
+        control_dim=control_dim,
+        width_multiplier=width_multiplier,
     ).to(fallback_device), fallback_device
 
 
@@ -1634,47 +1296,56 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
     data_root = Path(config.dataset.data_root)
     requested_device = select_device(config.training.device)
     image_size = (config.dataset.image_width, config.dataset.image_height)
-    state_input_config = config.state_inputs
+
     train_dataset = FsdDataset(
         run_paths=config.dataset.train_run_paths,
         image_size=image_size,
         expected_window_size=config.dataset.window_size,
-        state_input_config=state_input_config,
+        image_offsets=config.dataset.image_offsets,
+        telemetry_offsets=config.dataset.telemetry_offsets,
+        future_offsets=config.dataset.future_offsets,
+        telemetry_feature_names=config.dataset.telemetry_feature_names,
+        control_target_names=config.dataset.control_target_names,
+        aux_target_names=config.dataset.aux_target_names,
     )
     val_dataset = FsdDataset(
         run_paths=config.dataset.val_run_paths,
         image_size=image_size,
         expected_window_size=config.dataset.window_size,
-        state_input_config=state_input_config,
+        image_offsets=config.dataset.image_offsets,
+        telemetry_offsets=config.dataset.telemetry_offsets,
+        future_offsets=config.dataset.future_offsets,
+        telemetry_feature_names=config.dataset.telemetry_feature_names,
+        control_target_names=config.dataset.control_target_names,
+        aux_target_names=config.dataset.aux_target_names,
     )
     if len(train_dataset) <= 0:
         raise ValueError(
             "Training dataset resolved to zero samples. "
             f"train_run_ids={list(config.dataset.train_run_ids)} "
-            f"train_trips={train_dataset.trip_count}"
+            f"train_trips={train_dataset.trip_count} "
+            f"{train_dataset.format_rejected_sample_summary()}"
         )
     if len(val_dataset) <= 0:
         raise ValueError(
             "Validation dataset resolved to zero samples before subset selection. "
             f"val_run_ids={list(config.dataset.val_run_ids)} "
             f"val_trips={val_dataset.trip_count}. "
-            "Check processed validation runs for empty dataset.jsonl files."
+            "Check processed validation runs for empty dataset.jsonl files. "
+            f"{val_dataset.format_rejected_sample_summary()}"
         )
-    ignored_loss_weight_overrides = inactive_loss_weight_override_names(config.training.head_loss_weights)
-    head_specs = apply_loss_weight_overrides(config.training.head_loss_weights)
-    train_dataset.head_specs = head_specs
-    val_dataset.head_specs = head_specs
-    train_sample_x, train_state_inputs, train_targets = train_dataset[0]
-    train_sampler_weights, train_sampler_summary = build_turn_oversampling_weights(
-        train_dataset,
-        config.loader.turn_oversampling,
-    )
+
+    train_images, train_telemetry, train_target_controls, train_target_aux = train_dataset[0]
     model, device = prepare_model(
         requested_device,
-        image_size,
-        config.dataset.window_size,
-        head_specs,
-        state_input_config,
+        image_size=image_size,
+        frame_count=len(config.dataset.image_offsets),
+        telemetry_length=len(config.dataset.telemetry_offsets),
+        telemetry_feature_dim=len(config.dataset.telemetry_feature_names),
+        telemetry_hidden_dim=config.model.telemetry_hidden_dim,
+        horizon=len(config.dataset.future_offsets),
+        control_dim=len(config.dataset.control_target_names),
+        width_multiplier=config.model.width_multiplier,
     )
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -1683,16 +1354,16 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         val_dataset,
         config.loader.val_split,
     )
-    val_subset_sample_count = _loader_dataset_len(val_subset)
-    if val_subset_sample_count <= 0:
+    if _loader_dataset_len(val_subset) <= 0:
         raise ValueError(
             "Validation subset resolved to zero usable samples. "
             f"val_run_ids={list(config.dataset.val_run_ids)} "
             f"validation_dataset_trips={val_dataset.trip_count} "
             f"validation_dataset_samples={len(val_dataset)} "
             f"selected_val_trips={selected_val_trip_count}/{total_val_trip_count}. "
-            "Check processed validation runs for empty dataset.jsonl files or missing required label fields."
+            "Check processed validation runs for empty dataset.jsonl files or missing temporal telemetry windows."
         )
+
     run_dir, run_metrics_path = prepare_output_paths(Path(config.output.base_dir))
     optimizer = torch.optim.Adam(model.parameters(), lr=config.training.learning_rate)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -1708,27 +1379,51 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         val_subset=val_subset,
         selected_val_trip_count=selected_val_trip_count,
         total_val_trip_count=total_val_trip_count,
-        head_specs=head_specs,
         model=model,
         device=device,
         optimizer=optimizer,
         scaler=scaler,
-        train_sample_shape=tuple(train_sample_x.shape),
-        train_state_input_shapes={name: tuple(value.shape) for name, value in train_state_inputs.items()},
-        train_target_shapes={name: tuple(value.shape) for name, value in train_targets.items()},
-        ignored_loss_weight_overrides=ignored_loss_weight_overrides,
-        state_input_config=state_input_config,
-        delta_speed_transform=config.dataset.delta_speed_transform,
-        train_sampler_weights=train_sampler_weights,
-        train_sampler_summary=train_sampler_summary,
+        train_image_shape=tuple(train_images.shape),
+        train_telemetry_shape=tuple(train_telemetry.shape),
+        train_target_control_shape=tuple(train_target_controls.shape),
+        train_target_aux_shape=tuple(train_target_aux.shape),
     )
 
 
-def create_early_stopping(config: TrainingConfig, head_specs: tuple[HeadSpec, ...]) -> EarlyStoppingState:
-    metric_name = config.early_stopping_metric
-    if metric_name not in supported_metric_names(head_specs):
-        raise ValueError(f"Unsupported early stopping metric: {metric_name}")
+def _supported_metric_names(
+    future_offsets: tuple[int, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+) -> set[str]:
+    names = {
+        "loss",
+        "val_loss",
+        "control_loss",
+        "aux_loss",
+        "control_mae_overall",
+        "control_overall_mae",
+        "aux_mae_overall",
+        "aux_overall_mae",
+    }
+    for name in control_target_names:
+        names.add(f"{name}_mae")
+    for name in aux_target_names:
+        names.add(f"{name}_mae")
+    for offset in future_offsets:
+        names.add(f"control_mae_t+{offset}")
+        names.add(f"aux_mae_t+{offset}")
+    return names
 
+
+def create_early_stopping(
+    config: TrainingConfig,
+    future_offsets: tuple[int, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+) -> EarlyStoppingState:
+    metric_name = config.early_stopping_metric
+    if metric_name not in _supported_metric_names(future_offsets, control_target_names, aux_target_names):
+        raise ValueError(f"Unsupported early stopping metric: {metric_name}")
     return EarlyStoppingState(
         metric_name=metric_name,
         patience=max(0, config.early_stopping_patience),
@@ -1741,13 +1436,11 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
     memory_snapshots["train_start"] = _memory_snapshot(context.device)
     print(_format_memory_snapshot("memory train_start", memory_snapshots["train_start"]))
 
-    train_sampler = _turn_oversampling_sampler(context.train_sampler_weights)
     train_loader = _build_phase_loader(
         context.train_dataset,
         device=context.device,
         batch_size=context.config.loader.train_batch_size,
         shuffle=True,
-        sampler=train_sampler,
         num_workers=context.config.loader.train_num_workers,
         pin_memory=context.config.loader.train_pin_memory,
         prefetch_factor=context.config.loader.train_prefetch_factor,
@@ -1762,13 +1455,12 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
             context.model,
             context.scaler,
             context.device,
-            context.head_specs,
-            context.delta_speed_transform,
-            context.config.training.yaw_consistency_weight,
-            context.config.training.yaw_rate_scale_to_degrees,
-            context.config.training.speed_consistency_weight,
-            context.config.training.yaw_loss_weighting,
-            context.config.loader.log_every_n_batches,
+            future_offsets=context.config.dataset.future_offsets,
+            control_target_names=context.config.dataset.control_target_names,
+            aux_target_names=context.config.dataset.aux_target_names,
+            aux_loss_weight=context.config.training.aux_loss_weight,
+            horizon_loss_weights=context.config.training.horizon_loss_weights,
+            log_every_n_batches=context.config.loader.log_every_n_batches,
         )
     finally:
         _release_phase_resources(context.device, loader=train_loader)
@@ -1783,7 +1475,6 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
         device=context.device,
         batch_size=context.config.loader.val_batch_size,
         shuffle=False,
-        sampler=None,
         num_workers=context.config.loader.val_num_workers,
         pin_memory=context.config.loader.val_pin_memory,
         prefetch_factor=context.config.loader.val_prefetch_factor,
@@ -1796,12 +1487,11 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
             val_loader,
             context.model,
             context.device,
-            context.head_specs,
-            context.delta_speed_transform,
-            context.config.training.yaw_consistency_weight,
-            context.config.training.yaw_rate_scale_to_degrees,
-            context.config.training.speed_consistency_weight,
-            context.config.training.yaw_loss_weighting,
+            future_offsets=context.config.dataset.future_offsets,
+            control_target_names=context.config.dataset.control_target_names,
+            aux_target_names=context.config.dataset.aux_target_names,
+            aux_loss_weight=context.config.training.aux_loss_weight,
+            horizon_loss_weights=context.config.training.horizon_loss_weights,
         )
     finally:
         _release_phase_resources(context.device, loader=val_loader)
@@ -1852,9 +1542,7 @@ def record_epoch(
         epoch_index=epoch_result.epoch_index,
         model=context.model,
         optimizer=context.optimizer,
-        frame_window_size=context.config.dataset.window_size,
-        frame_stride=context.config.dataset.frame_stride,
-        sample_stride=context.config.dataset.sample_stride,
+        config=context.config,
         train_metrics=epoch_result.train_metrics,
         val_metrics=epoch_result.val_metrics,
         train_epoch_time=epoch_result.train_epoch_time,
@@ -1865,19 +1553,6 @@ def record_epoch(
         avg_forward_backward_time=epoch_result.avg_forward_backward_time,
         avg_optimizer_time=epoch_result.avg_optimizer_time,
         avg_iteration_time=epoch_result.avg_iteration_time,
-        head_specs=context.head_specs,
-        state_input_config=context.state_input_config,
-        delta_speed_transform=context.delta_speed_transform,
-        yaw_consistency_weight=context.config.training.yaw_consistency_weight,
-        yaw_rate_scale_to_degrees=context.config.training.yaw_rate_scale_to_degrees,
-        speed_consistency_weight=context.config.training.speed_consistency_weight,
-        yaw_loss_weighting=context.config.training.yaw_loss_weighting,
-        turn_oversampling=context.config.loader.turn_oversampling,
-        state_input_fusion_heads={
-            "current_speed": list(current_speed_fused_head_names(context.state_input_config)),
-            "route_forward_delta": list(route_forward_delta_fused_head_names(context.state_input_config)),
-        },
-        train_sampler_summary=context.train_sampler_summary,
     )
     epoch_artifact["is_best"] = is_best
     epoch_artifact["early_stopping_metric"] = early_stopping_state.metric_name
@@ -1897,34 +1572,6 @@ def record_epoch(
     return epoch_artifact
 
 
-def _format_group_metrics(metrics: MetricPayload, specs: tuple[HeadSpec, ...]) -> str:
-    parts: list[str] = []
-    for spec in specs:
-        head_metrics = metrics.get("per_head", {}).get(spec.name, {})
-        if spec.loss_type == "bce_with_logits":
-            parts.append(f"{spec.name}_acc={float(head_metrics.get('accuracy', 0.0)):.6f}")
-        else:
-            parts.append(f"{spec.name}_mae={float(head_metrics.get('mae', 0.0)):.6f}")
-            parts.append(f"{spec.name}_rmse={float(head_metrics.get('rmse', 0.0)):.6f}")
-    return " ".join(parts)
-
-
-def format_batch_weighted_losses(batch_totals: dict[str, Any], head_specs: tuple[HeadSpec, ...]) -> str:
-    parts: list[str] = []
-    for spec in head_specs:
-        parts.append(f"{spec.name}:{float(batch_totals['weighted_loss_sum_by_head'][spec.name]):.3f}")
-    if int(batch_totals.get("future_yaw_delta_weighted_sample_batch_count", 0)) > 0:
-        parts.append(
-            "yaw_weighted:"
-            f"{float(batch_totals['future_yaw_delta_weighted_sample_loss_sum']):.3f}"
-        )
-    if int(batch_totals.get("yaw_consistency_batch_count", 0)) > 0:
-        parts.append(f"yaw_consistency:{float(batch_totals['yaw_consistency_weighted_loss_sum']):.3f}")
-    if int(batch_totals.get("speed_consistency_batch_count", 0)) > 0:
-        parts.append(f"speed_consistency:{float(batch_totals['speed_consistency_weighted_loss_sum']):.3f}")
-    return " ".join(parts)
-
-
 def _format_elapsed_hms(elapsed_s: float) -> str:
     total_seconds = max(0, int(round(elapsed_s)))
     hours, remainder = divmod(total_seconds, 3600)
@@ -1935,7 +1582,6 @@ def _format_elapsed_hms(elapsed_s: float) -> str:
 def print_epoch_summary(
     epoch_result: EpochResult,
     *,
-    head_specs: tuple[HeadSpec, ...],
     checkpoint: str,
     is_best: bool,
     monitored_value: float,
@@ -1948,33 +1594,19 @@ def print_epoch_summary(
     else:
         status_parts.append(f"no improvement ({early_stopping_state.bad_epoch_count} bad epochs)")
 
-    control_specs = tuple(spec for spec in head_specs if spec.kind == "control")
-    aux_specs = tuple(spec for spec in head_specs if spec.kind == "aux")
-    control_summary = _format_group_metrics(epoch_result.val_metrics, control_specs)
-    aux_summary = _format_group_metrics(epoch_result.val_metrics, aux_specs)
     summary_parts = [
         f"epoch={epoch_result.epoch_index}",
         f"train_loss={float(epoch_result.train_metrics['loss']):.6f}",
-        f"val_loss={float(epoch_result.val_metrics['loss']):.6f}",
-        f"train_control_mae={float(epoch_result.train_metrics['control_overall_mae']):.6f}",
-        f"val_control_mae={float(epoch_result.val_metrics['control_overall_mae']):.6f}",
-        f"train_control_rmse={float(epoch_result.train_metrics['control_overall_rmse']):.6f}",
-        f"val_control_rmse={float(epoch_result.val_metrics['control_overall_rmse']):.6f}",
-    ]
-    if control_summary:
-        summary_parts.append(control_summary)
-    if aux_summary:
-        summary_parts.append(aux_summary)
-    if "yaw_consistency_loss" in epoch_result.val_metrics:
-        summary_parts.append(f"yaw_consistency_loss={float(epoch_result.val_metrics['yaw_consistency_loss']):.6f}")
-    if "speed_consistency_loss" in epoch_result.val_metrics:
-        summary_parts.append(f"speed_consistency_loss={float(epoch_result.val_metrics['speed_consistency_loss']):.6f}")
-    if "future_yaw_delta_weighted_sample_loss" in epoch_result.val_metrics:
-        summary_parts.append(
-            "future_yaw_delta_weighted_sample_loss="
-            f"{float(epoch_result.val_metrics['future_yaw_delta_weighted_sample_loss']):.6f}"
-        )
-    summary_parts.extend([
+        f"val_loss={float(epoch_result.val_metrics['val_loss']):.6f}",
+        f"train_control_mae={float(epoch_result.train_metrics['control_mae_overall']):.6f}",
+        f"val_control_mae={float(epoch_result.val_metrics['control_mae_overall']):.6f}",
+        f"train_aux_mae={float(epoch_result.train_metrics['aux_mae_overall']):.6f}",
+        f"val_aux_mae={float(epoch_result.val_metrics['aux_mae_overall']):.6f}",
+        f"steering_mae={float(epoch_result.val_metrics['steering_mae']):.6f}",
+        f"acceleration_mae={float(epoch_result.val_metrics['acceleration_mae']):.6f}",
+        f"future_speed_mae={float(epoch_result.val_metrics['future_speed_mae']):.6f}",
+        f"future_yaw_delta_mae={float(epoch_result.val_metrics['future_yaw_delta_mae']):.6f}",
+        f"future_yaw_rate_mae={float(epoch_result.val_metrics['future_yaw_rate_mae']):.6f}",
         f"checkpoint={checkpoint}",
         f"train_epoch_s={epoch_result.train_epoch_time:.3f}",
         f"val_epoch_s={epoch_result.val_epoch_time:.3f}",
@@ -1987,15 +1619,18 @@ def print_epoch_summary(
         f"elapsed_s={elapsed_s:.3f}",
         f"elapsed_hms={_format_elapsed_hms(elapsed_s)}",
         f"[{', '.join(status_parts)}]",
-    ])
+    ]
     print(" ".join(summary_parts))
 
 
 def execute_training(context: TrainingContext) -> dict[str, object]:
     run_summary = build_run_summary(context)
-    early_stopping_state = create_early_stopping(context.config.training, context.head_specs)
-    image_width = context.config.dataset.image_width
-    image_height = context.config.dataset.image_height
+    early_stopping_state = create_early_stopping(
+        context.config.training,
+        context.config.dataset.future_offsets,
+        context.config.dataset.control_target_names,
+        context.config.dataset.aux_target_names,
+    )
     training_started_at = time.perf_counter()
 
     print(
@@ -2004,50 +1639,29 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
         f"val_samples={len(context.val_dataset)} "
         f"val_trips={context.val_dataset.trip_count} "
         f"selected_val_trips={context.selected_val_trip_count}/{context.total_val_trip_count} "
-        f"(train={len(context.train_dataset)}, val={_loader_dataset_len(context.val_subset)}) "
         f"run_dir={context.run_dir}"
     )
     print(
-        "Input config: "
-        f"image_size=({image_width}, {image_height}) "
-        f"stacked_frames={context.config.dataset.window_size} "
-        f"sample_x_shape={context.train_sample_shape} "
-        f"sample_target_shapes={context.train_target_shapes}"
-    )
-    print(f"Planner heads: {[spec.name for spec in context.head_specs]}")
-    print(
-        "Head loss weights: "
-        + " ".join(f"{spec.name}={spec.loss_weight:.4f}" for spec in context.head_specs)
-    )
-    if context.ignored_loss_weight_overrides:
-        print(
-            "Ignoring inactive auxiliary loss-weight overrides in control-only mode: "
-            + ", ".join(context.ignored_loss_weight_overrides)
-        )
-    print(
-        "Yaw loss weighting: "
-        f"enabled={context.config.training.yaw_loss_weighting.enabled} "
-        f"base={context.config.training.yaw_loss_weighting.base_weight:.3f} "
-        f"alpha={context.config.training.yaw_loss_weighting.alpha:.3f} "
-        f"tau={context.config.training.yaw_loss_weighting.tau:.3f} "
-        f"max_scale={context.config.training.yaw_loss_weighting.max_scale:.3f}"
+        "Sequence config: "
+        f"image_size=({context.config.dataset.image_width}, {context.config.dataset.image_height}) "
+        f"image_offsets={list(context.config.dataset.image_offsets)} "
+        f"telemetry_offsets={list(context.config.dataset.telemetry_offsets)} "
+        f"future_offsets={list(context.config.dataset.future_offsets)} "
+        f"telemetry_features={list(context.config.dataset.telemetry_feature_names)}"
     )
     print(
-        "Turn oversampling: "
-        f"enabled={context.config.loader.turn_oversampling.enabled} "
-        f"summary={context.train_sampler_summary}"
+        "Model config: "
+        f"width_multiplier={context.config.model.width_multiplier:.3f} "
+        f"telemetry_hidden_dim={context.config.model.telemetry_hidden_dim} "
+        f"sample_images_shape={context.train_image_shape} "
+        f"sample_telemetry_shape={context.train_telemetry_shape} "
+        f"sample_target_controls_shape={context.train_target_control_shape} "
+        f"sample_target_aux_shape={context.train_target_aux_shape}"
     )
     print(
-        "Current speed fusion: "
-        f"mode={context.state_input_config.current_speed_fusion} "
-        f"heads={list(current_speed_fused_head_names(context.state_input_config))}"
-    )
-    print(
-        "Route forward delta input: "
-        f"enabled={context.state_input_config.route_forward_delta_enabled} "
-        f"cap={context.state_input_config.route_forward_delta_cap:.3f} "
-        f"mode={context.state_input_config.route_forward_delta_fusion} "
-        f"heads={list(route_forward_delta_fused_head_names(context.state_input_config))}"
+        "Loss config: "
+        f"aux_loss_weight={context.config.training.aux_loss_weight:.3f} "
+        f"horizon_loss_weights={list(context.config.training.horizon_loss_weights)}"
     )
     print(f"Starting training for {context.config.training.epochs} epochs...")
 
@@ -2067,7 +1681,6 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
         run_summary["elapsed_hms"] = _format_elapsed_hms(elapsed_s)
         print_epoch_summary(
             epoch_result,
-            head_specs=context.head_specs,
             checkpoint=str(epoch_artifact["checkpoint"]),
             is_best=is_best,
             monitored_value=monitored_value,
@@ -2106,19 +1719,7 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     context = build_training_context(config, args.config)
-    summary = execute_training(context)
-    best_epoch = int(summary.get("best_epoch", 0))
-    best_metric = float(summary.get("best_metric", 0.0))
-    print(
-        f"Training finished: run_dir={context.run_dir} "
-        f"run_metrics={context.run_metrics_path} "
-        f"epochs_completed={summary.get('epochs_completed', 0)}/{context.config.training.epochs} "
-        f"stopped_early={summary.get('stopped_early', False)} "
-        f"best_epoch={best_epoch} "
-        f"best_{context.config.training.early_stopping_metric}={best_metric:.6f} "
-        f"elapsed_s={float(summary.get('elapsed_s', 0.0)):.3f} "
-        f"elapsed_hms={summary.get('elapsed_hms', '00:00:00')}"
-    )
+    execute_training(context)
 
 
 if __name__ == "__main__":

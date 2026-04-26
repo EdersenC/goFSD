@@ -1,28 +1,15 @@
-"""CNN planner model with a shared backbone and dynamic output heads."""
+"""Temporal planner model with a CNN vision path and GRU telemetry path."""
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
 
-try:
-    from ..heads import HEAD_SPECS, HeadSpec
-    from ..state_inputs import (
-        CURRENT_SPEED_KEY,
-        ROUTE_FORWARD_DELTA_KEY,
-        StateInputConfig,
-        current_speed_fused_head_names,
-        route_forward_delta_fused_head_names,
-    )
-except ImportError:
-    from heads import HEAD_SPECS, HeadSpec
-    from state_inputs import (
-        CURRENT_SPEED_KEY,
-        ROUTE_FORWARD_DELTA_KEY,
-        StateInputConfig,
-        current_speed_fused_head_names,
-        route_forward_delta_fused_head_names,
-    )
+
+def scaled_width(base: int, width_multiplier: float) -> int:
+    return max(8, int(math.ceil((base * width_multiplier) / 8.0) * 8))
 
 
 class ConvNormAct(nn.Module):
@@ -50,20 +37,11 @@ class ConvNormAct(nn.Module):
         self.relu = nn.ReLU(inplace=True) if activate else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv(x)
-        x = self.norm(x)
-        x = self.relu(x)
-        return x
+        return self.relu(self.norm(self.conv(x)))
 
 
 class ResidualBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        *,
-        stride: int = 1,
-    ) -> None:
+    def __init__(self, in_channels: int, out_channels: int, *, stride: int = 1) -> None:
         super().__init__()
         self.conv1 = ConvNormAct(in_channels, out_channels, kernel_size=3, stride=stride)
         self.conv2 = ConvNormAct(out_channels, out_channels, kernel_size=3, activate=False)
@@ -82,9 +60,7 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = self.projection(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        return self.relu(x + residual)
+        return self.relu(self.conv2(self.conv1(x)) + residual)
 
 
 class ResidualStage(nn.Module):
@@ -100,11 +76,7 @@ class ResidualStage(nn.Module):
         if block_count < 1:
             raise ValueError("block_count must be > 0")
         blocks: list[nn.Module] = [
-            ResidualBlock(
-                in_channels,
-                out_channels,
-                stride=2 if downsample_first else 1,
-            )
+            ResidualBlock(in_channels, out_channels, stride=2 if downsample_first else 1)
         ]
         for _ in range(1, block_count):
             blocks.append(ResidualBlock(out_channels, out_channels))
@@ -114,132 +86,138 @@ class ResidualStage(nn.Module):
         return self.blocks(x)
 
 
-class HeadBranch(nn.Module):
-    def __init__(self, output_dim: int, *, in_features: int = 256) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(in_features=in_features, out_features=128)
-        self.relu = nn.ReLU()
-        self.out = nn.Linear(in_features=128, out_features=output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = self.relu(x)
-        return self.out(x)
-
-
 class DrivingCNN(nn.Module):
     def __init__(
         self,
-        frame_count: int = 3,
-        head_specs: tuple[HeadSpec, ...] = HEAD_SPECS,
+        frame_count: int = 5,
         *,
-        state_input_config: StateInputConfig | None = None,
+        telemetry_feature_dim: int = 6,
+        telemetry_hidden_dim: int = 128,
+        telemetry_sequence_length: int = 9,
+        horizon: int = 6,
+        control_dim: int = 2,
+        width_multiplier: float = 1.0,
     ) -> None:
         super().__init__()
         if frame_count < 1:
             raise ValueError("frame_count must be > 0")
+        if telemetry_feature_dim < 1:
+            raise ValueError("telemetry_feature_dim must be > 0")
+        if telemetry_hidden_dim < 1:
+            raise ValueError("telemetry_hidden_dim must be > 0")
+        if telemetry_sequence_length < 1:
+            raise ValueError("telemetry_sequence_length must be > 0")
+        if horizon < 1:
+            raise ValueError("horizon must be > 0")
+        if control_dim < 1:
+            raise ValueError("control_dim must be > 0")
+        if width_multiplier <= 0:
+            raise ValueError("width_multiplier must be > 0")
+
         self.frame_count = frame_count
+        self.telemetry_feature_dim = telemetry_feature_dim
+        self.telemetry_hidden_dim = telemetry_hidden_dim
+        self.telemetry_sequence_length = telemetry_sequence_length
+        self.horizon = horizon
+        self.control_dim = control_dim
+        self.aux_dim = 3
         self.input_channels = frame_count * 3
-        self.head_specs = head_specs
-        self.state_input_config = state_input_config or StateInputConfig()
-        self.current_speed_fused_heads = frozenset(current_speed_fused_head_names(self.state_input_config))
-        self.route_forward_delta_fused_heads = frozenset(route_forward_delta_fused_head_names(self.state_input_config))
+
+        stem_width = scaled_width(64, width_multiplier)
+        stage2_width = scaled_width(128, width_multiplier)
+        stage3_width = scaled_width(256, width_multiplier)
+        fusion_width = scaled_width(256, width_multiplier)
+        head_hidden_width = scaled_width(128, width_multiplier)
 
         self.stem = ConvNormAct(
             in_channels=self.input_channels,
-            out_channels=64,
+            out_channels=stem_width,
             kernel_size=7,
             stride=2,
             padding=3,
         )
         self.stem_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.stage1 = ResidualStage(64, 64, block_count=2, downsample_first=False)
-        self.stage2 = ResidualStage(64, 128, block_count=2, downsample_first=True)
-        self.stage3 = ResidualStage(128, 256, block_count=2, downsample_first=True)
-
+        self.stage1 = ResidualStage(stem_width, stem_width, block_count=2, downsample_first=False)
+        self.stage2 = ResidualStage(stem_width, stage2_width, block_count=2, downsample_first=True)
+        self.stage3 = ResidualStage(stage2_width, stage3_width, block_count=2, downsample_first=True)
         self.pool = nn.AdaptiveAvgPool2d((2, 2))
         self.flatten = nn.Flatten()
-        self.shared_fc = nn.Linear(in_features=256 * 2 * 2, out_features=256)
-        self.shared_relu = nn.ReLU()
-        if self.state_input_config.current_speed_enabled:
-            self.current_speed_encoder = nn.Sequential(
-                nn.Linear(in_features=1, out_features=16),
-                nn.ReLU(),
+        self.vision_fc = nn.Sequential(
+            nn.Linear(stage3_width * 2 * 2, fusion_width),
+            nn.ReLU(),
+        )
+
+        self.telemetry_gru = nn.GRU(
+            input_size=telemetry_feature_dim,
+            hidden_size=telemetry_hidden_dim,
+            batch_first=True,
+        )
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_width + telemetry_hidden_dim, fusion_width),
+            nn.ReLU(),
+            nn.Linear(fusion_width, head_hidden_width),
+            nn.ReLU(),
+        )
+        self.control_head = nn.Linear(head_hidden_width, horizon * self.control_dim)
+        self.aux_head = nn.Linear(head_hidden_width, horizon * self.aux_dim)
+
+    def _encode_vision(self, images: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, channels, height, width = images.shape
+        fused_images = images.reshape(batch_size, time_steps * channels, height, width)
+        features = self.stem_pool(self.stem(fused_images))
+        features = self.stage1(features)
+        features = self.stage2(features)
+        features = self.stage3(features)
+        return self.vision_fc(self.flatten(self.pool(features)))
+
+    def forward(self, images: torch.Tensor, telemetry: torch.Tensor) -> dict[str, torch.Tensor]:
+        if images.ndim != 5:
+            raise ValueError(f"images must have rank 5 [B, T_img, C, H, W], got {tuple(images.shape)}")
+        if images.shape[1] != self.frame_count:
+            raise ValueError(
+                f"images expected T_img={self.frame_count}, got T_img={int(images.shape[1])}"
             )
-        else:
-            self.current_speed_encoder = None
-        if self.state_input_config.route_forward_delta_enabled:
-            self.route_forward_delta_encoder = nn.Sequential(
-                nn.Linear(in_features=1, out_features=16),
-                nn.ReLU(),
+        if images.shape[2] != 3:
+            raise ValueError(f"images expected 3 channels per frame, got {int(images.shape[2])}")
+        if telemetry.ndim != 3:
+            raise ValueError(f"telemetry must have rank 3 [B, T_tel, F], got {tuple(telemetry.shape)}")
+        if telemetry.shape[1] != self.telemetry_sequence_length:
+            raise ValueError(
+                f"telemetry expected T_tel={self.telemetry_sequence_length}, got T_tel={int(telemetry.shape[1])}"
             )
-        else:
-            self.route_forward_delta_encoder = None
-        self.heads = nn.ModuleDict()
-        for spec in self.head_specs:
-            in_features = 256
-            if spec.name in self.current_speed_fused_heads:
-                in_features += 16
-            if spec.name in self.route_forward_delta_fused_heads:
-                in_features += 16
-            self.heads[spec.name] = HeadBranch(spec.output_dim, in_features=in_features)
+        if telemetry.shape[2] != self.telemetry_feature_dim:
+            raise ValueError(
+                "telemetry feature count mismatch: "
+                f"expected {self.telemetry_feature_dim}, got {int(telemetry.shape[2])}"
+            )
+        if images.shape[0] != telemetry.shape[0]:
+            raise ValueError(
+                "images and telemetry batch sizes must match: "
+                f"images={int(images.shape[0])} telemetry={int(telemetry.shape[0])}"
+            )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        current_speed: torch.Tensor | None = None,
-        route_forward_delta: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        x = self.stem(x)
-        x = self.stem_pool(x)
-        x = self.stage1(x)
-        x = self.stage2(x)
-        x = self.stage3(x)
+        vision_vec = self._encode_vision(images.float())
+        _, hidden = self.telemetry_gru(telemetry.float())
+        telemetry_vec = hidden[-1]
+        fused = self.fusion(torch.cat((vision_vec, telemetry_vec), dim=-1))
 
-        x = self.pool(x)
-        x = self.flatten(x)
-        x = self.shared_fc(x)
-        x = self.shared_relu(x)
-        encoded_current_speed: torch.Tensor | None = None
-        if self.state_input_config.current_speed_enabled:
-            if current_speed is None:
-                raise ValueError(f"{CURRENT_SPEED_KEY} is required for this checkpoint")
-            speed = current_speed.float()
-            if speed.ndim == 1:
-                speed = speed.unsqueeze(-1)
-            elif speed.ndim != 2 or speed.shape[-1] != 1:
-                raise ValueError(
-                    f"{CURRENT_SPEED_KEY} expected shape (batch,) or (batch, 1), got {tuple(speed.shape)}"
-                )
-            encoded_current_speed = self.current_speed_encoder(speed)
-        encoded_route_forward_delta: torch.Tensor | None = None
-        if self.state_input_config.route_forward_delta_enabled:
-            if route_forward_delta is None:
-                raise ValueError(f"{ROUTE_FORWARD_DELTA_KEY} is required for this checkpoint")
-            route_delta = route_forward_delta.float()
-            if route_delta.ndim == 1:
-                route_delta = route_delta.unsqueeze(-1)
-            elif route_delta.ndim != 2 or route_delta.shape[-1] != 1:
-                raise ValueError(
-                    f"{ROUTE_FORWARD_DELTA_KEY} expected shape (batch,) or (batch, 1), "
-                    f"got {tuple(route_delta.shape)}"
-                )
-            encoded_route_forward_delta = self.route_forward_delta_encoder(route_delta)
-
-        outputs: dict[str, torch.Tensor] = {}
-        for spec in self.head_specs:
-            head_input = x
-            if spec.name in self.current_speed_fused_heads and encoded_current_speed is not None:
-                head_input = torch.cat((head_input, encoded_current_speed), dim=-1)
-            if spec.name in self.route_forward_delta_fused_heads and encoded_route_forward_delta is not None:
-                head_input = torch.cat((head_input, encoded_route_forward_delta), dim=-1)
-            head_output = self.heads[spec.name](head_input)
-            if spec.output_dim == 1:
-                head_output = head_output.squeeze(-1)
-            outputs[spec.name] = head_output
-        return outputs
+        pred_controls = self.control_head(fused).reshape(-1, self.horizon, self.control_dim)
+        pred_aux = self.aux_head(fused).reshape(-1, self.horizon, self.aux_dim)
+        if pred_controls.ndim != 3 or pred_controls.shape[1:] != (self.horizon, self.control_dim):
+            raise ValueError(
+                "control_head reshape failed: "
+                f"expected [B, {self.horizon}, {self.control_dim}], got {tuple(pred_controls.shape)}"
+            )
+        if pred_aux.ndim != 3 or pred_aux.shape[1:] != (self.horizon, self.aux_dim):
+            raise ValueError(
+                "aux_head reshape failed: "
+                f"expected [B, {self.horizon}, {self.aux_dim}], got {tuple(pred_aux.shape)}"
+            )
+        return {
+            "pred_controls": pred_controls,
+            "pred_aux": pred_aux,
+        }
 
     @property
     def conv1(self) -> nn.Conv2d:
-        # Preserve the legacy inspection path without registering the same module twice.
         return self.stem.conv

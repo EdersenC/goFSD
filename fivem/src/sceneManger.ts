@@ -316,6 +316,23 @@ export class SceneManager {
         return egoService.currentRouteForwardDelta();
     }
 
+    public currentEgoControlTelemetry(): {
+        currentSpeed: number
+        currentYaw: number
+        yawRate: number
+        steering: number
+        acceleration: number
+        brakePressureAvg: number
+        routeForwardDelta: number | null
+        routeHeadingError: number | null
+        routeDistance: number | null
+        hasLeadVehicle: boolean
+        leadVehicleDistance: number | null
+        gameTimeMs: number
+    } | null {
+        return egoService.currentControlTelemetry();
+    }
+
     public addScene(name: string, scene: SceneType) {
         this.Scenes.set(name, scene);
     }

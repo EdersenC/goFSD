@@ -27,9 +27,29 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			FrameCount: 5,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.1, "future_yaw_delta": 20.0, "future_horizon_seconds": 0.2, "delta_speed": -2.0, "delta_speed_target": -1.0, "future_speed": 3.0, "future_speed_target": 3.5, "currentSpeed": 5.0, "routeDistance": 12.0, "leadVehicleDistance": 18.0, "hasLeadVehicle": true, "isInJunction": true, "eventOffroad": false, "isStopped": 0}},
-			{Label: map[string]any{"Steering": 0.1, "future_yaw_delta": 15.0, "future_horizon_seconds": 0.2, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 5.0, "future_speed_target": 5.0, "currentSpeed": 5.0, "routeDistance": 6.0, "leadVehicleDistance": 10.0, "hasLeadVehicle": true, "isInJunction": false, "eventOffroad": true, "isStopped": 1}},
-			{Label: map[string]any{"Steering": 0.1, "future_yaw_delta": 5.0, "future_horizon_seconds": 0.2, "delta_speed": 2.0, "delta_speed_target": 1.0, "future_speed": 7.0, "future_speed_target": 7.5, "currentSpeed": 5.0, "routeDistance": 2.0, "hasLeadVehicle": false, "isInJunction": false, "eventOffroad": false, "isStopped": true}},
+			reportSample(0.1, 20.0, 0.2, -2.0, -1.0, 3.0, 3.5, reportTelemetry{
+				currentSpeed:        5.0,
+				routeDistance:       12.0,
+				leadVehicleDistance: 18.0,
+				hasLeadVehicle:      true,
+				isStopped:           0,
+				extraRaw:            map[string]any{"isInJunction": true, "eventOffroad": false},
+			}),
+			reportSample(0.1, 15.0, 0.2, 0.0, 0.0, 5.0, 5.0, reportTelemetry{
+				currentSpeed:        5.0,
+				routeDistance:       6.0,
+				leadVehicleDistance: 10.0,
+				hasLeadVehicle:      true,
+				isStopped:           1,
+				extraRaw:            map[string]any{"isInJunction": false, "eventOffroad": true},
+			}),
+			reportSample(0.1, 5.0, 0.2, 2.0, 1.0, 7.0, 7.5, reportTelemetry{
+				currentSpeed:   5.0,
+				routeDistance:  2.0,
+				hasLeadVehicle: false,
+				isStopped:      true,
+				extraRaw:       map[string]any{"isInJunction": false, "eventOffroad": false},
+			}),
 		},
 	})
 
@@ -66,7 +86,10 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			FrameCount: 2,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.5, "future_yaw_delta": 40.0, "future_horizon_seconds": 0.2, "delta_speed": 1.0, "delta_speed_target": 0.5, "future_speed": 11.0, "future_speed_target": 11.0, "currentSpeed": 10.0, "isStopped": 0}},
+			reportSample(0.5, 40.0, 0.2, 1.0, 0.5, 11.0, 11.0, reportTelemetry{
+				currentSpeed: 10.0,
+				isStopped:    0,
+			}),
 		},
 	})
 
@@ -170,7 +193,10 @@ func TestWriteRunDatasetReportsWritesFile(t *testing.T) {
 			FrameCount: 1,
 		},
 		samples: []DatasetSample{
-			{Label: map[string]any{"Steering": 0.2, "future_yaw_delta": 25.0, "future_horizon_seconds": 0.2, "delta_speed": 0.0, "delta_speed_target": 0.0, "future_speed": 4.0, "future_speed_target": 4.0, "currentSpeed": 4.0, "isStopped": 0}},
+			reportSample(0.2, 25.0, 0.2, 0.0, 0.0, 4.0, 4.0, reportTelemetry{
+				currentSpeed: 4.0,
+				isStopped:    0,
+			}),
 		},
 	})
 
@@ -246,5 +272,54 @@ func writeJSONFile(t *testing.T, path string, value any) {
 	}
 	if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+type reportTelemetry struct {
+	currentSpeed        any
+	routeDistance       any
+	leadVehicleDistance any
+	hasLeadVehicle      any
+	isStopped           any
+	extraRaw            map[string]any
+}
+
+func reportSample(
+	steering float64,
+	futureYawDelta float64,
+	futureHorizonSeconds float64,
+	deltaSpeed float64,
+	deltaSpeedTarget float64,
+	futureSpeed float64,
+	futureSpeedTarget float64,
+	telemetry reportTelemetry,
+) DatasetSample {
+	raw := cloneMap(telemetry.extraRaw)
+	return DatasetSample{
+		Label: GroupedLabel{
+			Control: GroupedLabelControl{
+				Steering: steering,
+			},
+			Aux: GroupedLabelAux{
+				DeltaSpeed:           deltaSpeed,
+				DeltaSpeedTarget:     deltaSpeedTarget,
+				FutureSpeed:          futureSpeed,
+				FutureSpeedTarget:    futureSpeedTarget,
+				FutureYawDelta:       futureYawDelta,
+				FutureHorizonSeconds: futureHorizonSeconds,
+			},
+		},
+		TelemetryHistory: []GroupedTelemetryItem{
+			{
+				Aux: GroupedTelemetryAux{
+					CurrentSpeed:        telemetry.currentSpeed,
+					RouteDistance:       telemetry.routeDistance,
+					LeadVehicleDistance: telemetry.leadVehicleDistance,
+					HasLeadVehicle:      telemetry.hasLeadVehicle,
+					IsStopped:           telemetry.isStopped,
+				},
+				Raw: raw,
+			},
+		},
 	}
 }

@@ -14,20 +14,17 @@ import (
 var ErrNotReady = errors.New("virtual controller is not ready")
 var ErrInvalidInputMode = errors.New("invalid actuator input mode")
 
-const (
-	InputModeModelRaw   = "model_raw"
-	InputModeNormalized = "normalized"
-)
+const InputModeNormalized = "normalized"
 
 type CommandRequest struct {
-	Steer       float64 `json:"steer"`
-	Throttle    float64 `json:"throttle"`
-	Brake       float64 `json:"brake"`
-	InputMode   string  `json:"inputMode,omitempty"`
-	Handbrake   bool    `json:"handbrake"`
-	Enabled     *bool   `json:"enabled,omitempty"`
-	Sequence    int64   `json:"sequence,omitempty"`
-	TimestampMs int64   `json:"timestampMs,omitempty"`
+	Steer            float64 `json:"steer"`
+	Throttle         float64 `json:"throttle"`
+	BrakePressureAvg float64 `json:"brakePressureAvg"`
+	InputMode        string  `json:"inputMode,omitempty"`
+	Handbrake        bool    `json:"handbrake"`
+	Enabled          *bool   `json:"enabled,omitempty"`
+	Sequence         int64   `json:"sequence,omitempty"`
+	TimestampMs      int64   `json:"timestampMs,omitempty"`
 }
 
 type commandEnvelope struct {
@@ -66,13 +63,6 @@ type State struct {
 	LastApplySucceededAt string             `json:"lastApplySucceededAt,omitempty"`
 }
 
-type TuningState struct {
-	Live          Tuning `json:"live"`
-	Saved         Tuning `json:"saved"`
-	ConfigPath    string `json:"configPath,omitempty"`
-	SaveSupported bool   `json:"saveSupported"`
-}
-
 type Service struct {
 	cfg Config
 
@@ -81,7 +71,6 @@ type Service struct {
 	controller           controller
 	cancel               context.CancelFunc
 	done                 chan struct{}
-	lastTickAt           time.Time
 	started              bool
 	ready                bool
 	supported            bool
@@ -98,23 +87,21 @@ type Service struct {
 }
 
 func NewService(cfg Config, configPath string) *Service {
-	initialTuning := cfg.Tuning()
+	tuning := cfg.Tuning()
 	return &Service{
 		cfg:         cfg,
 		nowFunc:     time.Now,
 		supported:   runtime.GOOS == "windows",
 		configPath:  configPath,
-		liveTuning:  initialTuning,
-		savedTuning: initialTuning,
+		liveTuning:  tuning,
+		savedTuning: tuning,
 		applied: AppliedState{
-			controlState: controlState{},
-			Enabled:      false,
-			Stale:        true,
+			Enabled: false,
+			Stale:   true,
 		},
 		target: controllerSnapshot{
-			controlState: controlState{},
-			Enabled:      false,
-			Stale:        true,
+			Enabled: false,
+			Stale:   true,
 		},
 	}
 }
@@ -146,16 +133,13 @@ func (s *Service) Start() error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	s.mu.Lock()
 	s.controller = ctrl
 	s.cancel = cancel
 	s.ready = true
 	s.supported = true
 	s.lastError = ""
-	s.lastTickAt = s.nowFunc()
 	s.mu.Unlock()
-
 	go s.run(ctx)
 	return nil
 }
@@ -169,12 +153,8 @@ func (s *Service) Close() error {
 	s.controller = nil
 	s.ready = false
 	s.started = false
-	s.applied.Enabled = false
-	s.applied.Stale = true
-	s.applied.controlState = controlState{}
-	s.target.Enabled = false
-	s.target.Stale = true
-	s.target.controlState = controlState{}
+	s.applied = AppliedState{Enabled: false, Stale: true}
+	s.target = controllerSnapshot{Enabled: false, Stale: true}
 	s.lastApplyError = ""
 	s.lastApplyAttemptedAt = ""
 	s.lastApplySucceededAt = ""
@@ -189,7 +169,6 @@ func (s *Service) Close() error {
 	if ctrl != nil {
 		ctrl.Close()
 	}
-
 	return nil
 }
 
@@ -197,79 +176,31 @@ func (s *Service) Submit(req CommandRequest) (State, error) {
 	now := s.nowFunc().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if !s.supported {
-		return s.stateLocked(now), ErrUnsupportedPlatform
+		return s.stateLocked(), ErrUnsupportedPlatform
 	}
 	if !s.ready || s.controller == nil {
-		return s.stateLocked(now), ErrNotReady
+		return s.stateLocked(), ErrNotReady
 	}
-
 	cmd, err := buildCommandEnvelope(req, now)
 	if err != nil {
-		return s.stateLocked(now), err
+		return s.stateLocked(), err
 	}
 	s.lastCmd = &cmd
-	return s.stateLocked(now), nil
+	return s.stateLocked(), nil
 }
 
 func (s *Service) State() State {
-	now := s.nowFunc().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.stateLocked(now)
-}
-
-func (s *Service) TuningState() TuningState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.tuningStateLocked()
-}
-
-func (s *Service) ApplyTuning(tuning Tuning) (TuningState, error) {
-	if err := ValidateTuning(tuning); err != nil {
-		return TuningState{}, err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.liveTuning = tuning
-	return s.tuningStateLocked(), nil
-}
-
-func (s *Service) ResetTuning() TuningState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.liveTuning = s.savedTuning
-	return s.tuningStateLocked()
-}
-
-func (s *Service) SaveTuning() (TuningState, error) {
-	s.mu.Lock()
-	tuning := s.liveTuning
-	path := s.configPath
-	s.mu.Unlock()
-
-	if strings.TrimSpace(path) == "" {
-		return TuningState{}, fmt.Errorf("actuator config path is not available")
-	}
-	if err := SaveTuning(path, tuning); err != nil {
-		return TuningState{}, err
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.savedTuning = tuning
-	return s.tuningStateLocked(), nil
+	return s.stateLocked()
 }
 
 func (s *Service) run(ctx context.Context) {
 	defer close(s.done)
-
 	interval := time.Second / time.Duration(s.cfg.TickHz)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -287,49 +218,30 @@ func (s *Service) run(ctx context.Context) {
 func (s *Service) step(now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if s.controller == nil {
 		return nil
 	}
 
-	delta := now.Sub(s.lastTickAt)
-	if delta <= 0 {
-		delta = time.Second / time.Duration(s.cfg.TickHz)
-	}
-	s.lastTickAt = now
-
 	target := s.targetLocked(now)
 	s.target = target
-
-	nextApplied := s.applied
-	switch {
-	case target.TimedOut:
-		nextApplied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
-		nextApplied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
-		nextApplied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
-		nextApplied.Handbrake = target.Handbrake
-		nextApplied.Enabled = false
-	case !target.Enabled:
-		nextApplied.controlState = target.controlState
-		nextApplied.Enabled = false
-	default:
-		nextApplied.Steer = moveTowards(s.applied.Steer, target.Steer, s.liveTuning.SteerRatePerSecond*delta.Seconds())
-		nextApplied.Throttle = moveTowards(s.applied.Throttle, target.Throttle, s.liveTuning.ThrottleRatePerSec*delta.Seconds())
-		nextApplied.Brake = moveTowards(s.applied.Brake, target.Brake, s.liveTuning.BrakeRatePerSecond*delta.Seconds())
-		nextApplied.Handbrake = target.Handbrake
-		nextApplied.Enabled = true
+	nextApplied := AppliedState{
+		controlState: target.controlState,
+		Enabled:      target.Enabled,
+		Stale:        target.Stale,
+		Holding:      target.Enabled && !target.TimedOut,
+		TimedOut:     target.TimedOut,
+		UpdatedAt:    now.Format(time.RFC3339Nano),
 	}
-	nextApplied.Stale = target.Stale
-	nextApplied.TimedOut = target.TimedOut
-	nextApplied.Holding = target.Enabled && !target.TimedOut && controlStateEqual(nextApplied.controlState, target.controlState)
-	nextApplied.UpdatedAt = now.Format(time.RFC3339Nano)
+	if target.TimedOut {
+		nextApplied.controlState = controlState{}
+		nextApplied.Enabled = false
+	}
 
 	s.lastApplyAttemptedAt = now.Format(time.RFC3339Nano)
 	if err := s.controller.Apply(nextApplied.controlState); err != nil {
 		s.lastApplyError = err.Error()
 		return err
 	}
-
 	s.applied = nextApplied
 	s.lastApplyError = ""
 	s.lastApplySucceededAt = now.Format(time.RFC3339Nano)
@@ -337,7 +249,8 @@ func (s *Service) step(now time.Time) error {
 }
 
 func (s *Service) targetLocked(now time.Time) controllerSnapshot {
-	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.liveTuning, s.cfg.StaleTimeout, s.cfg.HoldLastCommand, now)
+	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.cfg.StaleTimeout, s.cfg.HoldLastCommand, now)
+	target = s.applyLiveTuningLocked(target)
 	return controllerSnapshot{
 		controlState: target,
 		Enabled:      enabled,
@@ -348,17 +261,10 @@ func (s *Service) targetLocked(now time.Time) controllerSnapshot {
 	}
 }
 
-func resolveTarget(
-	cmd *commandEnvelope,
-	tuning Tuning,
-	staleTimeout time.Duration,
-	holdLastCommand bool,
-	now time.Time,
-) (controlState, bool, bool, bool) {
+func resolveTarget(cmd *commandEnvelope, staleTimeout time.Duration, holdLastCommand bool, now time.Time) (controlState, bool, bool, bool) {
 	if cmd == nil {
 		return controlState{}, true, false, false
 	}
-
 	receivedAt, err := time.Parse(time.RFC3339Nano, cmd.ReceivedAt)
 	if err != nil {
 		return controlState{}, true, false, false
@@ -370,54 +276,96 @@ func resolveTarget(
 	if isStale && !holdLastCommand {
 		return controlState{}, true, false, true
 	}
-
-	resolved, err := commandToControlState(cmd, tuning)
-	if err != nil {
-		return controlState{}, true, false, false
-	}
+	resolved := commandToControlState(cmd)
 	return resolved, isStale, true, false
 }
 
-func commandToControlState(cmd *commandEnvelope, tuning Tuning) (controlState, error) {
-	inputMode, err := normalizeInputMode(cmd.InputMode)
-	if err != nil {
-		return controlState{}, err
-	}
-
-	steer := cmd.Steer
-	throttle := cmd.Throttle
-	brake := cmd.Brake
-	if inputMode == InputModeModelRaw {
-		steer *= tuning.ModelSteerScale
-		throttle *= tuning.ModelAccelScale
-		brake *= tuning.ModelAccelScale
-	}
-
-	steer = clamp(steer, -1, 1)
-	throttle = clamp(throttle, 0, 1)
-	brake = clamp(brake, 0, 1)
-
-	steer = clamp(steer*tuning.SteerInputGain, -1, 1)
-	if math.Abs(steer) < tuning.SteerDeadzone {
-		steer = 0
-	}
-	steer = clamp(steer*tuning.MaxSteerScale, -1, 1)
-
-	throttle = clamp(throttle*tuning.ThrottleInputGain, 0, 1)
-	brake = clamp(brake*tuning.BrakeInputGain, 0, 1)
-	if brake > 0 {
-		throttle = 0
-	}
-
+func commandToControlState(cmd *commandEnvelope) controlState {
 	return controlState{
-		Steer:     steer,
-		Throttle:  throttle,
-		Brake:     brake,
+		Steer:     clamp(cmd.Steer, -1, 1),
+		Throttle:  clamp(cmd.Throttle, 0, 1),
+		Brake:     clamp(cmd.Brake, 0, 1),
 		Handbrake: cmd.Handbrake,
+	}
+}
+
+func (s *Service) TuningState() TuningState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return TuningState{
+		Live:          s.liveTuning,
+		Saved:         s.savedTuning,
+		ConfigPath:    s.configPath,
+		SaveSupported: strings.TrimSpace(s.configPath) != "",
+	}
+}
+
+func (s *Service) ApplyTuning(tuning Tuning) (TuningState, error) {
+	if err := ValidateTuning(tuning); err != nil {
+		return TuningState{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveTuning = tuning
+	return TuningState{
+		Live:          s.liveTuning,
+		Saved:         s.savedTuning,
+		ConfigPath:    s.configPath,
+		SaveSupported: strings.TrimSpace(s.configPath) != "",
 	}, nil
 }
 
-func (s *Service) stateLocked(now time.Time) State {
+func (s *Service) ResetTuning() TuningState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveTuning = s.savedTuning
+	return TuningState{
+		Live:          s.liveTuning,
+		Saved:         s.savedTuning,
+		ConfigPath:    s.configPath,
+		SaveSupported: strings.TrimSpace(s.configPath) != "",
+	}
+}
+
+func (s *Service) SaveTuning() (TuningState, error) {
+	s.mu.Lock()
+	tuning := s.liveTuning
+	path := s.configPath
+	s.mu.Unlock()
+	if strings.TrimSpace(path) == "" {
+		return TuningState{}, fmt.Errorf("actuator config path is not available")
+	}
+	if err := SaveTuning(path, tuning); err != nil {
+		return TuningState{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savedTuning = tuning
+	return TuningState{
+		Live:          s.liveTuning,
+		Saved:         s.savedTuning,
+		ConfigPath:    s.configPath,
+		SaveSupported: strings.TrimSpace(s.configPath) != "",
+	}, nil
+}
+
+func (s *Service) applyLiveTuningLocked(input controlState) controlState {
+	steer := clamp(input.Steer*s.liveTuning.SteeringGain, -1, 1)
+	throttle := clamp(input.Throttle*s.liveTuning.ThrottleGain, 0, 1)
+	brake := clamp(input.Brake, 0, 1)
+	if throttle > 0 && throttle < s.liveTuning.ThrottleFloor {
+		throttle = s.liveTuning.ThrottleFloor
+	}
+	resolved, _ := resolveServiceThrottleBrakeConflict(controlState{
+		Steer:     steer,
+		Throttle:  throttle,
+		Brake:     brake,
+		Handbrake: input.Handbrake,
+	})
+	return resolved
+}
+
+func (s *Service) stateLocked() State {
 	state := State{
 		Supported:            s.supported,
 		Ready:                s.ready,
@@ -432,22 +380,11 @@ func (s *Service) stateLocked(now time.Time) State {
 		LastApplyAttemptedAt: s.lastApplyAttemptedAt,
 		LastApplySucceededAt: s.lastApplySucceededAt,
 	}
-
 	if s.lastCmd != nil {
 		copyCmd := *s.lastCmd
 		state.LastCommand = &copyCmd
 	}
-
 	return state
-}
-
-func (s *Service) tuningStateLocked() TuningState {
-	return TuningState{
-		Live:          s.liveTuning,
-		Saved:         s.savedTuning,
-		ConfigPath:    s.configPath,
-		SaveSupported: strings.TrimSpace(s.configPath) != "",
-	}
 }
 
 func clamp(value float64, min float64, max float64) float64 {
@@ -468,12 +405,11 @@ func buildCommandEnvelope(req CommandRequest, now time.Time) (commandEnvelope, e
 	if err != nil {
 		return commandEnvelope{}, err
 	}
-
 	cmd := commandEnvelope{
 		controlState: controlState{
 			Steer:     req.Steer,
 			Throttle:  req.Throttle,
-			Brake:     req.Brake,
+			Brake:     req.BrakePressureAvg,
 			Handbrake: req.Handbrake,
 		},
 		Enabled:     true,
@@ -490,24 +426,11 @@ func buildCommandEnvelope(req CommandRequest, now time.Time) (commandEnvelope, e
 
 func normalizeInputMode(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", InputModeModelRaw:
-		return InputModeModelRaw, nil
-	case InputModeNormalized:
+	case "", InputModeNormalized:
 		return InputModeNormalized, nil
 	default:
 		return "", fmt.Errorf("%w: %q", ErrInvalidInputMode, raw)
 	}
-}
-
-func moveTowards(current float64, target float64, maxDelta float64) float64 {
-	if maxDelta <= 0 {
-		return target
-	}
-	delta := target - current
-	if math.Abs(delta) <= maxDelta {
-		return target
-	}
-	return current + math.Copysign(maxDelta, delta)
 }
 
 func controlStateEqual(left controlState, right controlState) bool {
@@ -517,18 +440,21 @@ func controlStateEqual(left controlState, right controlState) bool {
 		left.Handbrake == right.Handbrake
 }
 
-func (s *Service) Unsupported() bool {
-	state := s.State()
-	return !state.Supported
+func resolveServiceThrottleBrakeConflict(input controlState) (controlState, bool) {
+	output := input
+	if output.Brake <= 0.05 || output.Throttle <= 0.05 {
+		return output, false
+	}
+	if output.Brake >= output.Throttle {
+		output.Throttle = 0
+		return output, true
+	}
+	output.Throttle = clamp(output.Throttle-output.Brake, 0, 1)
+	return output, output != input
 }
 
-func (s *Service) CheckReady() error {
-	state := s.State()
-	if !state.Supported {
-		return ErrUnsupportedPlatform
-	}
-	if !state.Ready {
-		return fmt.Errorf("%w: %s", ErrNotReady, state.LastError)
-	}
-	return nil
+func (s *Service) Unsupported() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.supported
 }

@@ -11,6 +11,7 @@ from dataset import FsdDataset
 from heads import HEAD_SPECS, head_layout_metadata
 from inference import (
     DEFAULT_CONFIG_PATH,
+    build_model,
     load_checkpoint,
     load_config as load_inference_config,
     remap_legacy_state_dict_keys,
@@ -138,6 +139,7 @@ def main() -> None:
     model = DrivingCNN(
         frame_count=config.dataset.window_size,
         state_input_config=training_state_input_config(),
+        width_multiplier=config.model.width_multiplier,
     ).to(device)
     checkpoint_path = args.checkpoint
     if checkpoint_path is None and inference_config.checkpoint:
@@ -146,6 +148,9 @@ def main() -> None:
     loaded_checkpoint: str | None = None
     try:
         loaded_checkpoint = _load_optional_checkpoint(model, checkpoint_path, args.config, device)
+        if checkpoint_path is not None:
+            checkpoint = load_checkpoint(resolve_existing_path(str(checkpoint_path), args.config), device)
+            model = build_model(checkpoint, device, config.dataset.window_size)
     except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
         checkpoint_error = str(exc)
     model.eval()
@@ -155,17 +160,16 @@ def main() -> None:
         dtype=torch.float32,
         device=device,
     )
-    dummy_speed = torch.zeros((1,), dtype=torch.float32, device=device)
-    dummy_route_forward_delta = torch.zeros((1,), dtype=torch.float32, device=device)
+    dummy_state_inputs = {
+        key: torch.zeros((1,), dtype=torch.float32, device=device)
+        for key in model.state_input_config.enabled_keys()
+    }
     with torch.no_grad():
-        dummy_outputs = model(
-            dummy,
-            current_speed=dummy_speed,
-            route_forward_delta=dummy_route_forward_delta,
-        )
+        dummy_outputs = model(dummy, state_inputs=dummy_state_inputs)
     model_without_speed = DrivingCNN(
         frame_count=config.dataset.window_size,
         state_input_config=StateInputConfig(),
+        width_multiplier=config.model.width_multiplier,
     ).to(device)
     model_without_speed.eval()
     with torch.no_grad():

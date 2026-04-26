@@ -10,6 +10,10 @@ import (
 
 const (
 	defaultInferenceConfigRelativePath = "fsd_trainer/train_config.toml"
+	defaultPlannerFormat               = "temporal_telemetry_gru_v1"
+	defaultHorizonMode                 = "weighted_short_horizon"
+	defaultPredictionTimeout           = 250 * time.Millisecond
+	defaultAlignmentTolerance          = 125 * time.Millisecond
 	defaultTargetSpeedErrorGain        = 0.5
 	defaultTargetSpeedDeadband         = 0.05
 	defaultDeltaSpeedTrimGain          = 0.25
@@ -32,38 +36,51 @@ const (
 )
 
 type InferenceConfig struct {
-	ConfigPath              string
-	ModelServerURL          string
-	ModelDevice             string
-	SourceID                string
-	AutoLoad                bool
-	FPS                     int
-	WindowSize              int
-	FrameStride             int
-	DispatchStride          int
-	FrameWidth              int
-	FrameHeight             int
-	RequestTimeout          time.Duration
-	JPEGQuality             int
-	TargetSpeedErrorGain    float64
-	TargetSpeedDeadband     float64
-	DeltaSpeedTrimGain      float64
-	DeltaSpeedDeadband      float64
-	HeadingErrorDeadbandDeg float64
-	HeadingErrorFullLockDeg float64
-	LowSpeedSteerGain       float64
-	HighSpeedSteerGain      float64
-	SteerGainFadeSpeedMPS   float64
-	SteerResponseBlend      float64
-	LaunchThrottleMin       float64
-	LaunchSpeedThreshold    float64
-	LaunchTargetSpeedMargin float64
-	MaxTargetSpeedKPH       float64
-	MoveIntentThreshold     float64
-	MoveIntentOnThreshold   float64
-	MoveIntentOffThreshold  float64
-	MoveIntentHoldSpeedMax  float64
-	SteerCommandRatePerSec  float64
+	ConfigPath                      string
+	PlannerFormat                   string
+	ModelServerURL                  string
+	ModelDevice                     string
+	SourceID                        string
+	AutoLoad                        bool
+	FPS                             int
+	WindowSize                      int
+	FrameStride                     int
+	DispatchStride                  int
+	FrameWidth                      int
+	FrameHeight                     int
+	RequestTimeout                  time.Duration
+	PredictionTimeout               time.Duration
+	JPEGQuality                     int
+	ImageOffsets                    []int
+	TelemetryOffsets                []int
+	FutureSteps                     int
+	TelemetryFeatureNames           []string
+	ControlOutputNames              []string
+	AuxOutputNames                  []string
+	HorizonMode                     string
+	HorizonControlWeights           []float64
+	AlignmentTolerance              time.Duration
+	TelemetryNormalizationEnabled   bool
+	TelemetryNormalizationStatsPath string
+	TargetSpeedErrorGain            float64
+	TargetSpeedDeadband             float64
+	DeltaSpeedTrimGain              float64
+	DeltaSpeedDeadband              float64
+	HeadingErrorDeadbandDeg         float64
+	HeadingErrorFullLockDeg         float64
+	LowSpeedSteerGain               float64
+	HighSpeedSteerGain              float64
+	SteerGainFadeSpeedMPS           float64
+	SteerResponseBlend              float64
+	LaunchThrottleMin               float64
+	LaunchSpeedThreshold            float64
+	LaunchTargetSpeedMargin         float64
+	MaxTargetSpeedKPH               float64
+	MoveIntentThreshold             float64
+	MoveIntentOnThreshold           float64
+	MoveIntentOffThreshold          float64
+	MoveIntentHoldSpeedMax          float64
+	SteerCommandRatePerSec          float64
 }
 
 type backendSection struct {
@@ -71,35 +88,42 @@ type backendSection struct {
 }
 
 type backendInferenceSection struct {
-	ModelServerURL          string   `toml:"model_server_url"`
-	ModelDevice             string   `toml:"model_device"`
-	SourceID                string   `toml:"source_id"`
-	AutoLoad                *bool    `toml:"auto_load"`
-	FPS                     int      `toml:"fps"`
-	DispatchStride          *int     `toml:"dispatch_stride"`
-	FrameWidth              int      `toml:"frame_width"`
-	FrameHeight             int      `toml:"frame_height"`
-	RequestTimeout          string   `toml:"request_timeout"`
-	JPEGQuality             int      `toml:"jpeg_quality"`
-	TargetSpeedErrorGain    *float64 `toml:"target_speed_error_gain"`
-	TargetSpeedDeadband     *float64 `toml:"target_speed_deadband"`
-	DeltaSpeedTrimGain      *float64 `toml:"delta_speed_trim_gain"`
-	DeltaSpeedDeadband      *float64 `toml:"delta_speed_deadband"`
-	HeadingErrorDeadbandDeg *float64 `toml:"heading_error_deadband_deg"`
-	HeadingErrorFullLockDeg *float64 `toml:"heading_error_full_lock_deg"`
-	LowSpeedSteerGain       *float64 `toml:"low_speed_steer_gain"`
-	HighSpeedSteerGain      *float64 `toml:"high_speed_steer_gain"`
-	SteerGainFadeSpeedMPS   *float64 `toml:"steer_gain_fade_speed_mps"`
-	SteerResponseBlend      *float64 `toml:"steer_response_blend"`
-	LaunchThrottleMin       *float64 `toml:"launch_throttle_min"`
-	LaunchSpeedThreshold    *float64 `toml:"launch_speed_threshold"`
-	LaunchTargetSpeedMargin *float64 `toml:"launch_target_speed_margin"`
-	MaxTargetSpeedKPH       *float64 `toml:"max_target_speed_kph"`
-	MoveIntentThreshold     *float64 `toml:"move_intent_threshold"`
-	MoveIntentOnThreshold   *float64 `toml:"move_intent_on_threshold"`
-	MoveIntentOffThreshold  *float64 `toml:"move_intent_off_threshold"`
-	MoveIntentHoldSpeedMax  *float64 `toml:"move_intent_hold_speed_max"`
-	SteerCommandRatePerSec  *float64 `toml:"steer_command_rate_per_second"`
+	PlannerFormat                   string    `toml:"planner_format"`
+	ModelServerURL                  string    `toml:"model_server_url"`
+	ModelDevice                     string    `toml:"model_device"`
+	SourceID                        string    `toml:"source_id"`
+	AutoLoad                        *bool     `toml:"auto_load"`
+	FPS                             int       `toml:"fps"`
+	DispatchStride                  *int      `toml:"dispatch_stride"`
+	FrameWidth                      int       `toml:"frame_width"`
+	FrameHeight                     int       `toml:"frame_height"`
+	RequestTimeout                  string    `toml:"request_timeout"`
+	PredictionTimeout               string    `toml:"inference_timeout"`
+	JPEGQuality                     int       `toml:"jpeg_quality"`
+	HorizonMode                     string    `toml:"horizon_mode"`
+	HorizonControlWeights           []float64 `toml:"horizon_control_weights"`
+	AlignmentTolerance              string    `toml:"alignment_tolerance"`
+	TelemetryNormalizationEnabled   *bool     `toml:"telemetry_normalization_enabled"`
+	TelemetryNormalizationStatsPath string    `toml:"telemetry_normalization_stats_path"`
+	TargetSpeedErrorGain            *float64  `toml:"target_speed_error_gain"`
+	TargetSpeedDeadband             *float64  `toml:"target_speed_deadband"`
+	DeltaSpeedTrimGain              *float64  `toml:"delta_speed_trim_gain"`
+	DeltaSpeedDeadband              *float64  `toml:"delta_speed_deadband"`
+	HeadingErrorDeadbandDeg         *float64  `toml:"heading_error_deadband_deg"`
+	HeadingErrorFullLockDeg         *float64  `toml:"heading_error_full_lock_deg"`
+	LowSpeedSteerGain               *float64  `toml:"low_speed_steer_gain"`
+	HighSpeedSteerGain              *float64  `toml:"high_speed_steer_gain"`
+	SteerGainFadeSpeedMPS           *float64  `toml:"steer_gain_fade_speed_mps"`
+	SteerResponseBlend              *float64  `toml:"steer_response_blend"`
+	LaunchThrottleMin               *float64  `toml:"launch_throttle_min"`
+	LaunchSpeedThreshold            *float64  `toml:"launch_speed_threshold"`
+	LaunchTargetSpeedMargin         *float64  `toml:"launch_target_speed_margin"`
+	MaxTargetSpeedKPH               *float64  `toml:"max_target_speed_kph"`
+	MoveIntentThreshold             *float64  `toml:"move_intent_threshold"`
+	MoveIntentOnThreshold           *float64  `toml:"move_intent_on_threshold"`
+	MoveIntentOffThreshold          *float64  `toml:"move_intent_off_threshold"`
+	MoveIntentHoldSpeedMax          *float64  `toml:"move_intent_hold_speed_max"`
+	SteerCommandRatePerSec          *float64  `toml:"steer_command_rate_per_second"`
 }
 
 func DefaultInferenceConfig() InferenceConfig {
@@ -116,6 +140,7 @@ func DefaultInferenceConfig() InferenceConfig {
 		modelDevice = "cuda"
 	}
 	return InferenceConfig{
+		PlannerFormat:           defaultPlannerFormat,
 		ModelServerURL:          url,
 		ModelDevice:             strings.ToLower(modelDevice),
 		SourceID:                sourceID,
@@ -127,7 +152,17 @@ func DefaultInferenceConfig() InferenceConfig {
 		FrameWidth:              defaultInferenceWidth,
 		FrameHeight:             defaultInferenceHeight,
 		RequestTimeout:          parseDurationEnv("INFERENCE_REQUEST_TIMEOUT", defaultInferenceRequestTimeout),
+		PredictionTimeout:       defaultPredictionTimeout,
 		JPEGQuality:             defaultInferenceJPEGQuality,
+		ImageOffsets:            []int{-8, -6, -4, -2, 0},
+		TelemetryOffsets:        []int{-8, -7, -6, -5, -4, -3, -2, -1, 0},
+		FutureSteps:             6,
+		TelemetryFeatureNames:   []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
+		ControlOutputNames:      []string{"steering", "acceleration", "brakePressureAvg"},
+		AuxOutputNames:          []string{"future_speed", "future_yaw_delta", "future_yaw_rate"},
+		HorizonMode:             defaultHorizonMode,
+		HorizonControlWeights:   []float64{0.60, 0.30, 0.10},
+		AlignmentTolerance:      defaultAlignmentTolerance,
 		TargetSpeedErrorGain:    defaultTargetSpeedErrorGain,
 		TargetSpeedDeadband:     defaultTargetSpeedDeadband,
 		DeltaSpeedTrimGain:      defaultDeltaSpeedTrimGain,
@@ -189,23 +224,58 @@ func ResolveInferenceConfigPath(explicitPath string) (string, error) {
 
 func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	cfg := DefaultInferenceConfig()
-	datasetConfig, err := LoadDatasetConfig(path)
-	if err != nil {
-		return InferenceConfig{}, err
-	}
-	cfg.WindowSize = datasetConfig.WindowSize
-	cfg.FrameStride = datasetConfig.FrameStride
+	datasetConfig := DefaultDatasetConfig()
 
 	parsed, _, err := loadTrainConfigFile(path)
 	if err != nil {
 		return InferenceConfig{}, err
 	}
+	if parsed.Dataset.WindowStride != nil {
+		return InferenceConfig{}, fmt.Errorf("%s", legacyDatasetWindowStrideMigrationNotice)
+	}
+	if parsed.Dataset.WindowSize != nil {
+		datasetConfig.WindowSize = *parsed.Dataset.WindowSize
+	}
+	if parsed.Dataset.FrameStride != nil {
+		datasetConfig.FrameStride = *parsed.Dataset.FrameStride
+	}
+	if len(parsed.Dataset.ImageOffsets) > 0 {
+		datasetConfig.ImageOffsets = append([]int(nil), parsed.Dataset.ImageOffsets...)
+	} else {
+		datasetConfig.ImageOffsets = deriveLegacyImageOffsets(datasetConfig.WindowSize, datasetConfig.FrameStride)
+	}
+	if len(parsed.Dataset.TelemetryOffsets) > 0 {
+		datasetConfig.TelemetryOffsets = append([]int(nil), parsed.Dataset.TelemetryOffsets...)
+	}
+	if len(parsed.Dataset.FutureOffsets) > 0 {
+		datasetConfig.FutureOffsets = append([]int(nil), parsed.Dataset.FutureOffsets...)
+	}
+	if len(parsed.Dataset.TelemetryFeatureNames) > 0 {
+		datasetConfig.TelemetryFeatureNames = append([]string(nil), parsed.Dataset.TelemetryFeatureNames...)
+	}
+	if len(parsed.Dataset.ControlTargetNames) > 0 {
+		datasetConfig.ControlTargetNames = append([]string(nil), parsed.Dataset.ControlTargetNames...)
+	}
+	if len(parsed.Dataset.AuxTargetNames) > 0 {
+		datasetConfig.AuxTargetNames = append([]string(nil), parsed.Dataset.AuxTargetNames...)
+	}
+	cfg.WindowSize = datasetConfig.WindowSize
+	cfg.FrameStride = datasetConfig.FrameStride
+	cfg.ImageOffsets = append([]int(nil), datasetConfig.ImageOffsets...)
+	cfg.TelemetryOffsets = append([]int(nil), datasetConfig.TelemetryOffsets...)
+	cfg.FutureSteps = len(datasetConfig.FutureOffsets)
+	cfg.TelemetryFeatureNames = append([]string(nil), datasetConfig.TelemetryFeatureNames...)
+	cfg.ControlOutputNames = append([]string(nil), datasetConfig.ControlTargetNames...)
+	cfg.AuxOutputNames = append([]string(nil), datasetConfig.AuxTargetNames...)
 
 	section := parsed.Backend.Inference
 	if strings.TrimSpace(path) != "" {
 		if _, statErr := os.Stat(path); statErr == nil {
 			cfg.ConfigPath = path
 		}
+	}
+	if value := strings.TrimSpace(section.PlannerFormat); value != "" {
+		cfg.PlannerFormat = value
 	}
 	if value := strings.TrimRight(strings.TrimSpace(section.ModelServerURL), "/"); value != "" {
 		cfg.ModelServerURL = value
@@ -238,8 +308,34 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		}
 		cfg.RequestTimeout = duration
 	}
+	if strings.TrimSpace(section.PredictionTimeout) != "" {
+		duration, err := time.ParseDuration(strings.TrimSpace(section.PredictionTimeout))
+		if err != nil {
+			return InferenceConfig{}, fmt.Errorf("invalid backend.inference.inference_timeout: %w", err)
+		}
+		cfg.PredictionTimeout = duration
+	}
 	if section.JPEGQuality > 0 {
 		cfg.JPEGQuality = section.JPEGQuality
+	}
+	if value := strings.TrimSpace(section.HorizonMode); value != "" {
+		cfg.HorizonMode = value
+	}
+	if len(section.HorizonControlWeights) > 0 {
+		cfg.HorizonControlWeights = append([]float64(nil), section.HorizonControlWeights...)
+	}
+	if strings.TrimSpace(section.AlignmentTolerance) != "" {
+		duration, err := time.ParseDuration(strings.TrimSpace(section.AlignmentTolerance))
+		if err != nil {
+			return InferenceConfig{}, fmt.Errorf("invalid backend.inference.alignment_tolerance: %w", err)
+		}
+		cfg.AlignmentTolerance = duration
+	}
+	if section.TelemetryNormalizationEnabled != nil {
+		cfg.TelemetryNormalizationEnabled = *section.TelemetryNormalizationEnabled
+	}
+	if value := strings.TrimSpace(section.TelemetryNormalizationStatsPath); value != "" {
+		cfg.TelemetryNormalizationStatsPath = value
 	}
 	if section.TargetSpeedErrorGain != nil {
 		cfg.TargetSpeedErrorGain = *section.TargetSpeedErrorGain
@@ -314,17 +410,68 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		ImageHeight:                  datasetConfig.ImageHeight,
 		WindowSize:                   cfg.WindowSize,
 		FrameStride:                  cfg.FrameStride,
-		SampleStride:                 defaultDatasetSampleStride,
-		LabelTolerance:               defaultDatasetLabelTolerance,
-		DeltaSpeedClip:               defaultDatasetDeltaSpeedClip,
-		DeltaSpeedNormalize:          defaultDatasetDeltaSpeedNormalize,
-		SyncFlashBrightnessThreshold: defaultSyncFlashBrightnessThreshold,
-		SyncFlashFrameLimit:          defaultDatasetSyncFlashFrameLimit,
+		SampleStride:                 datasetConfig.SampleStride,
+		ImageOffsets:                 append([]int(nil), cfg.ImageOffsets...),
+		TelemetryOffsets:             append([]int(nil), cfg.TelemetryOffsets...),
+		FutureOffsets:                append([]int(nil), datasetConfig.FutureOffsets...),
+		TelemetryFeatureNames:        append([]string(nil), cfg.TelemetryFeatureNames...),
+		ControlTargetNames:           append([]string(nil), cfg.ControlOutputNames...),
+		AuxTargetNames:               append([]string(nil), cfg.AuxOutputNames...),
+		LabelTolerance:               datasetConfig.LabelTolerance,
+		DeltaSpeedClip:               datasetConfig.DeltaSpeedClip,
+		DeltaSpeedNormalize:          datasetConfig.DeltaSpeedNormalize,
+		SyncFlashBrightnessThreshold: datasetConfig.SyncFlashBrightnessThreshold,
+		SyncFlashFrameLimit:          datasetConfig.SyncFlashFrameLimit,
 	}); err != nil {
 		return InferenceConfig{}, err
 	}
 	if cfg.DispatchStride < 1 {
 		return InferenceConfig{}, fmt.Errorf("backend inference dispatch_stride must be > 0")
+	}
+	if cfg.PlannerFormat != defaultPlannerFormat {
+		return InferenceConfig{}, fmt.Errorf("backend inference planner_format must be %q", defaultPlannerFormat)
+	}
+	if cfg.PredictionTimeout <= 0 {
+		return InferenceConfig{}, fmt.Errorf("backend inference inference_timeout must be > 0")
+	}
+	if cfg.AlignmentTolerance <= 0 {
+		return InferenceConfig{}, fmt.Errorf("backend inference alignment_tolerance must be > 0")
+	}
+	if len(cfg.ImageOffsets) != cfg.WindowSize {
+		return InferenceConfig{}, fmt.Errorf("backend inference image_offsets length must match window_size")
+	}
+	if len(cfg.TelemetryOffsets) < 1 || cfg.TelemetryOffsets[len(cfg.TelemetryOffsets)-1] != 0 {
+		return InferenceConfig{}, fmt.Errorf("backend inference telemetry_offsets must end at 0")
+	}
+	if cfg.FutureSteps < 1 {
+		return InferenceConfig{}, fmt.Errorf("backend inference future_steps must be > 0")
+	}
+	if len(cfg.ControlOutputNames) < 2 || cfg.ControlOutputNames[0] != "steering" || cfg.ControlOutputNames[1] != "acceleration" {
+		return InferenceConfig{}, fmt.Errorf("backend inference control_output_names must start with [steering, acceleration]")
+	}
+	if len(cfg.ControlOutputNames) > 3 {
+		return InferenceConfig{}, fmt.Errorf("backend inference control_output_names must have 2 or 3 entries")
+	}
+	if len(cfg.ControlOutputNames) == 3 && cfg.ControlOutputNames[2] != "brakePressureAvg" {
+		return InferenceConfig{}, fmt.Errorf("backend inference third control_output_name must be brakePressureAvg when present")
+	}
+	switch cfg.HorizonMode {
+	case "weighted_short_horizon", "t_plus_1_only":
+	default:
+		return InferenceConfig{}, fmt.Errorf("backend inference horizon_mode must be weighted_short_horizon or t_plus_1_only")
+	}
+	if cfg.HorizonMode == "weighted_short_horizon" {
+		if len(cfg.HorizonControlWeights) != 3 {
+			return InferenceConfig{}, fmt.Errorf("backend inference horizon_control_weights must have three entries")
+		}
+	}
+	for _, value := range cfg.HorizonControlWeights {
+		if value < 0 {
+			return InferenceConfig{}, fmt.Errorf("backend inference horizon_control_weights must be >= 0")
+		}
+	}
+	if cfg.TelemetryNormalizationEnabled && strings.TrimSpace(cfg.TelemetryNormalizationStatsPath) == "" {
+		return InferenceConfig{}, fmt.Errorf("backend inference telemetry_normalization_stats_path is required when telemetry normalization is enabled")
 	}
 	if cfg.FrameWidth < 1 || cfg.FrameHeight < 1 {
 		return InferenceConfig{}, fmt.Errorf("backend inference frame dimensions must be > 0")

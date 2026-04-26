@@ -192,17 +192,12 @@ def predict_control_outputs(
     state_inputs: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, float]:
     x = stacked_frames.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    current_speed = None
-    route_forward_delta = None
-    if state_inputs is not None and CURRENT_SPEED_KEY in state_inputs:
-        current_speed = state_inputs[CURRENT_SPEED_KEY].unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    if state_inputs is not None and ROUTE_FORWARD_DELTA_KEY in state_inputs:
-        route_forward_delta = state_inputs[ROUTE_FORWARD_DELTA_KEY].unsqueeze(0).to(
-            device,
-            non_blocking=device.type == "cuda",
-        )
+    model_state_inputs = {
+        key: value.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+        for key, value in (state_inputs or {}).items()
+    }
     with torch.no_grad():
-        output = model(x, current_speed=current_speed, route_forward_delta=route_forward_delta)
+        output = model(x, state_inputs=model_state_inputs)
     delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
     return single_control_prediction_from_output(
         output,

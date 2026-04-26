@@ -5,11 +5,12 @@ import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 
 from config import (
+    DEFAULT_CONTROL_TARGET_NAMES,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
     normalize_windows_drive_path,
@@ -29,8 +30,7 @@ from model_output import (
 )
 from models.planner import DrivingCNN
 from state_inputs import (
-    CURRENT_SPEED_KEY,
-    ROUTE_FORWARD_DELTA_KEY,
+    DEFAULT_WIDTH_MULTIPLIER,
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
@@ -42,6 +42,7 @@ from target_transforms import (
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "train_config.toml"
+PLANNER_FORMAT = "temporal_telemetry_gru_v1"
 
 
 @dataclass(frozen=True)
@@ -208,7 +209,11 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
         raise ValueError(f"Unexpected checkpoint payload in {checkpoint_path}")
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint is missing model_state_dict: {checkpoint_path}")
-    validate_checkpoint_head_layout(checkpoint)
+    planner_format = str(checkpoint.get("planner_format", "")).strip()
+    if planner_format and planner_format != PLANNER_FORMAT:
+        raise ValueError(f"Unsupported planner_format={planner_format} in {checkpoint_path}")
+    if not planner_format:
+        validate_checkpoint_head_layout(checkpoint)
     return checkpoint
 
 
@@ -225,18 +230,81 @@ def remap_legacy_state_dict_keys(state_dict: Mapping[str, Any]) -> dict[str, Any
             if key.startswith(legacy_prefix):
                 new_key = f"heads.future_yaw_delta.{key[len(legacy_prefix):]}"
                 break
+        if key.startswith("current_speed_encoder."):
+            new_key = f"state_input_encoders.current_speed.{key[len('current_speed_encoder.'):]}"
+        elif key.startswith("route_forward_delta_encoder."):
+            new_key = f"state_input_encoders.route_forward_delta.{key[len('route_forward_delta_encoder.'):]}"
         remapped[new_key] = value
     return remapped
 
 
+def resolve_checkpoint_width_multiplier(checkpoint: dict[str, Any]) -> float:
+    model_metadata = checkpoint.get("model", {})
+    if isinstance(model_metadata, dict) and model_metadata.get("width_multiplier") is not None:
+        return float(model_metadata["width_multiplier"])
+    if checkpoint.get("width_multiplier") is not None:
+        return float(checkpoint["width_multiplier"])
+
+    state_dict = checkpoint.get("model_state_dict")
+    if isinstance(state_dict, Mapping):
+        stem_weight = state_dict.get("stem.conv.weight")
+        if isinstance(stem_weight, torch.Tensor) and stem_weight.ndim >= 1 and int(stem_weight.shape[0]) > 0:
+            return float(stem_weight.shape[0]) / 64.0
+    return DEFAULT_WIDTH_MULTIPLIER
+
+
 def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
-    state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
-    head_specs = resolve_checkpoint_head_specs(checkpoint)
-    model = DrivingCNN(frame_count=frame_count, head_specs=head_specs, state_input_config=state_input_config).to(device)
-    model.load_state_dict(remap_legacy_state_dict_keys(checkpoint["model_state_dict"]))
-    model.delta_speed_target_transform = resolve_checkpoint_delta_speed_target_transform(checkpoint)
-    model.eval()
-    return model
+    planner_format = str(checkpoint.get("planner_format", "")).strip()
+    width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
+    if planner_format == PLANNER_FORMAT:
+        telemetry_feature_names = checkpoint.get("telemetry_feature_names") or [
+            "current_speed",
+            "yaw_sin",
+            "yaw_cos",
+            "yaw_rate",
+            "steering",
+            "acceleration",
+        ]
+        control_target_names = resolve_checkpoint_control_target_names(checkpoint, future_steps=len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]))
+        telemetry_offsets = checkpoint.get("telemetry_offsets") or [-8, -7, -6, -5, -4, -3, -2, -1, 0]
+        future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+        model_metadata = checkpoint.get("model", {})
+        telemetry_hidden_dim = 128
+        if isinstance(model_metadata, dict) and model_metadata.get("telemetry_hidden_dim") is not None:
+            telemetry_hidden_dim = int(model_metadata["telemetry_hidden_dim"])
+        model = DrivingCNN(
+            frame_count=frame_count,
+            telemetry_feature_dim=len(telemetry_feature_names),
+            telemetry_hidden_dim=telemetry_hidden_dim,
+            telemetry_sequence_length=len(telemetry_offsets),
+            horizon=len(future_offsets),
+            control_dim=len(control_target_names),
+            width_multiplier=width_multiplier,
+        ).to(device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        return model
+
+    raise ValueError(
+        "Legacy scalar-head checkpoints are no longer supported by the live runtime. "
+        "Load a temporal_telemetry_gru_v1 planner checkpoint instead."
+    )
+
+
+def resolve_checkpoint_control_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
+    names = checkpoint.get("control_target_names")
+    if isinstance(names, list) and names:
+        return [str(name).strip() for name in names if str(name).strip()]
+
+    state_dict = checkpoint.get("model_state_dict", {})
+    control_head_bias = state_dict.get("control_head.bias")
+    if isinstance(control_head_bias, torch.Tensor) and future_steps > 0:
+        control_dim = int(control_head_bias.numel()) // future_steps
+        if control_dim == 2:
+            return ["steering", "acceleration"]
+        if control_dim == len(DEFAULT_CONTROL_TARGET_NAMES):
+            return list(DEFAULT_CONTROL_TARGET_NAMES)
+    return ["steering", "acceleration"]
 
 
 def resolve_checkpoint_frame_count(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
@@ -295,15 +363,13 @@ def run_sample_inference(
     x, state_inputs, targets = dataset[sample_index]
     sample_meta = dataset.samples[sample_index]
     x = x.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    current_speed = state_inputs.get(CURRENT_SPEED_KEY)
-    route_forward_delta = state_inputs.get(ROUTE_FORWARD_DELTA_KEY)
-    if current_speed is not None:
-        current_speed = current_speed.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    if route_forward_delta is not None:
-        route_forward_delta = route_forward_delta.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    model_state_inputs = {
+        key: value.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+        for key, value in state_inputs.items()
+    }
 
     with torch.no_grad():
-        output = model(x, current_speed=current_speed, route_forward_delta=route_forward_delta)
+        output = model(x, state_inputs=model_state_inputs)
     head_specs = model.head_specs
     delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
 
@@ -340,6 +406,7 @@ def build_output(
         "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
         "sample_stride": checkpoint_sample_stride(checkpoint),
         "input_channels": int(checkpoint.get("input_channels", 0) or 0),
+        "model": {"width_multiplier": resolve_checkpoint_width_multiplier(checkpoint)},
         "delta_speed_target_transform": resolve_checkpoint_delta_speed_target_transform(checkpoint).metadata(),
         "head_specs": checkpoint.get("head_specs", head_specs_metadata(head_specs)),
         "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
@@ -364,21 +431,18 @@ def print_plain(output: dict[str, Any]) -> None:
             f"sample_stride={output['sample_stride']} "
             f"input_channels={output['input_channels']}"
         )
+    model_metadata = output.get("model") or {}
+    if isinstance(model_metadata, dict):
+        print(f"Model: width_multiplier={float(model_metadata.get('width_multiplier', DEFAULT_WIDTH_MULTIPLIER)):.3f}")
     state_inputs = output.get("state_inputs") or {}
-    current_speed = state_inputs.get("current_speed") if isinstance(state_inputs, dict) else None
-    if isinstance(current_speed, dict) and current_speed.get("enabled"):
-        print(
-            "State inputs: "
-            f"current_speed enabled cap={float(current_speed.get('cap', 0.0)):.3f} "
-            f"fusion={current_speed.get('fusion', 'unknown')}"
-        )
-    route_forward_delta = state_inputs.get("route_forward_delta") if isinstance(state_inputs, dict) else None
-    if isinstance(route_forward_delta, dict) and route_forward_delta.get("enabled"):
-        print(
-            "State inputs: "
-            f"route_forward_delta enabled cap={float(route_forward_delta.get('cap', 0.0)):.3f} "
-            f"fusion={route_forward_delta.get('fusion', 'unknown')}"
-        )
+    if isinstance(state_inputs, dict):
+        for name, item in state_inputs.items():
+            if not isinstance(item, dict) or not item.get("enabled"):
+                continue
+            description = f"State input: {name} heads={list(item.get('heads', []))}"
+            if "cap" in item:
+                description += f" cap={float(item.get('cap', 0.0)):.3f}"
+            print(description)
 
     val_metrics = output.get("val_metrics") or {}
     if isinstance(val_metrics, dict) and val_metrics:

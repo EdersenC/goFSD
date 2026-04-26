@@ -7,7 +7,7 @@ var ErrUnsupportedPlatform = errors.New("virtual controller actuator is only sup
 type controlState struct {
 	Steer     float64 `json:"steer"`
 	Throttle  float64 `json:"throttle"`
-	Brake     float64 `json:"brake"`
+	Brake     float64 `json:"brakePressureAvg"`
 	Handbrake bool    `json:"handbrake"`
 }
 

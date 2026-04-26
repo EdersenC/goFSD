@@ -114,8 +114,17 @@ type ControlStatusUpdate = {
 type ControlTelemetryUpdate = {
     currentSpeed: number
     currentYaw: number
+    yawRate: number
+    steering: number
+    acceleration: number
+    brakePressureAvg: number
     routeForwardDelta: number
+    routeHeadingError: number
+    routeDistance: number
+    leadVehicleDistance: number
+    hasLeadVehicle: boolean
     timestampMs?: number
+    gameTimeMs?: number
 }
 
 type AvailableScene = {
@@ -137,6 +146,7 @@ let availableScenesSyncInFlight = false;
 let sceneListRequestInFlight = false;
 let activeControlPlayerSource: number | null = null;
 let controlConnectInFlight = false;
+let lastControlTelemetryDebugAt = 0;
 
 onNet("capture:startRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
@@ -316,12 +326,36 @@ onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
 
 onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
     rememberControlPlayerSource((global as any).source);
+    const now = Date.now();
+    if (now - lastControlTelemetryDebugAt >= 2000) {
+        lastControlTelemetryDebugAt = now;
+        console.log(
+            `[control] telemetry speed=${Number(update?.currentSpeed ?? 0).toFixed(2)} ` +
+            `yawRate=${Number(update?.yawRate ?? 0).toFixed(2)} ` +
+            `steer=${Number(update?.steering ?? 0).toFixed(2)} ` +
+            `accel=${Number(update?.acceleration ?? 0).toFixed(2)} ` +
+            `routeFwd=${Number(update?.routeForwardDelta ?? 0).toFixed(2)} ` +
+            `routeHeading=${Number(update?.routeHeadingError ?? 0).toFixed(2)} ` +
+            `routeDistance=${Number(update?.routeDistance ?? 0).toFixed(2)} ` +
+            `hasLead=${String(Boolean(update?.hasLeadVehicle))} ` +
+            `leadDistance=${Number(update?.leadVehicleDistance ?? 0).toFixed(2)}`
+        );
+    }
     try {
         await apiRequest("/control/telemetry", "POST", {
             currentSpeed: update?.currentSpeed ?? 0,
             currentYaw: update?.currentYaw ?? 0,
+            yawRate: update?.yawRate ?? 0,
+            steering: update?.steering ?? 0,
+            acceleration: update?.acceleration ?? 0,
             routeForwardDelta: update?.routeForwardDelta ?? 0,
+            routeHeadingError: update?.routeHeadingError ?? 0,
+            routeDistance: update?.routeDistance ?? 0,
+            leadVehicleDistance: update?.leadVehicleDistance ?? 0,
+            hasLeadVehicle: Boolean(update?.hasLeadVehicle),
             timestampMs: update?.timestampMs ?? 0
+            ,
+            gameTimeMs: update?.gameTimeMs ?? 0
         });
     } catch (err: any) {
         console.error(`[control] failed to push telemetry update: ${err?.message ?? err}`);
@@ -345,6 +379,10 @@ onNet("control:registerClient", async () => {
     await stopCaptureOnReconnect();
     await connectControlSession();
     requestAvailableScenesFromClient();
+});
+
+onNet("control:clientHeartbeat", () => {
+    rememberControlPlayerSource((global as any).source);
 });
 
 onNet("ego:vehicleData", async (data: WaypointCompleted) => {
@@ -599,6 +637,9 @@ function sanitizePathSegment(value: string): string {
 function rememberControlPlayerSource(value: unknown) {
     const parsed = Number(value);
     if (Number.isFinite(parsed) && parsed > 0) {
+        if (activeControlPlayerSource !== parsed) {
+            console.log(`[control] active player source set to ${parsed}`);
+        }
         activeControlPlayerSource = parsed;
     }
 }
@@ -861,9 +902,11 @@ async function pollControlCommands() {
 
         const playerSource = activeControlPlayerSource;
         if (playerSource === null) {
+            console.warn("[control] command available but no active control player is registered");
             return;
         }
 
+        console.log(`[control] dispatching command id=${command.id} type=${command.type} scene=${command.sceneName ?? ""} to source=${playerSource}`);
         emitNet("control:executeCommand", playerSource, command);
         lastSeenControlCommandId = command.id;
     } catch (err: any) {
@@ -880,7 +923,7 @@ setImmediate(() => {
 
 setInterval(() => {
     void pollControlCommands();
-}, 2000);
+}, 250);
 
 setInterval(() => {
     requestAvailableScenesFromClient();
