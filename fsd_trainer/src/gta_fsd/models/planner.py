@@ -86,6 +86,29 @@ class ResidualStage(nn.Module):
         return self.blocks(x)
 
 
+def build_horizon_decoder(
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: int,
+    *,
+    num_layers: int,
+    dropout: float,
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    current_dim = input_dim
+    for _ in range(num_layers):
+        layers.extend(
+            [
+                nn.Linear(current_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            ]
+        )
+        current_dim = hidden_dim
+    layers.append(nn.Linear(current_dim, output_dim))
+    return nn.Sequential(*layers)
+
+
 class DrivingCNN(nn.Module):
     def __init__(
         self,
@@ -96,7 +119,21 @@ class DrivingCNN(nn.Module):
         telemetry_sequence_length: int = 9,
         horizon: int = 6,
         control_dim: int = 2,
+        state_input_dim: int = 0,
+        aux_dim: int = 4,
         width_multiplier: float = 1.0,
+        dropout: float = 0.1,
+        visual_temporal_enabled: bool = True,
+        visual_temporal_type: str = "gru",
+        visual_temporal_hidden_dim: int = 256,
+        visual_temporal_num_layers: int = 1,
+        visual_temporal_bidirectional: bool = False,
+        visual_temporal_dropout: float = 0.0,
+        horizon_decoder_enabled: bool = True,
+        horizon_embed_dim: int = 32,
+        horizon_decoder_hidden_dim: int = 256,
+        horizon_decoder_num_layers: int = 2,
+        horizon_decoder_dropout: float = 0.1,
     ) -> None:
         super().__init__()
         if frame_count < 1:
@@ -111,8 +148,32 @@ class DrivingCNN(nn.Module):
             raise ValueError("horizon must be > 0")
         if control_dim < 1:
             raise ValueError("control_dim must be > 0")
+        if aux_dim < 1:
+            raise ValueError("aux_dim must be > 0")
+        if state_input_dim < 0:
+            raise ValueError("state_input_dim must be >= 0")
         if width_multiplier <= 0:
             raise ValueError("width_multiplier must be > 0")
+        if not 0.0 <= dropout <= 1.0:
+            raise ValueError("dropout must be in [0.0, 1.0]")
+        if visual_temporal_type.strip().lower() != "gru":
+            raise ValueError("visual_temporal_type must be 'gru'")
+        if visual_temporal_hidden_dim < 1:
+            raise ValueError("visual_temporal_hidden_dim must be > 0")
+        if visual_temporal_num_layers < 1:
+            raise ValueError("visual_temporal_num_layers must be > 0")
+        if not 0.0 <= visual_temporal_dropout <= 1.0:
+            raise ValueError("visual_temporal_dropout must be in [0.0, 1.0]")
+        if not horizon_decoder_enabled:
+            raise ValueError("horizon decoder is required for the temporal planner")
+        if horizon_embed_dim < 1:
+            raise ValueError("horizon_embed_dim must be > 0")
+        if horizon_decoder_hidden_dim < 1:
+            raise ValueError("horizon_decoder_hidden_dim must be > 0")
+        if horizon_decoder_num_layers < 1:
+            raise ValueError("horizon_decoder_num_layers must be > 0")
+        if not 0.0 <= horizon_decoder_dropout <= 1.0:
+            raise ValueError("horizon_decoder_dropout must be in [0.0, 1.0]")
 
         self.frame_count = frame_count
         self.telemetry_feature_dim = telemetry_feature_dim
@@ -120,8 +181,21 @@ class DrivingCNN(nn.Module):
         self.telemetry_sequence_length = telemetry_sequence_length
         self.horizon = horizon
         self.control_dim = control_dim
-        self.aux_dim = 3
-        self.input_channels = frame_count * 3
+        self.state_input_dim = state_input_dim
+        self.aux_dim = aux_dim
+        self.input_channels = 3
+        self.dropout = float(dropout)
+        self.visual_temporal_enabled = bool(visual_temporal_enabled)
+        self.visual_temporal_type = visual_temporal_type.strip().lower()
+        self.visual_temporal_hidden_dim = visual_temporal_hidden_dim
+        self.visual_temporal_num_layers = visual_temporal_num_layers
+        self.visual_temporal_bidirectional = bool(visual_temporal_bidirectional)
+        self.visual_temporal_dropout = float(visual_temporal_dropout)
+        self.horizon_decoder_enabled = bool(horizon_decoder_enabled)
+        self.horizon_embed_dim = horizon_embed_dim
+        self.horizon_decoder_hidden_dim = horizon_decoder_hidden_dim
+        self.horizon_decoder_num_layers = horizon_decoder_num_layers
+        self.horizon_decoder_dropout = float(horizon_decoder_dropout)
 
         stem_width = scaled_width(64, width_multiplier)
         stage2_width = scaled_width(128, width_multiplier)
@@ -130,7 +204,7 @@ class DrivingCNN(nn.Module):
         head_hidden_width = scaled_width(128, width_multiplier)
 
         self.stem = ConvNormAct(
-            in_channels=self.input_channels,
+            in_channels=3,
             out_channels=stem_width,
             kernel_size=7,
             stride=2,
@@ -145,32 +219,112 @@ class DrivingCNN(nn.Module):
         self.vision_fc = nn.Sequential(
             nn.Linear(stage3_width * 2 * 2, fusion_width),
             nn.ReLU(),
+            nn.LayerNorm(fusion_width),
         )
+        visual_temporal_width = (
+            visual_temporal_hidden_dim * (2 if self.visual_temporal_bidirectional else 1)
+            if self.visual_temporal_enabled
+            else fusion_width
+        )
+        self.visual_temporal_gru = (
+            nn.GRU(
+                input_size=fusion_width,
+                hidden_size=visual_temporal_hidden_dim,
+                num_layers=visual_temporal_num_layers,
+                batch_first=True,
+                bidirectional=self.visual_temporal_bidirectional,
+                dropout=visual_temporal_dropout if visual_temporal_num_layers > 1 else 0.0,
+            )
+            if self.visual_temporal_enabled
+            else nn.Identity()
+        )
+        self.visual_temporal_norm = nn.LayerNorm(visual_temporal_width)
 
+        self.telemetry_encoder = nn.Sequential(
+            nn.Linear(telemetry_feature_dim, telemetry_hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(telemetry_hidden_dim),
+            nn.Dropout(self.dropout),
+        )
         self.telemetry_gru = nn.GRU(
-            input_size=telemetry_feature_dim,
+            input_size=telemetry_hidden_dim,
             hidden_size=telemetry_hidden_dim,
             batch_first=True,
         )
+        self.telemetry_norm = nn.LayerNorm(telemetry_hidden_dim)
+        self.state_encoder = (
+            nn.Sequential(
+                nn.Linear(state_input_dim, state_input_dim),
+                nn.ReLU(),
+                nn.LayerNorm(state_input_dim),
+                nn.Dropout(self.dropout),
+            )
+            if state_input_dim > 0
+            else nn.Identity()
+        )
         self.fusion = nn.Sequential(
-            nn.Linear(fusion_width + telemetry_hidden_dim, fusion_width),
+            nn.Linear(visual_temporal_width + telemetry_hidden_dim + state_input_dim, fusion_width),
             nn.ReLU(),
+            nn.Dropout(self.dropout),
             nn.Linear(fusion_width, head_hidden_width),
             nn.ReLU(),
+            nn.Dropout(self.dropout),
         )
-        self.control_head = nn.Linear(head_hidden_width, horizon * self.control_dim)
-        self.aux_head = nn.Linear(head_hidden_width, horizon * self.aux_dim)
+        self.context_dim = head_hidden_width
+        self.horizon_embeddings = nn.Embedding(horizon, horizon_embed_dim)
+        decoder_input_dim = self.context_dim + horizon_embed_dim
+        self.control_decoder = build_horizon_decoder(
+            decoder_input_dim,
+            horizon_decoder_hidden_dim,
+            self.control_dim,
+            num_layers=horizon_decoder_num_layers,
+            dropout=horizon_decoder_dropout,
+        )
+        self.aux_decoder = build_horizon_decoder(
+            decoder_input_dim,
+            horizon_decoder_hidden_dim,
+            self.aux_dim,
+            num_layers=horizon_decoder_num_layers,
+            dropout=horizon_decoder_dropout,
+        )
 
-    def _encode_vision(self, images: torch.Tensor) -> torch.Tensor:
-        batch_size, time_steps, channels, height, width = images.shape
-        fused_images = images.reshape(batch_size, time_steps * channels, height, width)
-        features = self.stem_pool(self.stem(fused_images))
+    def _encode_frame_features(self, frame_images: torch.Tensor) -> torch.Tensor:
+        if frame_images.device.type == "cuda":
+            frame_images = frame_images.contiguous(memory_format=torch.channels_last)
+        features = self.stem_pool(self.stem(frame_images))
         features = self.stage1(features)
         features = self.stage2(features)
         features = self.stage3(features)
         return self.vision_fc(self.flatten(self.pool(features)))
 
-    def forward(self, images: torch.Tensor, telemetry: torch.Tensor) -> dict[str, torch.Tensor]:
+    def _encode_vision(self, images: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, channels, height, width = images.shape
+        if torch.is_floating_point(images):
+            normalized_images = images.float()
+        else:
+            normalized_images = images.to(dtype=torch.float32).div_(255.0)
+
+        # The dataset provides frames in chronological order:
+        # images[:, 0] is the oldest frame and images[:, -1] is newest/current.
+        frame_images = normalized_images.reshape(batch_size * time_steps, channels, height, width)
+        frame_embeddings = self._encode_frame_features(frame_images)
+        visual_sequence = frame_embeddings.reshape(batch_size, time_steps, -1)
+        if self.visual_temporal_enabled:
+            _, hidden = self.visual_temporal_gru(visual_sequence)
+            if self.visual_temporal_bidirectional:
+                visual_vec = torch.cat((hidden[-2], hidden[-1]), dim=-1)
+            else:
+                visual_vec = hidden[-1]
+        else:
+            visual_vec = visual_sequence[:, -1]
+        return self.visual_temporal_norm(visual_vec)
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        telemetry: torch.Tensor,
+        state_inputs: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         if images.ndim != 5:
             raise ValueError(f"images must have rank 5 [B, T_img, C, H, W], got {tuple(images.shape)}")
         if images.shape[1] != self.frame_count:
@@ -195,22 +349,49 @@ class DrivingCNN(nn.Module):
                 "images and telemetry batch sizes must match: "
                 f"images={int(images.shape[0])} telemetry={int(telemetry.shape[0])}"
             )
+        if self.state_input_dim > 0:
+            if state_inputs is None:
+                raise ValueError(f"state_inputs must be provided with shape [B, {self.state_input_dim}]")
+            if state_inputs.ndim != 2:
+                raise ValueError(
+                    f"state_inputs must have rank 2 [B, S], got {tuple(state_inputs.shape)}"
+                )
+            if state_inputs.shape[0] != images.shape[0]:
+                raise ValueError(
+                    "state_inputs batch size must match images batch size: "
+                    f"state_inputs={int(state_inputs.shape[0])} images={int(images.shape[0])}"
+                )
+            if state_inputs.shape[1] != self.state_input_dim:
+                raise ValueError(
+                    "state_inputs width mismatch: "
+                    f"expected {self.state_input_dim}, got {int(state_inputs.shape[1])}"
+                )
+        elif state_inputs is not None and state_inputs.numel() > 0:
+            raise ValueError(
+                f"state_inputs were provided but this model was built with state_input_dim={self.state_input_dim}"
+            )
 
-        vision_vec = self._encode_vision(images.float())
-        _, hidden = self.telemetry_gru(telemetry.float())
-        telemetry_vec = hidden[-1]
-        fused = self.fusion(torch.cat((vision_vec, telemetry_vec), dim=-1))
+        vision_vec = self._encode_vision(images)
+        _, hidden = self.telemetry_gru(self.telemetry_encoder(telemetry.float()))
+        telemetry_vec = self.telemetry_norm(hidden[-1])
+        fused_parts = [vision_vec, telemetry_vec]
+        if self.state_input_dim > 0 and state_inputs is not None:
+            fused_parts.append(self.state_encoder(state_inputs.float()))
+        context = self.fusion(torch.cat(fused_parts, dim=-1))
 
-        pred_controls = self.control_head(fused).reshape(-1, self.horizon, self.control_dim)
-        pred_aux = self.aux_head(fused).reshape(-1, self.horizon, self.aux_dim)
+        horizon_tokens = self.horizon_embeddings.weight.unsqueeze(0).expand(context.shape[0], -1, -1)
+        context_expanded = context.unsqueeze(1).expand(-1, self.horizon, -1)
+        decoder_input = torch.cat((context_expanded, horizon_tokens), dim=-1)
+        pred_controls = self.control_decoder(decoder_input)
+        pred_aux = self.aux_decoder(decoder_input)
         if pred_controls.ndim != 3 or pred_controls.shape[1:] != (self.horizon, self.control_dim):
             raise ValueError(
-                "control_head reshape failed: "
+                "control_decoder shape check failed: "
                 f"expected [B, {self.horizon}, {self.control_dim}], got {tuple(pred_controls.shape)}"
             )
         if pred_aux.ndim != 3 or pred_aux.shape[1:] != (self.horizon, self.aux_dim):
             raise ValueError(
-                "aux_head reshape failed: "
+                "aux_decoder shape check failed: "
                 f"expected [B, {self.horizon}, {self.aux_dim}], got {tuple(pred_aux.shape)}"
             )
         return {

@@ -26,11 +26,15 @@ def _uint8_to_float_tensor(image: Tensor) -> Tensor:
     return image.to(dtype=torch.float32).div_(255.0)
 
 
-def load_rgb_tensor_from_path(image_path: str | Path, expected_size: tuple[int, int]) -> Tensor:
+def load_rgb_uint8_tensor_from_path(image_path: str | Path, expected_size: tuple[int, int]) -> Tensor:
     resolved_path = Path(image_path)
     image = read_image(str(resolved_path), mode=ImageReadMode.RGB)
+    return _validate_rgb_tensor(image, expected_size, source=str(resolved_path))
+
+
+def load_rgb_tensor_from_path(image_path: str | Path, expected_size: tuple[int, int]) -> Tensor:
     return _uint8_to_float_tensor(
-        _validate_rgb_tensor(image, expected_size, source=str(resolved_path))
+        load_rgb_uint8_tensor_from_path(image_path, expected_size)
     )
 
 

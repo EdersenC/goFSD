@@ -98,6 +98,74 @@ func TestSubmitUsesStopIntentToCoast(t *testing.T) {
 	}
 }
 
+func TestSubmitHoldsThrottleForConfiguredSeconds(t *testing.T) {
+	sink := &fakeActuator{}
+	cfg := DefaultConfig()
+	cfg.ThrottleHoldSeconds = 0.40
+	cfg.ThrottleHoldMin = 0
+	cfg.TargetSpeedErrorGain = 1
+	cfg.TargetAccelGain = 0
+	cfg.ThrottleRampUpPerSecond = 100
+	cfg.ThrottleDecayPerSecond = 100
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	svc := NewService(cfg, "", sink)
+	svc.nowFunc = func() time.Time { return now }
+
+	first, err := svc.Submit(Sample{
+		Sequence:     1,
+		Telemetry:    Telemetry{CurrentSpeedMPS: 0.0},
+		Lateral:      LateralIntent{HeadingErrorDeg: 0, Confidence: 1},
+		Longitudinal: LongitudinalIntent{TargetSpeedMPS: 0.6, TargetAccelMPS2: 0, Confidence: 1},
+		Motion:       MotionIntent{Intent: MotionIntentMove, Confidence: 1},
+	})
+	if err != nil {
+		t.Fatalf("Submit first returned error: %v", err)
+	}
+	firstThrottle := first.LastTrace.Command.Throttle
+	if firstThrottle <= 0 {
+		t.Fatalf("expected positive initial throttle, trace=%+v", first.LastTrace)
+	}
+
+	now = now.Add(100 * time.Millisecond)
+	second, err := svc.Submit(Sample{
+		Sequence:     2,
+		Telemetry:    Telemetry{CurrentSpeedMPS: 0.0},
+		Lateral:      LateralIntent{HeadingErrorDeg: 0, Confidence: 1},
+		Longitudinal: LongitudinalIntent{TargetSpeedMPS: 0.3, TargetAccelMPS2: 0, Confidence: 1},
+		Motion:       MotionIntent{Intent: MotionIntentMove, Confidence: 1},
+	})
+	if err != nil {
+		t.Fatalf("Submit second returned error: %v", err)
+	}
+	if second.LastTrace == nil || !strings.Contains(strings.Join(second.LastTrace.Reasons, ","), "throttle_hold") {
+		t.Fatalf("expected throttle_hold reason, got=%v", second.LastTrace.Reasons)
+	}
+	if second.LastTrace.Command.Throttle < firstThrottle-1e-6 {
+		t.Fatalf("expected hold throttle during window, first=%f second=%f", firstThrottle, second.LastTrace.Command.Throttle)
+	}
+
+	now = now.Add(700 * time.Millisecond)
+	third, err := svc.Submit(Sample{
+		Sequence:     3,
+		Telemetry:    Telemetry{CurrentSpeedMPS: 0.0},
+		Lateral:      LateralIntent{HeadingErrorDeg: 0, Confidence: 1},
+		Longitudinal: LongitudinalIntent{TargetSpeedMPS: 0.3, TargetAccelMPS2: 0, Confidence: 1},
+		Motion:       MotionIntent{Intent: MotionIntentMove, Confidence: 1},
+	})
+	if err != nil {
+		t.Fatalf("Submit third returned error: %v", err)
+	}
+	if third.LastTrace == nil {
+		t.Fatalf("expected trace")
+	}
+	if third.LastTrace.Command.Throttle >= second.LastTrace.Command.Throttle {
+		t.Fatalf("expected throttle to start dropping after hold window, first=%f second=%f third=%f",
+			firstThrottle,
+			second.LastTrace.Command.Throttle,
+			third.LastTrace.Command.Throttle)
+	}
+}
+
 func TestSubmitHoldsThrottleAcrossSmallPredictionDip(t *testing.T) {
 	sink := &fakeActuator{}
 	svc := NewService(DefaultConfig(), "", sink)
@@ -123,7 +191,7 @@ func TestSubmitHoldsThrottleAcrossSmallPredictionDip(t *testing.T) {
 		Sequence:     1,
 		Telemetry:    Telemetry{CurrentSpeedMPS: 3.5},
 		Lateral:      LateralIntent{HeadingErrorDeg: 0, Confidence: 1},
-		Longitudinal: LongitudinalIntent{TargetSpeedMPS: 3.5, TargetAccelMPS2: -0.2, Confidence: 1},
+		Longitudinal: LongitudinalIntent{TargetSpeedMPS: 3.7, TargetAccelMPS2: -0.2, Confidence: 1},
 		Motion:       MotionIntent{Intent: MotionIntentMove, Confidence: 1},
 	})
 	if err != nil {

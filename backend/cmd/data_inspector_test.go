@@ -78,8 +78,8 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 					"Steering": 0.15,
 				},
 				"aux": map[string]any{
-					"future_yaw_delta": 3.5,
-					"move_intent":      true,
+					"future_yaw_delta":   3.5,
+					"future_speed_delta": 0.25,
 				},
 			},
 			"frame_paths": []string{"a.jpg"},
@@ -105,7 +105,7 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 	}
 	assertFieldKind(t, processedFields, "label.control.Steering", "number")
 	assertFieldKind(t, processedFields, "label.aux.future_yaw_delta", "number")
-	assertFieldKind(t, processedFields, "label.aux.move_intent", "boolean")
+	assertFieldKind(t, processedFields, "label.aux.future_speed_delta", "number")
 	assertFieldMissing(t, processedFields, "frame_paths")
 
 	rawSeries, err := loadInspectorSeries(selection, dataSourceRaw, []string{"yaw", "currentSpeed"})

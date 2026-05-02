@@ -1,5 +1,5 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
-import {Environment, EnvironmentService} from "./environment";
+import {Environment, EnvironmentService, WeatherType} from "./environment";
 import {syncFlash} from "./sceneManger";
 import {requestCapture, requestTripFinalize, TripFinalizeResponse} from "./captureControl";
 import {buildDeterministicTripProfile, TripProfileSnapshot} from "./tripProfiles";
@@ -167,7 +167,43 @@ export interface Ego {
     waypoints?: Route[]
 }
 
-type Vector3 = [number, number, number]
+export type Vector3 = [number, number, number]
+
+export type SpawnPoint = {
+    coords: Vector3
+    heading: number
+}
+
+export type ManagedNpcVehicle = {
+    id: string
+    vehicle: number
+    driver: number
+    spawn: SpawnPoint
+}
+
+export type ScenarioSampleContext = {
+    recordingType: "scenarioStep"
+    scenarioId: string
+    stepId: string
+    sampleIndex: number
+    variantHash: string
+    seed: string
+    factors: Record<string, unknown>
+    goal: string
+}
+
+type RecordingContext = {
+    recordingType: "trip" | "scenarioStep"
+    sceneId: string
+    sceneVariant: string
+    tripIndex: number
+    syncTime: number
+    chunkStartTime: number
+    fromDestination: [number, number, number]
+    toDestination: [number, number, number]
+    tripProfile: TripProfileSnapshot
+    scenario?: ScenarioSampleContext
+}
 
 const VehicleNodeFlags = {
     OffRoad: 1 << 0,
@@ -233,6 +269,24 @@ export interface VehicleData {
     timeSinceChunkStartMs?: number
     dataPointIndex?: number
     chunkIndex?: number
+    recordingType?: "trip" | "scenarioStep"
+    scenarioId?: string
+    scenarioStepId?: string
+    scenarioSampleIndex?: number
+    scenarioVariantHash?: string
+    scenarioSeed?: string
+    scenarioGoal?: string
+    scenarioFactors?: Record<string, unknown>
+}
+
+type RouteDirectionTelemetry = {
+    routeDirectionCode: number
+    routeDirectionDistanceM: number
+    routeDirectionUnknown: number
+    routeDirectionKeepStraight: number
+    routeDirectionTurnLeft: number
+    routeDirectionTurnRight: number
+    routeDirectionRerouteWrongWay: number
 }
 
 export interface WaypointCompleted {
@@ -250,6 +304,14 @@ export interface WaypointCompleted {
     tripProfile: TripProfileSnapshot
     vehicle: Omit<Vehicle, "id">
     vehicleData: VehicleData[]
+    recordingType?: "trip" | "scenarioStep"
+    scenarioId?: string
+    scenarioStepId?: string
+    scenarioSampleIndex?: number
+    scenarioVariantHash?: string
+    scenarioSeed?: string
+    scenarioFactors?: Record<string, unknown>
+    scenarioGoal?: string
 }
 
 export const SceneStoppedErrorCode = "SCENE_STOPPED";
@@ -266,16 +328,7 @@ export class EgoService {
     private baseEnvironment: Environment | null = null;
     private tripChunkIndex = 0;
     private tripDataPointIndex = 0;
-    private activeTripContext: {
-        sceneId: string
-        sceneVariant: string
-        tripIndex: number
-        syncTime: number
-        chunkStartTime: number
-        fromDestination: [number, number, number]
-        toDestination: [number, number, number]
-        tripProfile: TripProfileSnapshot
-    } | null = null;
+    private activeTripContext: RecordingContext | null = null;
     private stopRequested = false;
     private stopReason = "";
     private cameraTickId: number | null = null;
@@ -318,6 +371,88 @@ export class EgoService {
         this.makePlayerUnaware(PlayerPedId(),true)
         console.log(`[ego-control] FiveM ego setup ready build=${EGO_BUILD_ID} chunk_points=${EgoService.MAX_TRIP_VEHICLE_DATA_POINTS}; vehicle actuation now comes from the Go virtual controller.`);
         return
+    }
+
+    public configureManualRouteContext(ego: Ego) {
+        if (!isValidEntity(ego.vehicle.id)) {
+            console.log("[ego-control] cannot configure route context because ego vehicle is invalid.");
+            return;
+        }
+        if (!ego.waypoints || ego.waypoints.length === 0) {
+            console.log("[ego-control] no waypoint available for manual route context.");
+            return;
+        }
+
+        const sceneInfo = this.parseSceneName(this.SceneName);
+        const tripProfile = buildDeterministicTripProfile(
+            this.RunId,
+            sceneInfo.sceneId,
+            sceneInfo.sceneVariant,
+            0,
+            this.baseEnvironment ?? undefined
+        );
+        const startCoords = GetEntityCoords(ego.vehicle.id, false) as [number, number, number];
+        const route = this.configureRoute(ego.waypoints[0], ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
+        const [x, y, z] = route.destination;
+        const now = GetGameTimer();
+
+        this.activeTripContext = {
+            recordingType: "trip",
+            sceneId: sceneInfo.sceneId,
+            sceneVariant: sceneInfo.sceneVariant,
+            tripIndex: 0,
+            syncTime: now,
+            chunkStartTime: now,
+            fromDestination: startCoords,
+            toDestination: [x, y, z],
+            tripProfile
+        };
+        SetNewWaypoint(x, y);
+        console.log(`[ego-control] manual route context set target=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+    }
+
+    public beginScenarioSampleRecording(
+        ego: Ego,
+        context: {
+            runId: string
+            sceneId: string
+            sceneVariant: string
+            sampleIndex: number
+            syncTime: number
+            fromDestination: Vector3
+            toDestination: Vector3
+            scenario: ScenarioSampleContext
+        }
+    ) {
+        this.RunId = context.runId;
+        this.SceneName = `${context.sceneId}:${context.sceneVariant}`;
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
+        ego.vehicle.VehicleData = [];
+
+        this.activeTripContext = {
+            recordingType: "scenarioStep",
+            sceneId: context.sceneId,
+            sceneVariant: context.sceneVariant,
+            tripIndex: context.sampleIndex,
+            syncTime: context.syncTime,
+            chunkStartTime: context.syncTime,
+            fromDestination: context.fromDestination,
+            toDestination: context.toDestination,
+            tripProfile: this.emptyScenarioTripProfile(context),
+            scenario: context.scenario
+        };
+    }
+
+    public finishScenarioSampleRecording(ego: Ego, endTime = GetGameTimer()) {
+        this.emitTripChunk(ego, endTime, true);
+        this.activeTripContext = null;
+    }
+
+    public clearRecordingContext() {
+        this.activeTripContext = null;
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
     }
 
     private resetEgoControlRuntime() {
@@ -370,7 +505,8 @@ export class EgoService {
         const yaw = GetEntityHeading(id);
         const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
         const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
-        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        const routeTarget = this.getRouteTarget(gpsRouteFound, gps);
+        const routeContext = this.collectRouteContext(id, coords, yaw, routeTarget);
         if (!routeContext.routeGpsValid || routeContext.routeForwardDelta === undefined) {
             return null;
         }
@@ -384,6 +520,28 @@ export class EgoService {
         steering: number
         acceleration: number
         brakePressureAvg: number
+        vehicleExists: boolean
+        isInVehicle: boolean
+        positionX?: number
+        positionY?: number
+        positionZ?: number
+        velocityX?: number
+        velocityY?: number
+        velocityZ?: number
+        pitchDeg?: number
+        rollDeg?: number
+        gear?: number
+        rpm?: number
+        wheelAngle?: number
+        onGround?: boolean
+        collisionState?: string
+        routeDirectionCode: number
+        routeDirectionDistanceM: number
+        routeDirectionUnknown: number
+        routeDirectionKeepStraight: number
+        routeDirectionTurnLeft: number
+        routeDirectionTurnRight: number
+        routeDirectionRerouteWrongWay: number
         routeForwardDelta: number | null
         routeHeadingError: number | null
         routeDistance: number | null
@@ -396,15 +554,24 @@ export class EgoService {
         }
         const id = this.oldEgo.vehicle.id;
         const coords = GetEntityCoords(id, true) as Vector3;
+        const velocity = this.toVector3(GetEntityVelocity(id)) ?? [0, 0, 0];
         const yaw = GetEntityHeading(id);
+        const pitch = GetEntityPitch(id);
+        const roll = GetEntityRoll(id);
         const currentSpeed = GetEntitySpeed(id);
         const acceleration = GetVehicleCurrentAcceleration(id);
         const brakePressureAvg = this.averageBrakePressure(id);
         const steering = GetVehicleWheelSteeringAngle(id, 0);
         const rotationVelocity = this.toVector3(GetEntityRotationVelocity(id)) ?? [0, 0, 0];
+        const gear = GetVehicleCurrentGear(id);
+        const rpm = GetVehicleCurrentRpm(id);
+        const onGround = this.vehicleOnGround(id);
+        const collisionState = this.hasEntityCollision(id) ? "collision" : "";
         const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
         const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
-        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        const routeTarget = this.getRouteTarget(gpsRouteFound, gps);
+        const routeContext = this.collectRouteContext(id, coords, yaw, routeTarget);
+        const routeDirection = this.resolveRouteDirectionFromContext(routeContext);
         const nearbyActors = this.collectNearbyActorSummary(id, coords, yaw, currentSpeed);
         return {
             currentSpeed,
@@ -413,6 +580,28 @@ export class EgoService {
             steering,
             acceleration,
             brakePressureAvg,
+            vehicleExists: true,
+            isInVehicle: IsPedInVehicle(PlayerPedId(), id, false),
+            positionX: coords[0],
+            positionY: coords[1],
+            positionZ: coords[2],
+            velocityX: velocity[0],
+            velocityY: velocity[1],
+            velocityZ: velocity[2],
+            pitchDeg: pitch,
+            rollDeg: roll,
+            gear,
+            rpm,
+            wheelAngle: steering,
+            onGround,
+            collisionState,
+            routeDirectionCode: routeDirection.routeDirectionCode,
+            routeDirectionDistanceM: routeDirection.routeDirectionDistanceM,
+            routeDirectionUnknown: routeDirection.routeDirectionUnknown,
+            routeDirectionKeepStraight: routeDirection.routeDirectionKeepStraight,
+            routeDirectionTurnLeft: routeDirection.routeDirectionTurnLeft,
+            routeDirectionTurnRight: routeDirection.routeDirectionTurnRight,
+            routeDirectionRerouteWrongWay: routeDirection.routeDirectionRerouteWrongWay,
             routeForwardDelta: routeContext.routeForwardDelta ?? null,
             routeHeadingError: routeContext.routeHeadingError ?? null,
             routeDistance: routeContext.routeDistance ?? null,
@@ -515,6 +704,7 @@ export class EgoService {
                 const syncTime = await syncFlash(1000);
                 console.log('Routing to waypoint:', waypoint.destination);
                 this.activeTripContext = {
+                    recordingType: "trip",
                     sceneId: sceneInfo.sceneId,
                     sceneVariant: sceneInfo.sceneVariant,
                     tripIndex,
@@ -702,6 +892,14 @@ export class EgoService {
                 VehicleData: undefined,
             },
             vehicleData: vehicleDataChunk,
+            recordingType: this.activeTripContext.recordingType,
+            scenarioId: this.activeTripContext.scenario?.scenarioId,
+            scenarioStepId: this.activeTripContext.scenario?.stepId,
+            scenarioSampleIndex: this.activeTripContext.scenario?.sampleIndex,
+            scenarioVariantHash: this.activeTripContext.scenario?.variantHash,
+            scenarioSeed: this.activeTripContext.scenario?.seed,
+            scenarioFactors: this.activeTripContext.scenario?.factors,
+            scenarioGoal: this.activeTripContext.scenario?.goal,
         };
 
         console.log(
@@ -734,6 +932,41 @@ export class EgoService {
         const seconds = this.pad2(now.getSeconds());
         const suffix = Math.random().toString(36).slice(2, 8);
         return `${year}-${month}-${day}_${this.pad2(hours12)}-${minutes}-${seconds}${meridiem}_${suffix}`;
+    }
+
+    private emptyScenarioTripProfile(context: {
+        runId: string
+        sceneId: string
+        sceneVariant: string
+        sampleIndex: number
+        scenario: ScenarioSampleContext
+    }): TripProfileSnapshot {
+        const factors = context.scenario.factors ?? {};
+        const timeFactor = (factors.time ?? {}) as { hour?: unknown; minute?: unknown; second?: unknown; label?: unknown };
+        const weatherType = typeof factors.weather === "string"
+            ? factors.weather as WeatherType
+            : WeatherType.EXTRA_SUNNY;
+        const hour = typeof timeFactor.hour === "number" ? timeFactor.hour : 12;
+        const minute = typeof timeFactor.minute === "number" ? timeFactor.minute : 0;
+        const second = typeof timeFactor.second === "number" ? timeFactor.second : 0;
+        const vehicleModel = typeof factors.egoVehicleModel === "string"
+            ? factors.egoVehicleModel
+            : VehicleModel.Sultan;
+
+        return {
+            seed: `${context.runId}:${context.sceneId}:${context.sceneVariant}:${context.scenario.stepId}:${context.sampleIndex}`,
+            weatherType,
+            time: {
+                hour,
+                minute,
+                second,
+                persistent: true
+            },
+            timeBucket: typeof timeFactor.label === "string" ? timeFactor.label : "scenario",
+            vehicleModel,
+            vehicleColor: VehicleColor.Random,
+            vehicleColorName: "Random"
+        };
     }
 
     private async prepareTripRuntime(ego: Ego, tripProfile: TripProfileSnapshot) {
@@ -822,7 +1055,8 @@ export class EgoService {
         const bodyHealth = GetVehicleBodyHealth(id);
         const handbrake = GetVehicleHandbrake(id);
         const stoppedAtTrafficLights = IsVehicleStoppedAtTrafficLights(id);
-        const routeContext = this.collectRouteContext(id, coords, yaw, gpsRouteFound, gps);
+        const routeTarget = this.getRouteTarget(gpsRouteFound, gps);
+        const routeContext = this.collectRouteContext(id, coords, yaw, routeTarget);
         const nearbyActors = this.collectNearbyActorSummary(id, coords, yaw, currentSpeed);
         const [streetNameHash, crossingRoadHash] = GetStreetNameAtCoord(coords[0], coords[1], coords[2]);
         const timeSinceSyncMs = this.activeTripContext ? Math.max(0, time - this.activeTripContext.syncTime) : undefined;
@@ -891,7 +1125,15 @@ export class EgoService {
             timeSinceSyncMs,
             timeSinceChunkStartMs,
             dataPointIndex: this.tripDataPointIndex,
-            chunkIndex: this.tripChunkIndex
+            chunkIndex: this.tripChunkIndex,
+            recordingType: this.activeTripContext?.recordingType,
+            scenarioId: this.activeTripContext?.scenario?.scenarioId,
+            scenarioStepId: this.activeTripContext?.scenario?.stepId,
+            scenarioSampleIndex: this.activeTripContext?.scenario?.sampleIndex,
+            scenarioVariantHash: this.activeTripContext?.scenario?.variantHash,
+            scenarioSeed: this.activeTripContext?.scenario?.seed,
+            scenarioGoal: this.activeTripContext?.scenario?.goal,
+            scenarioFactors: this.activeTripContext?.scenario?.factors
         };
 
         if (!ego.vehicle.VehicleData) {
@@ -936,7 +1178,86 @@ export class EgoService {
         return Math.min(Math.max(value, minValue), maxValue);
     }
 
-    private collectRouteContext(id: number, coords: Vector3, heading: number, gpsRouteFound: boolean, gps: Vector3) {
+    private vehicleOnGround(vehicle: number): boolean | undefined {
+        const natives = globalThis as any;
+        if (typeof natives.IsVehicleOnAllWheels === "function") {
+            return Boolean(natives.IsVehicleOnAllWheels(vehicle));
+        }
+        if (typeof natives.IsEntityInAir === "function") {
+            return !Boolean(natives.IsEntityInAir(vehicle));
+        }
+        return undefined;
+    }
+
+    private hasEntityCollision(entity: number): boolean {
+        const natives = globalThis as any;
+        if (typeof natives.HasEntityCollidedWithAnything !== "function") {
+            return false;
+        }
+        return Boolean(natives.HasEntityCollidedWithAnything(entity));
+    }
+
+    private resolveRouteDirectionFromContext(routeContext: {
+        routeGpsValid: boolean
+        routeDistance?: number
+        routeHeadingError?: number
+        routeForwardDelta?: number
+    }): RouteDirectionTelemetry {
+        const distance = Number(routeContext.routeDistance);
+        const result: RouteDirectionTelemetry = {
+            routeDirectionCode: 0,
+            routeDirectionDistanceM: Number.isFinite(distance) ? distance : 0,
+            routeDirectionUnknown: 1,
+            routeDirectionKeepStraight: 0,
+            routeDirectionTurnLeft: 0,
+            routeDirectionTurnRight: 0,
+            routeDirectionRerouteWrongWay: 0,
+        };
+
+        if (
+            !routeContext.routeGpsValid
+            || !Number.isFinite(routeContext.routeHeadingError)
+            || !Number.isFinite(routeContext.routeForwardDelta)
+        ) {
+            return result;
+        }
+
+        const headingError = routeContext.routeHeadingError as number;
+        const forwardDelta = routeContext.routeForwardDelta as number;
+        const headingThreshold = 22.5;
+        result.routeDirectionUnknown = 0;
+        if (forwardDelta < 0) {
+            result.routeDirectionRerouteWrongWay = 1;
+            result.routeDirectionCode = 4;
+            return result;
+        }
+        if (headingError <= -headingThreshold) {
+            result.routeDirectionTurnLeft = 1;
+            result.routeDirectionCode = 2;
+            return result;
+        }
+        if (headingError >= headingThreshold) {
+            result.routeDirectionTurnRight = 1;
+            result.routeDirectionCode = 3;
+            return result;
+        }
+
+        result.routeDirectionKeepStraight = 1;
+        result.routeDirectionCode = 1;
+        return result;
+    }
+
+    private getRouteTarget(gpsRouteFound: boolean, gps: Vector3): Vector3 | null {
+        if (gpsRouteFound && this.isFiniteVector3(gps)) {
+            return gps;
+        }
+        if (this.activeTripContext && this.isFiniteVector3(this.activeTripContext.toDestination)) {
+            return this.activeTripContext.toDestination;
+        }
+        return null;
+    }
+
+    private collectRouteContext(id: number, coords: Vector3, heading: number, routeTarget: Vector3 | null) {
         const isOnRoad = IsPointOnRoad(coords[0], coords[1], coords[2], id);
         const context: {
             routeGpsValid: boolean
@@ -964,8 +1285,8 @@ export class EgoService {
             isHighway: false,
         };
 
-        if (gpsRouteFound && this.isFiniteVector3(gps)) {
-            const delta = this.subtractVectors(gps, coords);
+        if (routeTarget && this.isFiniteVector3(routeTarget)) {
+            const delta = this.subtractVectors(routeTarget, coords);
             const deltaHeading = this.vectorHeadingDegrees(delta);
             const forward = this.headingForwardVector(heading);
             const right = this.headingRightVector(heading);

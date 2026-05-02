@@ -1,476 +1,111 @@
-"""Central planner head definitions.
-
-Developer note: to add a new head:
-1. Add a `HeadSpec` entry to `CONTROL_HEAD_SPECS` or `AUX_HEAD_SPECS`.
-2. Point `target_builder` at the raw label field or slice you want to train against.
-3. Set `loss_type` and `loss_weight`.
-4. Set `used_for_control=True` only if the head should be turned into applied controls.
-
-Control heads and trainable auxiliary heads share the same runtime registry. Older checkpoints may
-still advertise a smaller supported layout, so inference resolves heads from checkpoint metadata.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from functools import partial
-from typing import Any, Callable, Iterable, Literal, Mapping
+from dataclasses import dataclass
+from typing import Any, Iterable, Literal, Mapping
 
-import torch
-import torch.nn.functional as F
 from torch import Tensor
 
-from target_transforms import DELTA_SPEED_TARGET_LABEL_KEY
 
+LEGACY_SCALAR_HEAD_ERROR = (
+    "Legacy scalar-head planner has been removed. "
+    "Use temporal planner outputs pred_controls/pred_aux."
+)
 
 HeadKind = Literal["control", "aux"]
 LossType = Literal["smooth_l1", "mse", "bce_with_logits"] | None
-TargetBuilder = Callable[[dict[str, Any]], Tensor]
-FUTURE_YAW_DELTA_HEAD_NAME = "future_yaw_delta"
-FUTURE_SPEED_HEAD_NAME = "future_speed"
-MOVE_INTENT_HEAD_NAME = "move_intent"
-DELTA_SPEED_HEAD_NAME = "delta_speed"
-YAW_RATE_HEAD_NAME = "yaw_rate"
-FUTURE_HORIZON_SECONDS_TARGET_KEY = "future_horizon_seconds"
-CURRENT_SPEED_TARGET_KEY = "current_speed_raw"
-LEGACY_HEAD_NAME_ALIASES: dict[str, str] = {
-    "steer": FUTURE_YAW_DELTA_HEAD_NAME,
-    "future_steer": FUTURE_YAW_DELTA_HEAD_NAME,
-    "steering": FUTURE_YAW_DELTA_HEAD_NAME,
-}
-
-
-def _flatten_grouped_label_sections(label: dict[str, Any]) -> dict[str, Any]:
-    flat = dict(label)
-    for section_name in ("control", "aux", "raw"):
-        section = label.get(section_name)
-        if isinstance(section, Mapping):
-            for key, value in section.items():
-                flat.setdefault(key, value)
-    return flat
-
-
-def _require_label_key(label: dict[str, Any], raw_key: str) -> Any:
-    flattened = _flatten_grouped_label_sections(label)
-    if raw_key not in flattened:
-        raise KeyError(f"missing label key '{raw_key}'")
-    return flattened[raw_key]
-
-
-def _build_scalar_target(label: dict[str, Any], *, raw_key: str) -> Tensor:
-    value = _require_label_key(label, raw_key)
-    return _coerce_scalar(value, raw_key)
-
-
-def _build_xy_slice_target(label: dict[str, Any], *, raw_key: str) -> Tensor:
-    value = _require_label_key(label, raw_key)
-    return _coerce_vector_slice(value, raw_key, 2)
-
-
-def _build_binary_target(label: dict[str, Any], *, raw_key: str) -> Tensor:
-    value = _require_label_key(label, raw_key)
-    return _coerce_binary(value, raw_key)
-
-
 @dataclass(frozen=True)
 class HeadSpec:
     name: str
-    kind: HeadKind
-    output_dim: int
-    loss_type: LossType
-    loss_weight: float
-    target_source: str
-    target_builder: TargetBuilder
-    used_for_control: bool
-    required_target: bool = True
+    kind: HeadKind = "aux"
+    output_dim: int = 1
+    loss_type: LossType = None
+    loss_weight: float = 0.0
+    target_source: str = ""
+    target_builder: Any = None
+    used_for_control: bool = False
+    required_target: bool = False
 
     def metadata(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "kind": self.kind,
-            "output_dim": self.output_dim,
-            "loss_type": self.loss_type,
-            "loss_weight": self.loss_weight,
-            "target_source": self.target_source,
-            "used_for_control": self.used_for_control,
-            "required_target": self.required_target,
-        }
+        raise RuntimeError(LEGACY_SCALAR_HEAD_ERROR)
 
     def layout_metadata(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "kind": self.kind,
-            "output_dim": self.output_dim,
-            "used_for_control": self.used_for_control,
-        }
+        raise RuntimeError(LEGACY_SCALAR_HEAD_ERROR)
 
 
-def scalar_target(raw_key: str) -> TargetBuilder:
-    return partial(_build_scalar_target, raw_key=raw_key)
+HEAD_SPECS: tuple[HeadSpec, ...] = ()
+HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {}
+ALL_HEAD_SPECS: tuple[HeadSpec, ...] = ()
+ALL_HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {}
+ACTIVE_HEAD_SPECS: tuple[HeadSpec, ...] = ()
 
 
-def xy_slice_target(raw_key: str) -> TargetBuilder:
-    return partial(_build_xy_slice_target, raw_key=raw_key)
-
-
-def binary_target(raw_key: str) -> TargetBuilder:
-    return partial(_build_binary_target, raw_key=raw_key)
-
-
-CONTROL_HEAD_SPECS: tuple[HeadSpec, ...] = (
-    HeadSpec(
-        name=FUTURE_YAW_DELTA_HEAD_NAME,
-        kind="control",
-        output_dim=1,
-        loss_type="smooth_l1",
-        loss_weight=1.0,
-        target_source="label.aux.future_yaw_delta",
-        target_builder=scalar_target("future_yaw_delta"),
-        used_for_control=True,
-    ),
-    HeadSpec(
-        name=FUTURE_SPEED_HEAD_NAME,
-        kind="control",
-        output_dim=1,
-        loss_type="smooth_l1",
-        loss_weight=1.0,
-        target_source="label.aux.future_speed_target",
-        target_builder=scalar_target("future_speed_target"),
-        used_for_control=True,
-    ),
-)
-
-AUX_HEAD_SPECS: tuple[HeadSpec, ...] = (
-    HeadSpec(
-        name=MOVE_INTENT_HEAD_NAME,
-        kind="aux",
-        output_dim=1,
-        loss_type="bce_with_logits",
-        loss_weight=0.35,
-        target_source="label.aux.move_intent (bool or 0/1)",
-        target_builder=binary_target("move_intent"),
-        used_for_control=False,
-    ),
-    HeadSpec(
-        name=DELTA_SPEED_HEAD_NAME,
-        kind="aux",
-        output_dim=1,
-        loss_type="smooth_l1",
-        loss_weight=0.2,
-        target_source=f"label.aux.{DELTA_SPEED_TARGET_LABEL_KEY}",
-        target_builder=scalar_target(DELTA_SPEED_TARGET_LABEL_KEY),
-        used_for_control=False,
-    ),
-    HeadSpec(
-        name=YAW_RATE_HEAD_NAME,
-        kind="aux",
-        output_dim=1,
-        loss_type="smooth_l1",
-        loss_weight=0.1,
-        target_source="label.aux.yaw_rate",
-        target_builder=scalar_target("yaw_rate"),
-        used_for_control=False,
-    ),
-    HeadSpec(
-        name="route_xy",
-        kind="aux",
-        output_dim=2,
-        loss_type="smooth_l1",
-        loss_weight=0.35,
-        target_source="label.gps[:2]",
-        target_builder=xy_slice_target("gps"),
-        used_for_control=False,
-    ),
-    HeadSpec(
-        name="speed",
-        kind="aux",
-        output_dim=1,
-        loss_type="smooth_l1",
-        loss_weight=0.0,
-        target_source="label.currentSpeed",
-        target_builder=scalar_target("currentSpeed"),
-        used_for_control=False,
-    ),
-    HeadSpec(
-        name="is_stopped",
-        kind="aux",
-        output_dim=1,
-        loss_type="bce_with_logits",
-        loss_weight=0.0,
-        target_source="label.isStopped (bool or 0/1)",
-        target_builder=binary_target("isStopped"),
-        used_for_control=False,
-    ),
-)
-
-ALL_HEAD_SPECS: tuple[HeadSpec, ...] = CONTROL_HEAD_SPECS + AUX_HEAD_SPECS
-ALL_HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in ALL_HEAD_SPECS}
-ACTIVE_HEAD_SPECS: tuple[HeadSpec, ...] = (
-    ALL_HEAD_SPECS_BY_NAME[FUTURE_YAW_DELTA_HEAD_NAME],
-    ALL_HEAD_SPECS_BY_NAME[FUTURE_SPEED_HEAD_NAME],
-    ALL_HEAD_SPECS_BY_NAME[MOVE_INTENT_HEAD_NAME],
-    ALL_HEAD_SPECS_BY_NAME[DELTA_SPEED_HEAD_NAME],
-    ALL_HEAD_SPECS_BY_NAME[YAW_RATE_HEAD_NAME],
-)
-HEAD_SPECS: tuple[HeadSpec, ...] = ACTIVE_HEAD_SPECS
-HEAD_SPECS_BY_NAME: dict[str, HeadSpec] = {spec.name: spec for spec in HEAD_SPECS}
-
-if len(ALL_HEAD_SPECS_BY_NAME) != len(ALL_HEAD_SPECS):
-    raise ValueError("planner head names must be unique")
-for _spec in ALL_HEAD_SPECS:
-    if _spec.output_dim < 1:
-        raise ValueError(f"planner head '{_spec.name}' must have output_dim > 0")
+def _removed() -> None:
+    raise RuntimeError(LEGACY_SCALAR_HEAD_ERROR)
 
 
 def head_names(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[str, ...]:
-    return tuple(spec.name for spec in head_specs)
+    _removed()
 
 
 def canonical_head_name(name: str) -> str:
-    normalized = str(name).strip()
-    return LEGACY_HEAD_NAME_ALIASES.get(normalized, normalized)
+    _removed()
 
 
 def control_head_specs(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[HeadSpec, ...]:
-    return tuple(spec for spec in head_specs if spec.used_for_control)
+    _removed()
 
 
 def aux_head_specs(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[HeadSpec, ...]:
-    return tuple(spec for spec in head_specs if not spec.used_for_control)
+    _removed()
 
 
 def trainable_head_specs(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> tuple[HeadSpec, ...]:
-    return tuple(spec for spec in head_specs if spec.loss_type is not None and spec.loss_weight > 0.0)
+    _removed()
 
 
 def head_specs_metadata(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> list[dict[str, Any]]:
-    return [spec.metadata() for spec in head_specs]
+    _removed()
 
 
 def head_layout_metadata(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> list[dict[str, Any]]:
-    return [spec.layout_metadata() for spec in head_specs]
+    _removed()
 
 
 def resolve_head_specs_from_metadata(raw_specs: Any) -> tuple[HeadSpec, ...]:
-    if not isinstance(raw_specs, list):
-        raise ValueError("head metadata must be a list")
-
-    resolved: list[HeadSpec] = []
-    seen: set[str] = set()
-    for item in raw_specs:
-        if not isinstance(item, dict):
-            raise ValueError("head metadata entries must be dicts")
-        raw_name = str(item.get("name", "")).strip()
-        if not raw_name:
-            raise ValueError("head metadata entry is missing a non-empty name")
-        name = canonical_head_name(raw_name)
-        if name in seen:
-            raise ValueError(f"duplicate head metadata entry: {name}")
-        spec = ALL_HEAD_SPECS_BY_NAME.get(name)
-        if spec is None:
-            raise ValueError(f"unknown head in metadata: {raw_name}")
-        if "output_dim" in item and int(item.get("output_dim")) != spec.output_dim:
-            raise ValueError(f"head metadata output_dim mismatch for '{name}'")
-        resolved_kind = spec.kind
-        if "kind" in item:
-            raw_kind = str(item.get("kind", "")).strip().lower()
-            if raw_kind not in {"control", "aux"}:
-                raise ValueError(f"head metadata kind mismatch for '{name}'")
-            resolved_kind = raw_kind
-        resolved_used_for_control = spec.used_for_control
-        if "used_for_control" in item:
-            resolved_used_for_control = bool(item.get("used_for_control"))
-        seen.add(name)
-        resolved.append(replace(spec, kind=resolved_kind, used_for_control=resolved_used_for_control))
-    return tuple(resolved)
+    _removed()
 
 
 def resolve_checkpoint_head_specs(checkpoint: Mapping[str, Any]) -> tuple[HeadSpec, ...]:
-    raw_specs = checkpoint.get("head_specs")
-    if isinstance(raw_specs, list):
-        return resolve_head_specs_from_metadata(raw_specs)
-
-    raw_layout = checkpoint.get("head_layout")
-    if isinstance(raw_layout, list):
-        return resolve_head_specs_from_metadata(raw_layout)
-
-    raise ValueError(
-        "checkpoint is missing head_layout/head_specs metadata and predates the head-spec refactor; "
-        "retrain or export a new checkpoint"
-    )
+    _removed()
 
 
 def apply_loss_weight_overrides(loss_weight_overrides: Mapping[str, float] | None) -> tuple[HeadSpec, ...]:
-    if not loss_weight_overrides:
-        return HEAD_SPECS
-
-    normalized = {
-        canonical_head_name(str(name)): float(weight)
-        for name, weight in loss_weight_overrides.items()
-    }
-    unknown = sorted(set(normalized) - set(ALL_HEAD_SPECS_BY_NAME))
-    if unknown:
-        raise ValueError(f"unknown head loss weight override(s): {', '.join(unknown)}")
-    for name, weight in normalized.items():
-        if weight < 0.0:
-            raise ValueError(f"loss weight for head '{name}' must be >= 0")
-
-    resolved: list[HeadSpec] = []
-    for spec in HEAD_SPECS:
-        if spec.name in normalized:
-            weight = normalized[spec.name]
-            resolved.append(replace(spec, loss_weight=weight))
-        else:
-            resolved.append(spec)
-    return tuple(resolved)
+    _removed()
 
 
 def inactive_loss_weight_override_names(loss_weight_overrides: Mapping[str, float] | None) -> tuple[str, ...]:
-    if not loss_weight_overrides:
-        return ()
-    active = set(HEAD_SPECS_BY_NAME)
-    all_names = set(ALL_HEAD_SPECS_BY_NAME)
-    ignored: set[str] = set()
-    for raw_name in loss_weight_overrides:
-        name = canonical_head_name(str(raw_name))
-        if name in all_names and name not in active:
-            ignored.add(str(raw_name))
-    return tuple(sorted(ignored))
+    _removed()
 
 
 def build_targets_from_label(label: dict[str, Any], head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> dict[str, Tensor]:
-    targets: dict[str, Tensor] = {}
-    for spec in tuple(head_specs):
-        try:
-            targets[spec.name] = spec.target_builder(label)
-        except (KeyError, TypeError, ValueError) as exc:
-            if spec.required_target:
-                raise ValueError(
-                    f"failed to build target for head '{spec.name}' from {spec.target_source}: {exc}"
-                ) from exc
-    return targets
+    _removed()
 
 
 def get_control_outputs(outputs: Mapping[str, Tensor], head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> dict[str, Tensor]:
-    return {spec.name: outputs[spec.name] for spec in control_head_specs(head_specs)}
+    _removed()
 
 
-def normalize_head_tensor(name: str, value: Tensor, spec: HeadSpec) -> Tensor:
-    if not isinstance(value, torch.Tensor):
-        raise TypeError(f"head '{name}' must be a torch.Tensor, got {type(value).__name__}")
-
-    tensor = value.float()
-    if spec.output_dim == 1:
-        if tensor.ndim > 1 and tensor.shape[-1] == 1:
-            tensor = tensor.squeeze(-1)
-        if tensor.ndim > 1:
-            raise ValueError(f"head '{name}' expected a scalar tensor, got shape {tuple(tensor.shape)}")
-        return tensor
-
-    if tensor.ndim == 0:
-        raise ValueError(f"head '{name}' expected a vector tensor, got shape {tuple(tensor.shape)}")
-    if tensor.shape[-1] != spec.output_dim:
-        raise ValueError(
-            f"head '{name}' expected last dimension {spec.output_dim}, got shape {tuple(tensor.shape)}"
-        )
-    return tensor
+def normalize_head_tensor(name: str, value: Tensor, spec: HeadSpec | None = None) -> Tensor:
+    _removed()
 
 
 def compute_head_loss(spec: HeadSpec, prediction: Tensor, target: Tensor) -> Tensor | None:
-    if spec.loss_type is None:
-        return None
-
-    pred = normalize_head_tensor(spec.name, prediction, spec)
-    truth = normalize_head_tensor(spec.name, target, spec).to(dtype=pred.dtype)
-
-    if spec.loss_type == "smooth_l1":
-        return F.smooth_l1_loss(pred, truth)
-    if spec.loss_type == "mse":
-        return F.mse_loss(pred, truth)
-    if spec.loss_type == "bce_with_logits":
-        return F.binary_cross_entropy_with_logits(pred, truth)
-    raise ValueError(f"unsupported loss_type for head '{spec.name}': {spec.loss_type}")
+    _removed()
 
 
 def supported_metric_names(head_specs: Iterable[HeadSpec] = HEAD_SPECS) -> set[str]:
-    head_specs_tuple = tuple(head_specs)
-    control_specs = control_head_specs(head_specs_tuple)
-    aux_specs = aux_head_specs(head_specs_tuple)
-    names = {
-        "loss",
-        "overall_mae",
-        "overall_rmse",
-        "future_yaw_delta_weighted_sample_loss",
-        "yaw_consistency_loss",
-        "yaw_consistency_weighted_loss",
-        "speed_consistency_loss",
-        "speed_consistency_weighted_loss",
-    }
-    if control_specs:
-        names.update({
-            "control_loss",
-            "control_overall_mae",
-            "control_overall_rmse",
-        })
-    if aux_specs:
-        names.update({
-            "aux_loss",
-            "aux_overall_mae",
-            "aux_overall_rmse",
-        })
-    head_spec_names = {spec.name for spec in head_specs_tuple}
-    for spec in head_specs_tuple:
-        names.add(f"{spec.name}_loss")
-        names.add(f"{spec.name}_weighted_loss")
-        if spec.loss_type == "bce_with_logits":
-            names.add(f"{spec.name}_accuracy")
-        else:
-            names.add(f"{spec.name}_mae")
-            names.add(f"{spec.name}_rmse")
-    if FUTURE_YAW_DELTA_HEAD_NAME in head_spec_names:
-        names.add("yaw_delta_mae")
-        names.add("yaw_delta_rmse")
-    return names
+    _removed()
 
 
 def validate_checkpoint_head_layout(checkpoint: Mapping[str, Any]) -> None:
-    raw_layout = checkpoint.get("head_layout")
-    if not isinstance(raw_layout, list):
-        raise ValueError(
-            "checkpoint is missing head_layout metadata and predates the head-spec refactor; "
-            "retrain or export a new checkpoint"
-        )
-    resolve_head_specs_from_metadata(raw_layout)
-
-
-def _coerce_scalar(value: Any, raw_key: str) -> Tensor:
-    if isinstance(value, bool):
-        return torch.tensor(float(value), dtype=torch.float32)
-    if isinstance(value, (int, float)):
-        return torch.tensor(float(value), dtype=torch.float32)
-    raise TypeError(f"label key '{raw_key}' must be numeric, got {type(value).__name__}")
-
-
-def _coerce_binary(value: Any, raw_key: str) -> Tensor:
-    if isinstance(value, bool):
-        return torch.tensor(1.0 if value else 0.0, dtype=torch.float32)
-    if isinstance(value, (int, float)):
-        return torch.tensor(1.0 if float(value) != 0.0 else 0.0, dtype=torch.float32)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "y"}:
-            return torch.tensor(1.0, dtype=torch.float32)
-        if normalized in {"0", "false", "no", "n", ""}:
-            return torch.tensor(0.0, dtype=torch.float32)
-    raise TypeError(f"label key '{raw_key}' must be bool-like or 0/1, got {type(value).__name__}")
-
-
-def _coerce_vector_slice(value: Any, raw_key: str, size: int) -> Tensor:
-    if not isinstance(value, list) or len(value) < size:
-        raise TypeError(f"label key '{raw_key}' must be a numeric list with at least {size} entries")
-    out: list[float] = []
-    for index, item in enumerate(value[:size]):
-        if not isinstance(item, (int, float)):
-            raise TypeError(f"label key '{raw_key}[{index}]' must be numeric, got {type(item).__name__}")
-        out.append(float(item))
-    return torch.tensor(out, dtype=torch.float32)
+    _removed()

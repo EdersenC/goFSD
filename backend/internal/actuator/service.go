@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"awesomeProject/internal/control"
 )
 
 var ErrNotReady = errors.New("virtual controller is not ready")
@@ -27,6 +29,30 @@ type CommandRequest struct {
 	TimestampMs      int64   `json:"timestampMs,omitempty"`
 }
 
+type telemetryProvider interface {
+	LatestTelemetrySnapshot() (*control.RuntimeTelemetry, time.Time)
+	LatestActuatorEgoStateSnapshot() (*control.ActuatorEgoState, time.Time)
+	UpdateAppliedControls(control.AppliedControls)
+}
+
+type SafetyDebug struct {
+	CurrentSpeedMPS        float64 `json:"currentSpeedMps"`
+	CurrentSpeedKPH        float64 `json:"currentSpeedKph"`
+	SpeedLimitKPH          float64 `json:"speedLimitKph"`
+	OverspeedKPH           float64 `json:"overspeedKph,omitempty"`
+	ThrottleBefore         float64 `json:"throttleBefore"`
+	ThrottleAfter          float64 `json:"throttleAfter"`
+	BrakeBefore            float64 `json:"brakeBefore"`
+	BrakeAfter             float64 `json:"brakeAfter"`
+	ModelBrakeThreshold    float64 `json:"modelBrakeThreshold"`
+	ReverseLockoutSpeedKPH float64 `json:"reverseLockoutSpeedKph"`
+	BrakeThresholdApplied  bool    `json:"brakeThresholdApplied"`
+	SpeedLimitActive       bool    `json:"speedLimitActive"`
+	OverspeedBrakeApplied  bool    `json:"overspeedBrakeApplied"`
+	ReverseLockoutApplied  bool    `json:"reverseLockoutApplied"`
+	TelemetryAvailable     bool    `json:"telemetryAvailable"`
+}
+
 type commandEnvelope struct {
 	controlState
 	Enabled     bool   `json:"enabled"`
@@ -38,11 +64,13 @@ type commandEnvelope struct {
 
 type controllerSnapshot struct {
 	controlState
-	Enabled   bool   `json:"enabled"`
-	Stale     bool   `json:"stale"`
-	Holding   bool   `json:"holding"`
-	TimedOut  bool   `json:"timedOut"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
+	Enabled   bool           `json:"enabled"`
+	Stale     bool           `json:"stale"`
+	Holding   bool           `json:"holding"`
+	TimedOut  bool           `json:"timedOut"`
+	UpdatedAt string         `json:"updatedAt,omitempty"`
+	Safety    SafetyDebug    `json:"safety"`
+	Temporal  *TemporalDebug `json:"temporal,omitempty"`
 }
 
 type AppliedState = controllerSnapshot
@@ -66,29 +94,33 @@ type State struct {
 type Service struct {
 	cfg Config
 
-	mu                   sync.Mutex
-	nowFunc              func() time.Time
-	controller           controller
-	cancel               context.CancelFunc
-	done                 chan struct{}
-	started              bool
-	ready                bool
-	supported            bool
-	lastError            string
-	lastCmd              *commandEnvelope
-	target               controllerSnapshot
-	applied              AppliedState
-	lastApplyError       string
-	lastApplyAttemptedAt string
-	lastApplySucceededAt string
-	configPath           string
-	liveTuning           Tuning
-	savedTuning          Tuning
+	mu                    sync.Mutex
+	nowFunc               func() time.Time
+	controller            controller
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	started               bool
+	ready                 bool
+	supported             bool
+	lastError             string
+	lastCmd               *commandEnvelope
+	target                controllerSnapshot
+	applied               AppliedState
+	lastApplyError        string
+	lastApplyAttemptedAt  string
+	lastApplySucceededAt  string
+	configPath            string
+	liveTuning            Tuning
+	savedTuning           Tuning
+	telemetry             telemetryProvider
+	temporalBuffer        TemporalPlanBuffer
+	lastTemporalLogAt     time.Time
+	lastTemporalPlanState string
 }
 
-func NewService(cfg Config, configPath string) *Service {
+func NewService(cfg Config, configPath string, telemetry ...telemetryProvider) *Service {
 	tuning := cfg.Tuning()
-	return &Service{
+	service := &Service{
 		cfg:         cfg,
 		nowFunc:     time.Now,
 		supported:   runtime.GOOS == "windows",
@@ -104,6 +136,10 @@ func NewService(cfg Config, configPath string) *Service {
 			Stale:   true,
 		},
 	}
+	if len(telemetry) > 0 {
+		service.telemetry = telemetry[0]
+	}
+	return service
 }
 
 func (s *Service) Start() error {
@@ -155,6 +191,9 @@ func (s *Service) Close() error {
 	s.started = false
 	s.applied = AppliedState{Enabled: false, Stale: true}
 	s.target = controllerSnapshot{Enabled: false, Stale: true}
+	s.temporalBuffer = TemporalPlanBuffer{}
+	s.lastTemporalLogAt = time.Time{}
+	s.lastTemporalPlanState = ""
 	s.lastApplyError = ""
 	s.lastApplyAttemptedAt = ""
 	s.lastApplySucceededAt = ""
@@ -187,6 +226,40 @@ func (s *Service) Submit(req CommandRequest) (State, error) {
 		return s.stateLocked(), err
 	}
 	s.lastCmd = &cmd
+	if s.cfg.TemporalHorizonActuatorEnabled {
+		if !cmd.Enabled {
+			s.temporalBuffer = TemporalPlanBuffer{}
+			return s.stateLocked(), nil
+		}
+		inputTimestampS := timeToSeconds(now)
+		if cmd.TimestampMs > 0 {
+			inputTimestampS = float64(cmd.TimestampMs) / 1000.0
+		}
+		plan := LegacyPredictionAdapter(ControlCommand{
+			Steering:         cmd.Steer,
+			Throttle:         cmd.Throttle,
+			BrakePressureAvg: cmd.Brake,
+		}, inputTimestampS, timeToSeconds(now), nil, "legacy-command")
+		if err := s.temporalBuffer.Accept(plan, now); err != nil {
+			return s.stateLocked(), err
+		}
+	}
+	return s.stateLocked(), nil
+}
+
+func (s *Service) SubmitPredictionHorizon(plan PredictionHorizon) (State, error) {
+	now := s.nowFunc().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.supported {
+		return s.stateLocked(), ErrUnsupportedPlatform
+	}
+	if !s.ready || s.controller == nil {
+		return s.stateLocked(), ErrNotReady
+	}
+	if err := s.temporalBuffer.Accept(plan, now); err != nil {
+		return s.stateLocked(), err
+	}
 	return s.stateLocked(), nil
 }
 
@@ -243,14 +316,19 @@ func (s *Service) step(now time.Time) error {
 		return err
 	}
 	s.applied = nextApplied
+	s.recordAppliedControlsLocked(now, nextApplied.controlState)
 	s.lastApplyError = ""
 	s.lastApplySucceededAt = now.Format(time.RFC3339Nano)
 	return nil
 }
 
 func (s *Service) targetLocked(now time.Time) controllerSnapshot {
-	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.cfg.StaleTimeout, s.cfg.HoldLastCommand, now)
-	target = s.applyLiveTuningLocked(target)
+	if s.cfg.TemporalHorizonActuatorEnabled {
+		return s.temporalTargetLocked(now)
+	}
+	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.cfg.StaleTimeout, now)
+	var safety SafetyDebug
+	target, safety = s.applyLiveTuningLocked(target)
 	return controllerSnapshot{
 		controlState: target,
 		Enabled:      enabled,
@@ -258,10 +336,11 @@ func (s *Service) targetLocked(now time.Time) controllerSnapshot {
 		Holding:      enabled && !timedOut,
 		TimedOut:     timedOut,
 		UpdatedAt:    now.Format(time.RFC3339Nano),
+		Safety:       safety,
 	}
 }
 
-func resolveTarget(cmd *commandEnvelope, staleTimeout time.Duration, holdLastCommand bool, now time.Time) (controlState, bool, bool, bool) {
+func resolveTarget(cmd *commandEnvelope, staleTimeout time.Duration, now time.Time) (controlState, bool, bool, bool) {
 	if cmd == nil {
 		return controlState{}, true, false, false
 	}
@@ -273,7 +352,7 @@ func resolveTarget(cmd *commandEnvelope, staleTimeout time.Duration, holdLastCom
 		return controlState{}, false, false, false
 	}
 	isStale := now.Sub(receivedAt) > staleTimeout
-	if isStale && !holdLastCommand {
+	if isStale {
 		return controlState{}, true, false, true
 	}
 	resolved := commandToControlState(cmd)
@@ -287,6 +366,59 @@ func commandToControlState(cmd *commandEnvelope) controlState {
 		Brake:     clamp(cmd.Brake, 0, 1),
 		Handbrake: cmd.Handbrake,
 	}
+}
+
+func (s *Service) temporalTargetLocked(now time.Time) controllerSnapshot {
+	egoState := control.ActuatorEgoState{
+		TimestampS:    timeToSeconds(now),
+		SpeedMPS:      0,
+		Valid:         false,
+		InvalidReason: "actuator ego telemetry unavailable",
+	}
+	if latest := s.latestActuatorEgoStateLocked(); latest != nil {
+		egoState = *latest
+	}
+	command, trace := s.temporalBuffer.ActuatorTick(timeToSeconds(now), egoState, s.cfg)
+	target := controlState{
+		Steer:     command.Steering,
+		Throttle:  command.Throttle,
+		Brake:     command.BrakePressureAvg,
+		Handbrake: false,
+	}
+	var safety SafetyDebug
+	target, safety = s.applyLiveTuningLocked(target)
+	trace.AppliedSteer = target.Steer
+	trace.AppliedThrottle = target.Throttle
+	trace.AppliedBrake = target.Brake
+	s.logTemporalTraceLocked(trace, now)
+	enabled := trace.PlanState != PlanStateMissing
+	stale := trace.PlanState == PlanStateMissing || trace.PlanState == PlanStateStale || trace.PlanState == PlanStateExpired
+	traceCopy := trace
+	return controllerSnapshot{
+		controlState: target,
+		Enabled:      enabled,
+		Stale:        stale,
+		Holding:      enabled && trace.PlanState != PlanStateExpired,
+		TimedOut:     false,
+		UpdatedAt:    now.Format(time.RFC3339Nano),
+		Safety:       safety,
+		Temporal:     &traceCopy,
+	}
+}
+
+func (s *Service) logTemporalTraceLocked(trace TemporalDebug, now time.Time) {
+	if !trace.Enabled {
+		return
+	}
+	stateChanged := trace.PlanState != s.lastTemporalPlanState
+	periodic := s.lastTemporalLogAt.IsZero() || now.Sub(s.lastTemporalLogAt) >= time.Second
+	expiredRepeat := trace.PlanState == PlanStateExpired && now.Sub(s.lastTemporalLogAt) >= 250*time.Millisecond
+	if !stateChanged && !periodic && !expiredRepeat {
+		return
+	}
+	LogTemporalDebug(trace)
+	s.lastTemporalLogAt = now
+	s.lastTemporalPlanState = trace.PlanState
 }
 
 func (s *Service) TuningState() TuningState {
@@ -349,12 +481,46 @@ func (s *Service) SaveTuning() (TuningState, error) {
 	}, nil
 }
 
-func (s *Service) applyLiveTuningLocked(input controlState) controlState {
+func (s *Service) applyLiveTuningLocked(input controlState) (controlState, SafetyDebug) {
+	tuning := s.liveTuning
 	steer := clamp(input.Steer*s.liveTuning.SteeringGain, -1, 1)
 	throttle := clamp(input.Throttle*s.liveTuning.ThrottleGain, 0, 1)
 	brake := clamp(input.Brake, 0, 1)
+	debug := SafetyDebug{
+		SpeedLimitKPH:          tuning.SpeedLimitKPH,
+		ThrottleBefore:         throttle,
+		BrakeBefore:            brake,
+		ModelBrakeThreshold:    tuning.ModelBrakeThreshold,
+		ReverseLockoutSpeedKPH: tuning.ReverseLockoutSpeedKPH,
+	}
 	if throttle > 0 && throttle < s.liveTuning.ThrottleFloor {
 		throttle = s.liveTuning.ThrottleFloor
+	}
+	if brake <= tuning.ModelBrakeThreshold {
+		if brake > 0 {
+			debug.BrakeThresholdApplied = true
+		}
+		brake = 0
+	}
+	if latest := s.latestTelemetryLocked(); latest != nil {
+		currentSpeedMPS := math.Max(latest.CurrentSpeed, 0)
+		currentSpeedKPH := currentSpeedMPS * 3.6
+		debug.TelemetryAvailable = true
+		debug.CurrentSpeedMPS = currentSpeedMPS
+		debug.CurrentSpeedKPH = currentSpeedKPH
+		if tuning.SpeedLimitKPH > 0 && currentSpeedKPH >= tuning.SpeedLimitKPH {
+			debug.SpeedLimitActive = true
+			debug.OverspeedKPH = currentSpeedKPH - tuning.SpeedLimitKPH
+			throttle = 0
+			if debug.OverspeedKPH >= tuning.OverspeedBrakeMarginKPH && tuning.OverspeedBrake > brake {
+				brake = tuning.OverspeedBrake
+				debug.OverspeedBrakeApplied = true
+			}
+		}
+		if currentSpeedKPH <= tuning.ReverseLockoutSpeedKPH && brake > 0 {
+			brake = 0
+			debug.ReverseLockoutApplied = true
+		}
 	}
 	resolved, _ := resolveServiceThrottleBrakeConflict(controlState{
 		Steer:     steer,
@@ -362,7 +528,37 @@ func (s *Service) applyLiveTuningLocked(input controlState) controlState {
 		Brake:     brake,
 		Handbrake: input.Handbrake,
 	})
-	return resolved
+	debug.ThrottleAfter = resolved.Throttle
+	debug.BrakeAfter = resolved.Brake
+	return resolved, debug
+}
+
+func (s *Service) latestTelemetryLocked() *control.RuntimeTelemetry {
+	if s.telemetry == nil {
+		return nil
+	}
+	latest, _ := s.telemetry.LatestTelemetrySnapshot()
+	return latest
+}
+
+func (s *Service) latestActuatorEgoStateLocked() *control.ActuatorEgoState {
+	if s.telemetry == nil {
+		return nil
+	}
+	latest, _ := s.telemetry.LatestActuatorEgoStateSnapshot()
+	return latest
+}
+
+func (s *Service) recordAppliedControlsLocked(now time.Time, applied controlState) {
+	if s.telemetry == nil {
+		return
+	}
+	s.telemetry.UpdateAppliedControls(control.AppliedControls{
+		Steer:      applied.Steer,
+		Throttle:   applied.Throttle,
+		Brake:      applied.Brake,
+		TimestampS: timeToSeconds(now),
+	})
 }
 
 func (s *Service) stateLocked() State {

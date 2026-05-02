@@ -59,33 +59,44 @@ type InferenceModelLoadRequest struct {
 }
 
 type InferencePrediction struct {
-	Sequence                      int                       `json:"sequence"`
-	FrameIndex                    int                       `json:"frameIndex"`
-	SourceFPS                     int                       `json:"sourceFps"`
-	InferenceHz                   int                       `json:"inferenceHz"`
-	ModelServerURL                string                    `json:"modelServerUrl"`
-	Checkpoint                    string                    `json:"checkpoint,omitempty"`
-	ModelDevice                   string                    `json:"modelDevice,omitempty"`
-	PlannerFormat                 string                    `json:"plannerFormat,omitempty"`
-	CapturedAt                    string                    `json:"capturedAt"`
-	PredictedAt                   string                    `json:"predictedAt"`
-	WindowFrameIndices            []int                     `json:"windowFrameIndices"`
-	WindowFrameHashes             []string                  `json:"windowFrameHashes"`
-	WindowFrameTimestampsMs       []int64                   `json:"windowFrameTimestampsMs"`
-	SelectedTelemetryOffsets      []int                     `json:"selectedTelemetryOffsets"`
-	SelectedTelemetryTimestampsMs []int64                   `json:"selectedTelemetryTimestampsMs"`
-	ImageTensorShape              []int                     `json:"imageTensorShape"`
-	TelemetryTensorShape          []int                     `json:"telemetryTensorShape"`
-	PredControlsShape             []int                     `json:"predControlsShape"`
-	PredAuxShape                  []int                     `json:"predAuxShape,omitempty"`
-	LastTelemetry                 *control.RuntimeTelemetry `json:"lastTelemetry,omitempty"`
-	RawPredControls               [][]float64               `json:"rawPredControls"`
-	RawPredAux                    [][]float64               `json:"rawPredAux,omitempty"`
-	CollapsedCommand              actuator.ControlCommand   `json:"collapsedCommand"`
-	PostProcessedCommand          actuator.ControlCommand   `json:"postProcessedCommand"`
-	ProcessorDebug                actuator.ProcessingDebug  `json:"processorDebug"`
-	ProcessorState                actuator.ProcessorState   `json:"processorState"`
-	FallbackApplied               bool                      `json:"fallbackApplied"`
+	Sequence                      int                         `json:"sequence"`
+	FrameIndex                    int                         `json:"frameIndex"`
+	SourceFPS                     int                         `json:"sourceFps"`
+	InferenceHz                   int                         `json:"inferenceHz"`
+	ModelServerURL                string                      `json:"modelServerUrl"`
+	Checkpoint                    string                      `json:"checkpoint,omitempty"`
+	ModelDevice                   string                      `json:"modelDevice,omitempty"`
+	PlannerFormat                 string                      `json:"plannerFormat,omitempty"`
+	CapturedAt                    string                      `json:"capturedAt"`
+	PredictedAt                   string                      `json:"predictedAt"`
+	WindowFrameIndices            []int                       `json:"windowFrameIndices"`
+	WindowFrameHashes             []string                    `json:"windowFrameHashes"`
+	WindowFrameTimestampsMs       []int64                     `json:"windowFrameTimestampsMs"`
+	LatestFrameTimestampS         float64                     `json:"latestFrameTimestampS,omitempty"`
+	TelemetryTimestampS           float64                     `json:"telemetryTimestampS,omitempty"`
+	FrameID                       *int64                      `json:"frameId,omitempty"`
+	CaptureLatencyMs              *float64                    `json:"captureLatencyMs,omitempty"`
+	FrameTelemetrySkewMs          float64                     `json:"frameTelemetrySkewMs,omitempty"`
+	FrameTelemetryAligned         bool                        `json:"frameTelemetryAligned"`
+	SelectedTelemetryOffsets      []int                       `json:"selectedTelemetryOffsets"`
+	SelectedTelemetryTimestampsMs []int64                     `json:"selectedTelemetryTimestampsMs"`
+	ImageTensorShape              []int                       `json:"imageTensorShape"`
+	TelemetryTensorShape          []int                       `json:"telemetryTensorShape"`
+	PredControlsShape             []int                       `json:"predControlsShape"`
+	PredAuxShape                  []int                       `json:"predAuxShape,omitempty"`
+	LastTelemetry                 *control.RuntimeTelemetry   `json:"lastTelemetry,omitempty"`
+	RawPredControls               [][]float64                 `json:"rawPredControls"`
+	RawPredAux                    [][]float64                 `json:"rawPredAux,omitempty"`
+	RawStateInputs                map[string]any              `json:"rawStateInputs,omitempty"`
+	NormalizedStateInputs         map[string]float64          `json:"normalizedStateInputs,omitempty"`
+	CollapsedCommand              actuator.ControlCommand     `json:"collapsedCommand"`
+	PostProcessedCommand          actuator.ControlCommand     `json:"postProcessedCommand"`
+	ThrottleHeld                  bool                        `json:"throttleHeld"`
+	HeldThrottle                  float64                     `json:"heldThrottle"`
+	ProcessorDebug                actuator.ProcessingDebug    `json:"processorDebug"`
+	ProcessorState                actuator.ProcessorState     `json:"processorState"`
+	PredictionHorizon             *actuator.PredictionHorizon `json:"predictionHorizon,omitempty"`
+	FallbackApplied               bool                        `json:"fallbackApplied"`
 }
 
 type InferenceStatus struct {
@@ -147,13 +158,20 @@ type actuatorSubmitter interface {
 	Submit(req actuator.CommandRequest) (actuator.State, error)
 }
 
+type actuatorHorizonSubmitter interface {
+	SubmitPredictionHorizon(plan actuator.PredictionHorizon) (actuator.State, error)
+}
+
 type pythonPredictResponse struct {
-	Checkpoint         string        `json:"checkpoint"`
-	Device             string        `json:"device"`
-	PlannerFormat      string        `json:"planner_format"`
-	ControlTargetNames []string      `json:"control_target_names"`
-	PredControls       [][][]float64 `json:"pred_controls"`
-	PredAux            [][][]float64 `json:"pred_aux"`
+	Checkpoint            string             `json:"checkpoint"`
+	Device                string             `json:"device"`
+	PlannerFormat         string             `json:"planner_format"`
+	ControlTargetNames    []string           `json:"control_target_names"`
+	PredControls          [][][]float64      `json:"pred_controls"`
+	PredAux               [][][]float64      `json:"pred_aux"`
+	FutureOffsets         []int              `json:"future_offsets"`
+	RawStateInputs        map[string]any     `json:"raw_state_inputs"`
+	NormalizedStateInputs map[string]float64 `json:"normalized_state_inputs"`
 }
 
 type pythonModelsResponse struct {
@@ -181,6 +199,9 @@ type Inferencer struct {
 	telemetryStaleAfter  time.Duration
 	lastTelemetryWaitLog time.Time
 	processorState       actuator.ProcessorState
+	throttleHoldUntil    time.Time
+	throttleHoldValue    float64
+	lastDriveDemand      float64
 	telemetryNormalizer  *telemetryNormalizer
 	normalizationErr     error
 	status               InferenceStatus
@@ -602,7 +623,7 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 				i.recordPredictionError(err)
 				fallbackPrediction, fallbackCommand, fallbackErr := i.buildFallbackPrediction(window, modelServerURL, err)
 				if fallbackErr == nil {
-					if actuatorErr := i.submitActuatorCommand(fallbackCommand); actuatorErr == nil {
+					if actuatorErr := i.submitActuatorPrediction(fallbackPrediction, fallbackCommand); actuatorErr == nil {
 						i.mu.Lock()
 						i.status.LastPrediction = fallbackPrediction
 						i.mu.Unlock()
@@ -610,7 +631,7 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 				}
 				continue
 			}
-			if err := i.submitActuatorCommand(command); err != nil {
+			if err := i.submitActuatorPrediction(prediction, command); err != nil {
 				i.recordPredictionError(err)
 				continue
 			}
@@ -650,6 +671,16 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 		"telemetry_offsets":       i.config.TelemetryOffsets,
 		"telemetry_feature_names": i.config.TelemetryFeatureNames,
 		"control_output_names":    i.config.ControlOutputNames,
+	}
+	if len(selection.selectedTelemetry) > 0 {
+		currentTelemetry := selection.selectedTelemetry[len(selection.selectedTelemetry)-1]
+		bodyPayload["routeDirectionUnknown"] = currentTelemetry.RouteDirectionUnknown
+		bodyPayload["routeDirectionKeepStraight"] = currentTelemetry.RouteDirectionKeepStraight
+		bodyPayload["routeDirectionTurnLeft"] = currentTelemetry.RouteDirectionTurnLeft
+		bodyPayload["routeDirectionTurnRight"] = currentTelemetry.RouteDirectionTurnRight
+		bodyPayload["routeDirectionRerouteWrongWay"] = currentTelemetry.RouteDirectionRerouteWrongWay
+		bodyPayload["routeDirectionCode"] = currentTelemetry.RouteDirectionCode
+		bodyPayload["routeDirectionDistanceM"] = currentTelemetry.RouteDirectionDistanceM
 	}
 	body, err := json.Marshal(bodyPayload)
 	if err != nil {
@@ -700,6 +731,21 @@ func (i *Inferencer) submitActuatorCommand(command actuator.CommandRequest) erro
 	return err
 }
 
+func (i *Inferencer) submitActuatorPrediction(prediction *InferencePrediction, command actuator.CommandRequest) error {
+	if i.actuatorConfig.TemporalHorizonActuatorEnabled && prediction != nil && prediction.PredictionHorizon != nil {
+		if i.actuator == nil {
+			return errors.New("inference actuator is not configured")
+		}
+		horizonSink, ok := i.actuator.(actuatorHorizonSubmitter)
+		if !ok {
+			return errors.New("inference actuator does not support temporal horizons")
+		}
+		_, err := horizonSink.SubmitPredictionHorizon(*prediction.PredictionHorizon)
+		return err
+	}
+	return i.submitActuatorCommand(command)
+}
+
 func (i *Inferencer) latestTelemetryForDebug() *control.RuntimeTelemetry {
 	if i.telemetry == nil {
 		return nil
@@ -709,11 +755,17 @@ func (i *Inferencer) latestTelemetryForDebug() *control.RuntimeTelemetry {
 }
 
 type plannerSelection struct {
-	selectedTelemetry []control.RuntimeTelemetry
-	telemetryTensor   [][][]float64
-	telemetryShape    []int
-	frameShape        []int
-	telemetryTimesMs  []int64
+	selectedTelemetry     []control.RuntimeTelemetry
+	telemetryTensor       [][][]float64
+	telemetryShape        []int
+	frameShape            []int
+	telemetryTimesMs      []int64
+	latestFrameTimestampS float64
+	telemetryTimestampS   float64
+	frameID               *int64
+	captureLatencyMs      *float64
+	frameTelemetrySkewMs  float64
+	frameTelemetryAligned bool
 }
 
 func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSelection, error) {
@@ -759,12 +811,47 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 		}
 		features = append(features, vector)
 	}
+	latestFrameTime := window.capturedAt
+	for _, frameTime := range window.frameTimes {
+		if frameTime.After(latestFrameTime) {
+			latestFrameTime = frameTime
+		}
+	}
+	latestFrameMs := latestFrameTime.UnixMilli()
+	telemetryMs := int64(0)
+	if len(times) > 0 {
+		telemetryMs = times[len(times)-1]
+	}
+	frameSkewMs := 0.0
+	aligned := telemetryMs > 0
+	if telemetryMs > 0 {
+		frameSkewMs = math.Abs(float64(latestFrameMs - telemetryMs))
+		aligned = frameSkewMs <= durationMilliseconds(i.config.MaxFrameTelemetrySkew)
+		if !aligned {
+			log.Printf("[inference] frame/telemetry skew warning seq=%d frame_id=%d frame_ts_ms=%d telemetry_ts_ms=%d skew_ms=%.1f threshold_ms=%.1f",
+				window.sequenceNumber,
+				window.frameIndex,
+				latestFrameMs,
+				telemetryMs,
+				frameSkewMs,
+				durationMilliseconds(i.config.MaxFrameTelemetrySkew),
+			)
+		}
+	}
+	captureLatencyMs := math.Max(0, float64(i.nowFunc().UTC().Sub(latestFrameTime))/float64(time.Millisecond))
+	frameID := int64(window.frameIndex)
 	return plannerSelection{
-		selectedTelemetry: selected,
-		telemetryTensor:   [][][]float64{features},
-		telemetryShape:    []int{1, len(features), len(i.config.TelemetryFeatureNames)},
-		frameShape:        []int{1, len(window.frames), 3, i.config.FrameHeight, i.config.FrameWidth},
-		telemetryTimesMs:  times,
+		selectedTelemetry:     selected,
+		telemetryTensor:       [][][]float64{features},
+		telemetryShape:        []int{1, len(features), len(i.config.TelemetryFeatureNames)},
+		frameShape:            []int{1, len(window.frames), 3, i.config.FrameHeight, i.config.FrameWidth},
+		telemetryTimesMs:      times,
+		latestFrameTimestampS: timeToSeconds(latestFrameTime),
+		telemetryTimestampS:   float64(telemetryMs) / 1000.0,
+		frameID:               &frameID,
+		captureLatencyMs:      &captureLatencyMs,
+		frameTelemetrySkewMs:  frameSkewMs,
+		frameTelemetryAligned: aligned,
 	}, nil
 }
 
@@ -1049,6 +1136,8 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 		copyPrediction.WindowFrameIndices = append([]int(nil), status.LastPrediction.WindowFrameIndices...)
 		copyPrediction.WindowFrameHashes = append([]string(nil), status.LastPrediction.WindowFrameHashes...)
 		copyPrediction.WindowFrameTimestampsMs = append([]int64(nil), status.LastPrediction.WindowFrameTimestampsMs...)
+		copyPrediction.FrameID = cloneInt64Ptr(status.LastPrediction.FrameID)
+		copyPrediction.CaptureLatencyMs = cloneFloatPtr(status.LastPrediction.CaptureLatencyMs)
 		copyPrediction.SelectedTelemetryOffsets = append([]int(nil), status.LastPrediction.SelectedTelemetryOffsets...)
 		copyPrediction.SelectedTelemetryTimestampsMs = append([]int64(nil), status.LastPrediction.SelectedTelemetryTimestampsMs...)
 		copyPrediction.ImageTensorShape = append([]int(nil), status.LastPrediction.ImageTensorShape...)
@@ -1057,6 +1146,12 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 		copyPrediction.PredAuxShape = append([]int(nil), status.LastPrediction.PredAuxShape...)
 		copyPrediction.RawPredControls = clone2DFloat64(status.LastPrediction.RawPredControls)
 		copyPrediction.RawPredAux = clone2DFloat64(status.LastPrediction.RawPredAux)
+		copyPrediction.RawStateInputs = cloneAnyMap(status.LastPrediction.RawStateInputs)
+		copyPrediction.NormalizedStateInputs = cloneFloat64Map(status.LastPrediction.NormalizedStateInputs)
+		if status.LastPrediction.PredictionHorizon != nil {
+			horizonCopy := cloneActuatorPredictionHorizon(*status.LastPrediction.PredictionHorizon)
+			copyPrediction.PredictionHorizon = &horizonCopy
+		}
 		if status.LastPrediction.LastTelemetry != nil {
 			telemetryCopy := *status.LastPrediction.LastTelemetry
 			copyPrediction.LastTelemetry = &telemetryCopy
@@ -1098,19 +1193,80 @@ func (i *Inferencer) buildPrediction(
 	if err != nil {
 		return nil, actuator.CommandRequest{}, err
 	}
-	controls, err := validatePlannerTensor(parsed.PredControls, 1, i.config.FutureSteps, len(controlNames), "pred_controls")
+	predictedFutureSteps := plannerTensorHorizon(parsed.PredControls)
+	expectedFutureSteps := i.config.FutureSteps
+	legacyImmediateOutput := predictedFutureSteps == 1 && expectedFutureSteps != 1
+	if legacyImmediateOutput {
+		expectedFutureSteps = 1
+	}
+	controls, err := validatePlannerTensor(parsed.PredControls, 1, expectedFutureSteps, len(controlNames), "pred_controls")
 	if err != nil {
 		return nil, actuator.CommandRequest{}, err
 	}
-	aux, auxShape, err := validateOptionalPlannerTensor(parsed.PredAux, 1, i.config.FutureSteps, len(i.config.AuxOutputNames), "pred_aux")
+	aux, auxShape, err := validateOptionalPlannerTensor(parsed.PredAux, 1, expectedFutureSteps, len(i.config.AuxOutputNames), "pred_aux")
 	if err != nil {
 		return nil, actuator.CommandRequest{}, err
 	}
 	rawCollapsed, err := collapsePlannerCommand(controls[0], controlNames, i.config)
+	if err != nil && legacyImmediateOutput {
+		tPlusOneConfig := i.config
+		tPlusOneConfig.HorizonMode = "t_plus_1_only"
+		rawCollapsed, err = collapsePlannerCommand(controls[0], controlNames, tPlusOneConfig)
+	}
 	if err != nil {
 		return nil, actuator.CommandRequest{}, err
 	}
-	finalCommand, processorDebug := actuator.ProcessActuatorCommand(rawCollapsed, &i.processorState, i.actuatorConfig)
+	predictedAt := i.nowFunc().UTC()
+	inputTimestampS := predictionInputTimestampS(window, selection)
+	var predictionHorizon *actuator.PredictionHorizon
+	if legacyImmediateOutput {
+		legacyPlan := actuator.LegacyPredictionAdapter(
+			rawCollapsed,
+			inputTimestampS,
+			timeToSeconds(predictedAt),
+			nil,
+			"legacy-planner:"+strings.TrimSpace(parsed.PlannerFormat),
+		)
+		normalized, normalizeErr := actuator.NormalizePredictionHorizon(legacyPlan, timeToSeconds(predictedAt))
+		if normalizeErr != nil {
+			err = normalizeErr
+		} else {
+			predictionHorizon = &normalized
+		}
+	} else {
+		predictionHorizon, err = buildPredictionHorizonFromPlanner(
+			controls[0],
+			controlNames,
+			aux,
+			i.config.AuxOutputNames,
+			inputTimestampS,
+			timeToSeconds(predictedAt),
+			"planner:"+strings.TrimSpace(parsed.PlannerFormat),
+		)
+	}
+	if err != nil && i.actuatorConfig.TemporalHorizonActuatorEnabled {
+		return nil, actuator.CommandRequest{}, err
+	}
+	currentSpeed := 0.0
+	if len(selection.selectedTelemetry) > 0 {
+		currentSpeed = selection.selectedTelemetry[len(selection.selectedTelemetry)-1].CurrentSpeed
+	}
+	commandForSubmit := rawCollapsed
+	throttleHeld := 0.0
+	throttleHoldActive := false
+	var finalCommand actuator.ControlCommand
+	var processorDebug actuator.ProcessingDebug
+	if i.actuatorConfig.TemporalHorizonActuatorEnabled {
+		finalCommand = commandForSubmit
+		processorDebug = actuator.ProcessingDebug{
+			Raw:   commandForSubmit,
+			Final: finalCommand,
+		}
+	} else {
+		throttleHeld, throttleHoldActive = i.stabilizeThrottleCommand(commandForSubmit.Throttle, currentSpeed, predictedAt)
+		commandForSubmit.Throttle = throttleHeld
+		finalCommand, processorDebug = actuator.ProcessActuatorCommand(commandForSubmit, &i.processorState, i.actuatorConfig)
+	}
 	request := actuator.CommandRequest{
 		Steer:            finalCommand.Steering,
 		Throttle:         finalCommand.Throttle,
@@ -1119,7 +1275,7 @@ func (i *Inferencer) buildPrediction(
 		Handbrake:        false,
 		Enabled:          boolPtr(true),
 		Sequence:         int64(window.sequenceNumber),
-		TimestampMs:      i.nowFunc().UTC().UnixMilli(),
+		TimestampMs:      predictedAt.UnixMilli(),
 	}
 	frameTimesMs := make([]int64, 0, len(window.frameTimes))
 	for _, item := range window.frameTimes {
@@ -1135,23 +1291,37 @@ func (i *Inferencer) buildPrediction(
 		ModelDevice:                   parsed.Device,
 		PlannerFormat:                 parsed.PlannerFormat,
 		CapturedAt:                    window.capturedAt.Format(time.RFC3339Nano),
-		PredictedAt:                   i.nowFunc().UTC().Format(time.RFC3339Nano),
+		PredictedAt:                   predictedAt.Format(time.RFC3339Nano),
 		WindowFrameIndices:            append([]int(nil), window.frameIndices...),
 		WindowFrameHashes:             append([]string(nil), frameHashes...),
 		WindowFrameTimestampsMs:       frameTimesMs,
+		LatestFrameTimestampS:         selection.latestFrameTimestampS,
+		TelemetryTimestampS:           selection.telemetryTimestampS,
+		FrameID:                       cloneInt64Ptr(selection.frameID),
+		CaptureLatencyMs:              cloneFloatPtr(selection.captureLatencyMs),
+		FrameTelemetrySkewMs:          selection.frameTelemetrySkewMs,
+		FrameTelemetryAligned:         selection.frameTelemetryAligned,
 		SelectedTelemetryOffsets:      append([]int(nil), i.config.TelemetryOffsets...),
 		SelectedTelemetryTimestampsMs: append([]int64(nil), selection.telemetryTimesMs...),
 		ImageTensorShape:              append([]int(nil), selection.frameShape...),
 		TelemetryTensorShape:          append([]int(nil), selection.telemetryShape...),
-		PredControlsShape:             []int{1, i.config.FutureSteps, len(controlNames)},
+		PredControlsShape:             []int{1, len(controls[0]), len(controlNames)},
 		PredAuxShape:                  auxShape,
 		LastTelemetry:                 cloneTelemetryPtr(i.latestTelemetryForDebug()),
 		RawPredControls:               clone2DFloat64(controls[0]),
 		RawPredAux:                    clone2DFloat64(aux),
-		CollapsedCommand:              rawCollapsed,
+		RawStateInputs:                cloneAnyMap(parsed.RawStateInputs),
+		NormalizedStateInputs:         cloneFloat64Map(parsed.NormalizedStateInputs),
+		CollapsedCommand:              commandForSubmit,
 		PostProcessedCommand:          finalCommand,
+		ThrottleHeld:                  throttleHoldActive,
+		HeldThrottle:                  throttleHeld,
 		ProcessorDebug:                processorDebug,
 		ProcessorState:                i.processorState,
+	}
+	if predictionHorizon != nil {
+		horizonCopy := cloneActuatorPredictionHorizon(*predictionHorizon)
+		prediction.PredictionHorizon = &horizonCopy
 	}
 	return prediction, request, nil
 }
@@ -1159,6 +1329,9 @@ func (i *Inferencer) buildPrediction(
 func (i *Inferencer) resetControlStateLocked() {
 	i.processorState = actuator.ProcessorState{}
 	i.processorState.Stats.HistoryWindow = i.actuatorConfig.RecentCommandWindow
+	i.throttleHoldUntil = time.Time{}
+	i.throttleHoldValue = 0
+	i.lastDriveDemand = 0
 }
 
 func (i *Inferencer) buildFallbackPrediction(window predictionWindow, modelServerURL string, cause error) (*InferencePrediction, actuator.CommandRequest, error) {
@@ -1177,6 +1350,14 @@ func (i *Inferencer) buildFallbackPrediction(window predictionWindow, modelServe
 	for _, item := range window.frameTimes {
 		frameTimesMs = append(frameTimesMs, item.UnixMilli())
 	}
+	latestFrameTime := window.capturedAt
+	for _, item := range window.frameTimes {
+		if item.After(latestFrameTime) {
+			latestFrameTime = item
+		}
+	}
+	frameID := int64(window.frameIndex)
+	captureLatencyMs := math.Max(0, float64(i.nowFunc().UTC().Sub(latestFrameTime))/float64(time.Millisecond))
 	prediction := &InferencePrediction{
 		Sequence:                window.sequenceNumber,
 		FrameIndex:              window.frameIndex,
@@ -1190,11 +1371,17 @@ func (i *Inferencer) buildFallbackPrediction(window predictionWindow, modelServe
 		PredictedAt:             i.nowFunc().UTC().Format(time.RFC3339Nano),
 		WindowFrameIndices:      append([]int(nil), window.frameIndices...),
 		WindowFrameTimestampsMs: frameTimesMs,
+		LatestFrameTimestampS:   timeToSeconds(latestFrameTime),
+		FrameID:                 &frameID,
+		CaptureLatencyMs:        &captureLatencyMs,
+		FrameTelemetryAligned:   false,
 		ImageTensorShape:        []int{1, len(window.frames), 3, i.config.FrameHeight, i.config.FrameWidth},
 		TelemetryTensorShape:    []int{1, len(i.config.TelemetryOffsets), len(i.config.TelemetryFeatureNames)},
 		LastTelemetry:           cloneTelemetryPtr(i.latestTelemetryForDebug()),
 		CollapsedCommand:        processorDebug.Raw,
 		PostProcessedCommand:    finalCommand,
+		ThrottleHeld:            false,
+		HeldThrottle:            0,
 		ProcessorDebug:          processorDebug,
 		ProcessorState:          i.processorState,
 		FallbackApplied:         true,
@@ -1208,6 +1395,56 @@ func (i *Inferencer) buildFallbackPrediction(window predictionWindow, modelServe
 		)
 	}
 	return prediction, request, nil
+}
+
+func (i *Inferencer) stabilizeThrottleCommand(rawThrottle float64, currentSpeed float64, now time.Time) (float64, bool) {
+	rawThrottle = clamp(rawThrottle, 0, 1)
+	holdWindow := time.Duration(i.config.ThrottleHoldSeconds * float64(time.Second))
+	if rawThrottle <= 0 {
+		i.throttleHoldUntil = time.Time{}
+		i.throttleHoldValue = 0
+		i.lastDriveDemand = 0
+		return 0, false
+	}
+	if holdWindow <= 0 || i.config.MaxTargetSpeedKPH < 0 {
+		i.throttleHoldUntil = time.Time{}
+		i.throttleHoldValue = rawThrottle
+		i.lastDriveDemand = rawThrottle
+		return rawThrottle, false
+	}
+
+	if !i.throttleHoldUntil.IsZero() && now.Before(i.throttleHoldUntil) {
+		if rawThrottle >= i.throttleHoldValue {
+			i.throttleHoldUntil = time.Time{}
+			i.throttleHoldValue = rawThrottle
+		} else {
+			i.lastDriveDemand = rawThrottle
+			return clamp(i.throttleHoldValue, 0, 1), true
+		}
+	} else {
+		i.throttleHoldUntil = time.Time{}
+	}
+
+	lastDemand := clamp(i.lastDriveDemand, 0, 1)
+	if lastDemand > rawThrottle {
+		i.throttleHoldValue = lastDemand
+		i.throttleHoldUntil = now.Add(holdWindow)
+		i.lastDriveDemand = rawThrottle
+		return clamp(i.throttleHoldValue, 0, 1), true
+	}
+
+	stabilized := rawThrottle
+	currentSpeedKph := math.Max(currentSpeed, 0) * 3.6
+	if i.config.MaxTargetSpeedKPH <= 0 || currentSpeedKph <= i.config.MaxTargetSpeedKPH {
+		minThrottleHold := i.config.ThrottleHoldMin
+		if minThrottleHold > 0 && stabilized > 0 && stabilized < minThrottleHold {
+			stabilized = minThrottleHold
+		}
+	}
+
+	i.throttleHoldValue = clamp(stabilized, 0, 1)
+	i.lastDriveDemand = rawThrottle
+	return i.throttleHoldValue, false
 }
 
 func (i *Inferencer) telemetryFeatureVector(window []control.RuntimeTelemetry, index int) ([]float64, error) {
@@ -1364,6 +1601,13 @@ func plannerTensorWidth(predicted [][][]float64) int {
 	return len(predicted[0][0])
 }
 
+func plannerTensorHorizon(predicted [][][]float64) int {
+	if len(predicted) == 0 {
+		return 0
+	}
+	return len(predicted[0])
+}
+
 func plannerControlIndex(names []string, target string) int {
 	for index, name := range names {
 		if strings.EqualFold(strings.TrimSpace(name), target) {
@@ -1389,12 +1633,19 @@ func collapsePlannerCommand(horizon [][]float64, controlNames []string, cfg Infe
 		}
 	}
 	if cfg.HorizonMode == "t_plus_1_only" {
-		command := actuator.ControlCommand{
-			Steering: horizon[0][steeringIndex],
-			Throttle: horizon[0][throttleIndex],
+		throttleDemand := horizon[0][throttleIndex]
+		brakeDemand := 0.0
+		if throttleDemand < 0 {
+			brakeDemand = clamp(-throttleDemand, 0, 1)
+			throttleDemand = 0
 		}
 		if brakeIndex >= 0 {
-			command.BrakePressureAvg = horizon[0][brakeIndex]
+			brakeDemand = clamp(math.Max(brakeDemand, horizon[0][brakeIndex]), 0, 1)
+		}
+		command := actuator.ControlCommand{
+			Steering:         horizon[0][steeringIndex],
+			Throttle:         throttleDemand,
+			BrakePressureAvg: brakeDemand,
 		}
 		return command, nil
 	}
@@ -1402,12 +1653,25 @@ func collapsePlannerCommand(horizon [][]float64, controlNames []string, cfg Infe
 	if len(horizon) < 3 {
 		return actuator.ControlCommand{}, fmt.Errorf("weighted_short_horizon requires at least 3 predicted control rows, got=%d", len(horizon))
 	}
-	command := actuator.ControlCommand{
-		Steering: (weights[0] * horizon[0][steeringIndex]) + (weights[1] * horizon[1][steeringIndex]) + (weights[2] * horizon[2][steeringIndex]),
-		Throttle: (weights[0] * horizon[0][throttleIndex]) + (weights[1] * horizon[1][throttleIndex]) + (weights[2] * horizon[2][throttleIndex]),
+	throttleDemand := (weights[0] * horizon[0][throttleIndex]) + (weights[1] * horizon[1][throttleIndex]) + (weights[2] * horizon[2][throttleIndex])
+	brakeDemand := 0.0
+	if throttleDemand < 0 {
+		brakeDemand = clamp(-throttleDemand, 0, 1)
+		throttleDemand = 0
+	}
+	for _, row := range horizon[:3] {
+		if row[throttleIndex] < 0 {
+			brakeDemand = math.Max(brakeDemand, clamp(-row[throttleIndex], 0, 1))
+		}
 	}
 	if brakeIndex >= 0 {
-		command.BrakePressureAvg = (weights[0] * horizon[0][brakeIndex]) + (weights[1] * horizon[1][brakeIndex]) + (weights[2] * horizon[2][brakeIndex])
+		brakeFromModel := (weights[0] * horizon[0][brakeIndex]) + (weights[1] * horizon[1][brakeIndex]) + (weights[2] * horizon[2][brakeIndex])
+		brakeDemand = clamp(math.Max(brakeDemand, brakeFromModel), 0, 1)
+	}
+	command := actuator.ControlCommand{
+		Steering:         (weights[0] * horizon[0][steeringIndex]) + (weights[1] * horizon[1][steeringIndex]) + (weights[2] * horizon[2][steeringIndex]),
+		Throttle:         throttleDemand,
+		BrakePressureAvg: brakeDemand,
 	}
 	return command, nil
 }
@@ -1423,12 +1687,179 @@ func clone2DFloat64(source [][]float64) [][]float64 {
 	return out
 }
 
+func cloneAnyMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneFloat64Map(source map[string]float64) map[string]float64 {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
 func cloneTelemetryPtr(source *control.RuntimeTelemetry) *control.RuntimeTelemetry {
 	if source == nil {
 		return nil
 	}
 	copyValue := *source
 	return &copyValue
+}
+
+func buildPredictionHorizonFromPlanner(
+	controls [][]float64,
+	controlNames []string,
+	aux [][]float64,
+	auxNames []string,
+	inputTimestampS float64,
+	receivedTimestampS float64,
+	source string,
+) (*actuator.PredictionHorizon, error) {
+	if len(controls) == 0 {
+		return nil, fmt.Errorf("planner controls are empty")
+	}
+	steeringIndex := plannerControlIndex(controlNames, "steering")
+	throttleIndex := plannerControlIndex(controlNames, "acceleration")
+	brakeIndex := plannerControlIndex(controlNames, "brakePressureAvg")
+	if steeringIndex < 0 || throttleIndex < 0 {
+		return nil, fmt.Errorf("planner controls missing steering/acceleration targets: %v", controlNames)
+	}
+	futureSpeedIndex := plannerControlIndex(auxNames, "future_speed")
+	futureYawDeltaIndex := plannerControlIndex(auxNames, "future_yaw_delta")
+	bins := actuator.HorizonDtBins(len(controls))
+	points := make([]actuator.FuturePoint, 0, len(controls))
+	for index, row := range controls {
+		if steeringIndex >= len(row) || throttleIndex >= len(row) || (brakeIndex >= 0 && brakeIndex >= len(row)) {
+			return nil, fmt.Errorf("planner control row width mismatch for targets %v", controlNames)
+		}
+		point := actuator.FuturePoint{
+			DtMs:  bins[index],
+			Steer: floatPtr(row[steeringIndex]),
+		}
+		throttleDemand := row[throttleIndex]
+		if throttleDemand >= 0 {
+			point.Throttle = floatPtr(throttleDemand)
+		} else {
+			point.Throttle = floatPtr(0)
+			point.Brake = floatPtr(clamp(-throttleDemand, 0, 1))
+		}
+		if brakeIndex >= 0 {
+			brakeDemand := clamp(row[brakeIndex], 0, 1)
+			if point.Brake == nil || brakeDemand > *point.Brake {
+				point.Brake = floatPtr(brakeDemand)
+			}
+		}
+		if len(aux) > index {
+			auxRow := aux[index]
+			if futureSpeedIndex >= 0 && futureSpeedIndex < len(auxRow) {
+				point.DesiredSpeedMPS = floatPtr(math.Max(auxRow[futureSpeedIndex], 0))
+			}
+			if futureYawDeltaIndex >= 0 && futureYawDeltaIndex < len(auxRow) {
+				point.HeadingRad = floatPtr(auxRow[futureYawDeltaIndex] * math.Pi / 180.0)
+			}
+		}
+		points = append(points, point)
+	}
+	horizon := actuator.PredictionHorizon{
+		InputTimestampS:    inputTimestampS,
+		ReceivedTimestampS: receivedTimestampS,
+		Points:             points,
+		Confidence:         1.0,
+		Source:             strings.TrimSpace(source),
+	}
+	normalized, err := actuator.NormalizePredictionHorizon(horizon, receivedTimestampS)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func cloneFloatPtr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func cloneInt64Ptr(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func predictionInputTimestampS(window predictionWindow, selection plannerSelection) float64 {
+	latest := window.capturedAt
+	for _, frameTime := range window.frameTimes {
+		if frameTime.After(latest) {
+			latest = frameTime
+		}
+	}
+	for _, telemetryMs := range selection.telemetryTimesMs {
+		if telemetryMs <= 0 {
+			continue
+		}
+		telemetryTime := time.UnixMilli(telemetryMs).UTC()
+		if telemetryTime.After(latest) {
+			latest = telemetryTime
+		}
+	}
+	return timeToSeconds(latest)
+}
+
+func cloneActuatorPredictionHorizon(source actuator.PredictionHorizon) actuator.PredictionHorizon {
+	out := source
+	out.Points = make([]actuator.FuturePoint, 0, len(source.Points))
+	for _, point := range source.Points {
+		out.Points = append(out.Points, cloneActuatorFuturePoint(point))
+	}
+	return out
+}
+
+func cloneActuatorFuturePoint(point actuator.FuturePoint) actuator.FuturePoint {
+	return actuator.FuturePoint{
+		DtMs:            point.DtMs,
+		X:               cloneFloat64Ptr(point.X),
+		Y:               cloneFloat64Ptr(point.Y),
+		DesiredSpeedMPS: cloneFloat64Ptr(point.DesiredSpeedMPS),
+		HeadingRad:      cloneFloat64Ptr(point.HeadingRad),
+		Steer:           cloneFloat64Ptr(point.Steer),
+		Throttle:        cloneFloat64Ptr(point.Throttle),
+		Brake:           cloneFloat64Ptr(point.Brake),
+	}
+}
+
+func cloneFloat64Ptr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
+}
+
+func timeToSeconds(value time.Time) float64 {
+	return float64(value.UTC().UnixNano()) / float64(time.Second)
+}
+
+func durationMilliseconds(value time.Duration) float64 {
+	return float64(value) / float64(time.Millisecond)
 }
 
 func (i *Inferencer) logPlannerDebug(prediction *InferencePrediction) {

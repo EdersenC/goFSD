@@ -27,6 +27,7 @@ const (
 	defaultBrakeReleaseMarginMPS        = 0.20
 	defaultBrakeEnterHoldSeconds        = 0.18
 	defaultThrottleHoldMin              = 0.12
+	defaultThrottleHoldSeconds          = 2.0
 	defaultThrottleRampUpPerSecond      = 1.20
 	defaultThrottleDecayPerSecond       = 0.90
 	defaultTargetSpeedErrorGain         = 0.5
@@ -60,6 +61,7 @@ type Config struct {
 	OverspeedBrakeMarginMPS      float64
 	BrakeReleaseMarginMPS        float64
 	BrakeEnterHoldSeconds        float64
+	ThrottleHoldSeconds          float64
 	ThrottleHoldMin              float64
 	ThrottleRampUpPerSecond      float64
 	ThrottleDecayPerSecond       float64
@@ -94,6 +96,7 @@ type Tuning struct {
 	OverspeedBrakeMarginMPS      float64 `json:"overspeedBrakeMarginMps"`
 	BrakeReleaseMarginMPS        float64 `json:"brakeReleaseMarginMps"`
 	BrakeEnterHoldSeconds        float64 `json:"brakeEnterHoldSeconds"`
+	ThrottleHoldSeconds          float64 `json:"throttleHoldSeconds"`
 	ThrottleHoldMin              float64 `json:"throttleHoldMin"`
 	ThrottleRampUpPerSecond      float64 `json:"throttleRampUpPerSecond"`
 	ThrottleDecayPerSecond       float64 `json:"throttleDecayPerSecond"`
@@ -136,6 +139,7 @@ type translationSection struct {
 	OverspeedBrakeMarginMPS      *float64 `toml:"overspeed_brake_margin_mps"`
 	BrakeReleaseMarginMPS        *float64 `toml:"brake_release_margin_mps"`
 	BrakeEnterHoldSeconds        *float64 `toml:"brake_enter_hold_seconds"`
+	ThrottleHoldSeconds          *float64 `toml:"throttle_hold_seconds"`
 	ThrottleHoldMin              *float64 `toml:"throttle_hold_min"`
 	ThrottleRampUpPerSecond      *float64 `toml:"throttle_ramp_up_per_second"`
 	ThrottleDecayPerSecond       *float64 `toml:"throttle_decay_per_second"`
@@ -171,6 +175,7 @@ func DefaultConfig() Config {
 		OverspeedBrakeMarginMPS:      defaultOverspeedBrakeMarginMPS,
 		BrakeReleaseMarginMPS:        defaultBrakeReleaseMarginMPS,
 		BrakeEnterHoldSeconds:        defaultBrakeEnterHoldSeconds,
+		ThrottleHoldSeconds:          defaultThrottleHoldSeconds,
 		ThrottleHoldMin:              defaultThrottleHoldMin,
 		ThrottleRampUpPerSecond:      defaultThrottleRampUpPerSecond,
 		ThrottleDecayPerSecond:       defaultThrottleDecayPerSecond,
@@ -257,6 +262,9 @@ func LoadConfig(path string) (Config, error) {
 	if section.BrakeEnterHoldSeconds != nil {
 		cfg.BrakeEnterHoldSeconds = *section.BrakeEnterHoldSeconds
 	}
+	if section.ThrottleHoldSeconds != nil {
+		cfg.ThrottleHoldSeconds = *section.ThrottleHoldSeconds
+	}
 	if section.ThrottleHoldMin != nil {
 		cfg.ThrottleHoldMin = *section.ThrottleHoldMin
 	}
@@ -327,6 +335,7 @@ func (c Config) Tuning() Tuning {
 		OverspeedBrakeMarginMPS:      c.OverspeedBrakeMarginMPS,
 		BrakeReleaseMarginMPS:        c.BrakeReleaseMarginMPS,
 		BrakeEnterHoldSeconds:        c.BrakeEnterHoldSeconds,
+		ThrottleHoldSeconds:          c.ThrottleHoldSeconds,
 		ThrottleHoldMin:              c.ThrottleHoldMin,
 		ThrottleRampUpPerSecond:      c.ThrottleRampUpPerSecond,
 		ThrottleDecayPerSecond:       c.ThrottleDecayPerSecond,
@@ -362,6 +371,7 @@ func (c *Config) ApplyTuning(tuning Tuning) {
 	c.OverspeedBrakeMarginMPS = tuning.OverspeedBrakeMarginMPS
 	c.BrakeReleaseMarginMPS = tuning.BrakeReleaseMarginMPS
 	c.BrakeEnterHoldSeconds = tuning.BrakeEnterHoldSeconds
+	c.ThrottleHoldSeconds = tuning.ThrottleHoldSeconds
 	c.ThrottleHoldMin = tuning.ThrottleHoldMin
 	c.ThrottleRampUpPerSecond = tuning.ThrottleRampUpPerSecond
 	c.ThrottleDecayPerSecond = tuning.ThrottleDecayPerSecond
@@ -430,6 +440,9 @@ func ValidateTuning(tuning Tuning) error {
 	}
 	if tuning.BrakeEnterHoldSeconds < 0 {
 		return fmt.Errorf("backend translation brake_enter_hold_seconds must be >= 0")
+	}
+	if tuning.ThrottleHoldSeconds < 0 {
+		return fmt.Errorf("backend translation throttle_hold_seconds must be >= 0")
 	}
 	if tuning.ThrottleHoldMin < 0 || tuning.ThrottleHoldMin > 1 {
 		return fmt.Errorf("backend translation throttle_hold_min must be in [0,1]")
@@ -518,6 +531,7 @@ func SaveTuning(path string, tuning Tuning) error {
 	section["overspeed_brake_margin_mps"] = tuning.OverspeedBrakeMarginMPS
 	section["brake_release_margin_mps"] = tuning.BrakeReleaseMarginMPS
 	section["brake_enter_hold_seconds"] = tuning.BrakeEnterHoldSeconds
+	section["throttle_hold_seconds"] = tuning.ThrottleHoldSeconds
 	section["throttle_hold_min"] = tuning.ThrottleHoldMin
 	section["throttle_ramp_up_per_second"] = tuning.ThrottleRampUpPerSecond
 	section["throttle_decay_per_second"] = tuning.ThrottleDecayPerSecond

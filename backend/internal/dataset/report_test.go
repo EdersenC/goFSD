@@ -93,7 +93,7 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 		},
 	})
 
-	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB, tripC}, DatasetReportConfig{DeltaSpeedClip: 2.0})
+	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB, tripC}, DatasetReportConfig{FutureSpeedDeltaClip: 2.0})
 	if err != nil {
 		t.Fatalf("BuildRunDatasetReport: %v", err)
 	}
@@ -124,11 +124,11 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 	if math.Abs(summary.StoppedSampleShare-0.5) > 1e-9 {
 		t.Fatalf("unexpected stopped sample share: got=%v want=0.5", summary.StoppedSampleShare)
 	}
-	if summary.DeltaSpeedClip.AnyClipCount != 2 || summary.DeltaSpeedClip.NegativeClipCount != 1 || summary.DeltaSpeedClip.PositiveClipCount != 1 {
-		t.Fatalf("unexpected clip summary: %+v", summary.DeltaSpeedClip)
+	if summary.FutureSpeedDeltaClip.AnyClipCount != 2 || summary.FutureSpeedDeltaClip.NegativeClipCount != 1 || summary.FutureSpeedDeltaClip.PositiveClipCount != 1 {
+		t.Fatalf("unexpected clip summary: %+v", summary.FutureSpeedDeltaClip)
 	}
-	if math.Abs(summary.DeltaSpeedClip.AnyClipRate-0.5) > 1e-9 {
-		t.Fatalf("unexpected clip rate: got=%v want=0.5", summary.DeltaSpeedClip.AnyClipRate)
+	if math.Abs(summary.FutureSpeedDeltaClip.AnyClipRate-0.5) > 1e-9 {
+		t.Fatalf("unexpected clip rate: got=%v want=0.5", summary.FutureSpeedDeltaClip.AnyClipRate)
 	}
 	if summary.FlatLabelTripCounts["steer"] != 1 {
 		t.Fatalf("unexpected flat steer trip count: %+v", summary.FlatLabelTripCounts)
@@ -200,7 +200,7 @@ func TestWriteRunDatasetReportsWritesFile(t *testing.T) {
 		},
 	})
 
-	reports, err := WriteRunDatasetReports([]string{tripDir}, DatasetReportConfig{DeltaSpeedClip: 2.0})
+	reports, err := WriteRunDatasetReports([]string{tripDir}, DatasetReportConfig{FutureSpeedDeltaClip: 2.0})
 	if err != nil {
 		t.Fatalf("WriteRunDatasetReports: %v", err)
 	}
@@ -288,8 +288,8 @@ func reportSample(
 	steering float64,
 	futureYawDelta float64,
 	futureHorizonSeconds float64,
-	deltaSpeed float64,
-	deltaSpeedTarget float64,
+	futureSpeedDelta float64,
+	futureSpeedDeltaTarget float64,
 	futureSpeed float64,
 	futureSpeedTarget float64,
 	telemetry reportTelemetry,
@@ -301,12 +301,12 @@ func reportSample(
 				Steering: steering,
 			},
 			Aux: GroupedLabelAux{
-				DeltaSpeed:           deltaSpeed,
-				DeltaSpeedTarget:     deltaSpeedTarget,
-				FutureSpeed:          futureSpeed,
-				FutureSpeedTarget:    futureSpeedTarget,
-				FutureYawDelta:       futureYawDelta,
-				FutureHorizonSeconds: futureHorizonSeconds,
+				FutureSpeedDelta:       futureSpeedDelta,
+				FutureSpeedDeltaTarget: futureSpeedDeltaTarget,
+				FutureSpeed:            futureSpeed,
+				FutureSpeedTarget:      futureSpeedTarget,
+				FutureYawDelta:         futureYawDelta,
+				FutureHorizonSeconds:   futureHorizonSeconds,
 			},
 		},
 		TelemetryHistory: []GroupedTelemetryItem{

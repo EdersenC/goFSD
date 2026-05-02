@@ -7,13 +7,13 @@ try:
     from .control_translation import (
         CONTROL_SEMANTICS_TARGET_SPEED,
         CONTROL_SEMANTICS_VEHICLE_STATE,
-        CONTROL_SEMANTICS_SPEED_DELTA,
+        CONTROL_SEMANTICS_SPEED_CHANGE,
         translate_control_prediction,
     )
 except ImportError:
     from control_client import INPUT_MODE_MODEL_RAW, INPUT_MODE_NORMALIZED
     from control_translation import (
-        CONTROL_SEMANTICS_SPEED_DELTA,
+        CONTROL_SEMANTICS_SPEED_CHANGE,
         CONTROL_SEMANTICS_TARGET_SPEED,
         CONTROL_SEMANTICS_VEHICLE_STATE,
         translate_control_prediction,
@@ -21,11 +21,11 @@ except ImportError:
 
 
 class ControlTranslationTests(unittest.TestCase):
-    def test_speed_delta_translation_uses_signed_output_directly(self) -> None:
+    def test_speed_change_translation_uses_signed_output_directly(self) -> None:
         translated = translate_control_prediction(
             steering=0.15,
             acceleration=-0.35,
-            control_semantics=CONTROL_SEMANTICS_SPEED_DELTA,
+            control_semantics=CONTROL_SEMANTICS_SPEED_CHANGE,
         )
 
         self.assertEqual(translated["input_mode"], INPUT_MODE_NORMALIZED)

@@ -23,8 +23,8 @@ const inferenceFutureYaw = document.getElementById("inference-future-yaw");
 const inferenceCurrentYaw = document.getElementById("inference-current-yaw");
 const inferenceHeadingError = document.getElementById("inference-heading-error");
 const inferenceFutureSpeed = document.getElementById("inference-future-speed");
-const inferenceDeltaSpeed = document.getElementById("inference-delta-speed");
-const inferenceMoveIntent = document.getElementById("inference-move-intent");
+const inferenceGameTime = document.getElementById("inference-game-time");
+const inferenceFiveMLink = document.getElementById("inference-fivem-link");
 const inferenceSequence = document.getElementById("inference-sequence");
 const inferenceFrameIndex = document.getElementById("inference-frame-index");
 const inferencePredictedAt = document.getElementById("inference-predicted-at");
@@ -34,6 +34,18 @@ const inferenceDebugDir = document.getElementById("inference-debug-dir");
 const inferenceError = document.getElementById("inference-error");
 const inferenceWindowIndices = document.getElementById("inference-window-indices");
 const inferenceFrameHashes = document.getElementById("inference-frame-hashes");
+const inferenceRawStateInputs = document.getElementById("inference-raw-state-inputs");
+const inferenceNormalizedStateInputs = document.getElementById("inference-normalized-state-inputs");
+const fivemBrake = document.getElementById("fivem-brake");
+const fivemActualSteering = document.getElementById("fivem-actual-steering");
+const fivemActualAcceleration = document.getElementById("fivem-actual-acceleration");
+const fivemActualBrake = document.getElementById("fivem-actual-brake");
+const fivemNavIntent = document.getElementById("fivem-nav-intent");
+const fivemNavCode = document.getElementById("fivem-nav-code");
+const fivemRouteDelta = document.getElementById("fivem-route-delta");
+const fivemNavOnehot = document.getElementById("fivem-nav-onehot");
+const inferenceControlChain = document.getElementById("inference-control-chain");
+const actuatorControlChain = document.getElementById("actuator-control-chain");
 const translationMode = document.getElementById("translation-mode");
 const translationCommand = document.getElementById("translation-command");
 const translationSubmitStatus = document.getElementById("translation-submit-status");
@@ -41,6 +53,33 @@ const translationHeading = document.getElementById("translation-heading");
 const translationLongitudinal = document.getElementById("translation-longitudinal");
 const translationDriveState = document.getElementById("translation-drive-state");
 const translationReasons = document.getElementById("translation-reasons");
+const translationTuningApplyButton = document.getElementById("translation-tuning-apply");
+const translationTuningResetButton = document.getElementById("translation-tuning-reset");
+const translationTuningSaveButton = document.getElementById("translation-tuning-save");
+const translationTuningStatus = document.getElementById("translation-tuning-status");
+const translationTuningConfig = document.getElementById("translation-tuning-config");
+const translationHeadingDeadbandInput = document.getElementById("translation-tuning-heading-deadband");
+const translationSteerDeadzoneInput = document.getElementById("translation-tuning-steer-deadzone");
+const translationMaxSteerScaleInput = document.getElementById("translation-tuning-max-steer-scale");
+const translationSteerOutputGainInput = document.getElementById("translation-tuning-steer-output-gain");
+const translationSteerLowGainInput = document.getElementById("translation-tuning-steer-low-gain");
+const translationSteerHighGainInput = document.getElementById("translation-tuning-steer-high-gain");
+const translationSteerFadeSpeedInput = document.getElementById("translation-tuning-steer-fade-speed");
+const translationThrottleGainInput = document.getElementById("translation-tuning-throttle-gain");
+const translationThrottleHoldSecondsInput = document.getElementById("translation-tuning-throttle-hold-seconds");
+const translationThrottleHoldMinInput = document.getElementById("translation-tuning-throttle-hold-min");
+const translationMaxTargetSpeedKphInput = document.getElementById("translation-tuning-max-target-speed-kph");
+const translationSavedHeadingDeadband = document.getElementById("translation-saved-heading-deadband");
+const translationSavedSteerDeadzone = document.getElementById("translation-saved-steer-deadzone");
+const translationSavedMaxSteerScale = document.getElementById("translation-saved-max-steer-scale");
+const translationSavedSteerOutputGain = document.getElementById("translation-saved-steer-output-gain");
+const translationSavedSteerLowGain = document.getElementById("translation-saved-steer-low-gain");
+const translationSavedSteerHighGain = document.getElementById("translation-saved-steer-high-gain");
+const translationSavedSteerFadeSpeed = document.getElementById("translation-saved-steer-fade-speed");
+const translationSavedThrottleGain = document.getElementById("translation-saved-throttle-gain");
+const translationSavedThrottleHoldSeconds = document.getElementById("translation-saved-throttle-hold-seconds");
+const translationSavedThrottleHoldMin = document.getElementById("translation-saved-throttle-hold-min");
+const translationSavedMaxTargetSpeedKph = document.getElementById("translation-saved-max-target-speed-kph");
 const uiErrorRuntime = document.getElementById("ui-error-runtime");
 const uiErrorInference = document.getElementById("ui-error-inference");
 const uiErrorTranslation = document.getElementById("ui-error-translation");
@@ -51,35 +90,29 @@ const actuatorLastError = document.getElementById("actuator-last-error");
 const actuatorLastCommand = document.getElementById("actuator-last-command");
 const actuatorTarget = document.getElementById("actuator-target");
 const actuatorApplied = document.getElementById("actuator-applied");
-const translationTuningApplyButton = document.getElementById("translation-tuning-apply");
-const translationTuningResetButton = document.getElementById("translation-tuning-reset");
-const translationTuningSaveButton = document.getElementById("translation-tuning-save");
-const translationTuningStatus = document.getElementById("translation-tuning-status");
-const translationTuningConfig = document.getElementById("translation-tuning-config");
-const translationThrottleGainInput = document.getElementById("translation-tuning-throttle-gain");
-const translationBrakeGainInput = document.getElementById("translation-tuning-brake-gain");
-const translationBrakeThresholdInput = document.getElementById("translation-tuning-brake-threshold");
-const translationOverspeedMarginInput = document.getElementById("translation-tuning-overspeed-margin");
-const translationBrakeReleaseMarginInput = document.getElementById("translation-tuning-brake-release-margin");
-const translationBrakeEnterHoldInput = document.getElementById("translation-tuning-brake-enter-hold");
-const translationThrottleHoldMinInput = document.getElementById("translation-tuning-throttle-hold-min");
-const translationThrottleRampUpInput = document.getElementById("translation-tuning-throttle-ramp-up");
-const translationThrottleDecayInput = document.getElementById("translation-tuning-throttle-decay");
-const translationTargetSpeedGainInput = document.getElementById("translation-tuning-target-speed-gain");
-const translationTargetAccelGainInput = document.getElementById("translation-tuning-target-accel-gain");
-const translationLaunchThrottleMinInput = document.getElementById("translation-tuning-launch-throttle-min");
-const translationSavedThrottleGain = document.getElementById("translation-saved-throttle-gain");
-const translationSavedBrakeGain = document.getElementById("translation-saved-brake-gain");
-const translationSavedBrakeThreshold = document.getElementById("translation-saved-brake-threshold");
-const translationSavedOverspeedMargin = document.getElementById("translation-saved-overspeed-margin");
-const translationSavedBrakeReleaseMargin = document.getElementById("translation-saved-brake-release-margin");
-const translationSavedBrakeEnterHold = document.getElementById("translation-saved-brake-enter-hold");
-const translationSavedThrottleHoldMin = document.getElementById("translation-saved-throttle-hold-min");
-const translationSavedThrottleRampUp = document.getElementById("translation-saved-throttle-ramp-up");
-const translationSavedThrottleDecay = document.getElementById("translation-saved-throttle-decay");
-const translationSavedTargetSpeedGain = document.getElementById("translation-saved-target-speed-gain");
-const translationSavedTargetAccelGain = document.getElementById("translation-saved-target-accel-gain");
-const translationSavedLaunchThrottleMin = document.getElementById("translation-saved-launch-throttle-min");
+const actuatorSpeedGovernor = document.getElementById("actuator-speed-governor");
+const actuatorBrakeGuard = document.getElementById("actuator-brake-guard");
+const actuatorTuningApplyButton = document.getElementById("actuator-tuning-apply");
+const actuatorTuningResetButton = document.getElementById("actuator-tuning-reset");
+const actuatorTuningSaveButton = document.getElementById("actuator-tuning-save");
+const actuatorTuningStatus = document.getElementById("actuator-tuning-status");
+const actuatorTuningConfig = document.getElementById("actuator-tuning-config");
+const actuatorSteeringGainInput = document.getElementById("actuator-tuning-steering-gain");
+const actuatorThrottleGainInput = document.getElementById("actuator-tuning-throttle-gain");
+const actuatorThrottleFloorInput = document.getElementById("actuator-tuning-throttle-floor");
+const actuatorSpeedLimitInput = document.getElementById("actuator-tuning-speed-limit");
+const actuatorOverspeedMarginInput = document.getElementById("actuator-tuning-overspeed-margin");
+const actuatorOverspeedBrakeInput = document.getElementById("actuator-tuning-overspeed-brake");
+const actuatorModelBrakeThresholdInput = document.getElementById("actuator-tuning-model-brake-threshold");
+const actuatorReverseLockoutInput = document.getElementById("actuator-tuning-reverse-lockout");
+const actuatorSavedSteeringGain = document.getElementById("actuator-saved-steering-gain");
+const actuatorSavedThrottleGain = document.getElementById("actuator-saved-throttle-gain");
+const actuatorSavedThrottleFloor = document.getElementById("actuator-saved-throttle-floor");
+const actuatorSavedSpeedLimit = document.getElementById("actuator-saved-speed-limit");
+const actuatorSavedOverspeedMargin = document.getElementById("actuator-saved-overspeed-margin");
+const actuatorSavedOverspeedBrake = document.getElementById("actuator-saved-overspeed-brake");
+const actuatorSavedModelBrakeThreshold = document.getElementById("actuator-saved-model-brake-threshold");
+const actuatorSavedReverseLockout = document.getElementById("actuator-saved-reverse-lockout");
 
 const pageTabs = Array.from(document.querySelectorAll("[data-page-tab]"));
 const pageControl = document.getElementById("page-control");
@@ -111,10 +144,9 @@ const trainingNameInput = document.getElementById("training-name");
 const trainingNotesInput = document.getElementById("training-notes");
 const trainingEpochsInput = document.getElementById("training-epochs");
 const trainingLearningRateInput = document.getElementById("training-learning-rate");
+const trainingSmoothL1BetaInput = document.getElementById("training-smooth-l1-beta");
+const trainingEarlyStoppingMetricSelect = document.getElementById("training-early-stopping-metric");
 const trainingLossWeights = document.getElementById("training-loss-weights");
-const trainingConsistency = document.getElementById("training-consistency");
-const trainingYawLossWeightingEnabled = document.getElementById("training-yaw-loss-weighting-enabled");
-const trainingYawLossWeighting = document.getElementById("training-yaw-loss-weighting");
 const trainingTurnOversamplingEnabled = document.getElementById("training-turn-oversampling-enabled");
 const trainingTurnOversampling = document.getElementById("training-turn-oversampling");
 const trainingWidthMultiplierInput = document.getElementById("training-width-multiplier");
@@ -156,10 +188,29 @@ const INSPECTOR_COLORS = [
     "#e879f9",
 ];
 
+const ACTUATOR_TUNING_FIELDS = [
+    { key: "steeringGain", input: actuatorSteeringGainInput, saved: actuatorSavedSteeringGain },
+    { key: "throttleGain", input: actuatorThrottleGainInput, saved: actuatorSavedThrottleGain },
+    { key: "throttleFloor", input: actuatorThrottleFloorInput, saved: actuatorSavedThrottleFloor },
+    { key: "speedLimitKph", input: actuatorSpeedLimitInput, saved: actuatorSavedSpeedLimit },
+    { key: "overspeedBrakeMarginKph", input: actuatorOverspeedMarginInput, saved: actuatorSavedOverspeedMargin },
+    { key: "overspeedBrake", input: actuatorOverspeedBrakeInput, saved: actuatorSavedOverspeedBrake },
+    { key: "modelBrakeThreshold", input: actuatorModelBrakeThresholdInput, saved: actuatorSavedModelBrakeThreshold },
+    { key: "reverseLockoutSpeedKph", input: actuatorReverseLockoutInput, saved: actuatorSavedReverseLockout },
+];
+
 const TRANSLATION_TUNING_FIELDS = [
-    { key: "steeringGain", input: translationTargetSpeedGainInput, saved: translationSavedTargetSpeedGain },
+    { key: "headingDeadbandDeg", input: translationHeadingDeadbandInput, saved: translationSavedHeadingDeadband },
+    { key: "steerDeadzone", input: translationSteerDeadzoneInput, saved: translationSavedSteerDeadzone },
+    { key: "maxSteerScale", input: translationMaxSteerScaleInput, saved: translationSavedMaxSteerScale },
+    { key: "steerOutputGain", input: translationSteerOutputGainInput, saved: translationSavedSteerOutputGain },
+    { key: "lowSpeedSteerGain", input: translationSteerLowGainInput, saved: translationSavedSteerLowGain },
+    { key: "highSpeedSteerGain", input: translationSteerHighGainInput, saved: translationSavedSteerHighGain },
+    { key: "steerGainFadeSpeedMps", input: translationSteerFadeSpeedInput, saved: translationSavedSteerFadeSpeed },
     { key: "throttleGain", input: translationThrottleGainInput, saved: translationSavedThrottleGain },
-    { key: "throttleFloor", input: translationThrottleHoldMinInput, saved: translationSavedThrottleHoldMin },
+    { key: "throttleHoldSeconds", input: translationThrottleHoldSecondsInput, saved: translationSavedThrottleHoldSeconds },
+    { key: "throttleHoldMin", input: translationThrottleHoldMinInput, saved: translationSavedThrottleHoldMin },
+    { key: "maxTargetSpeedKph", input: translationMaxTargetSpeedKphInput, saved: translationSavedMaxTargetSpeedKph },
 ];
 
 let busy = false;
@@ -168,6 +219,9 @@ let selectedModelPath = "";
 let lastModelsRefreshAt = 0;
 let actuatorRefreshInFlight = false;
 const liveValueTimers = new WeakMap();
+let actuatorTuningState = null;
+let actuatorTuningDraft = null;
+let actuatorTuningDirty = false;
 let translationTuningState = null;
 let translationTuningDraft = null;
 let translationTuningDirty = false;
@@ -192,7 +246,98 @@ const TRAINING_STATE_INPUT_ORDER = [
     "routeDistance",
     "leadVehicleDistance",
     "hasLeadVehicle",
+    "routeDirectionUnknown",
+    "routeDirectionKeepStraight",
+    "routeDirectionTurnLeft",
+    "routeDirectionTurnRight",
+    "routeDirectionRerouteWrongWay",
 ];
+
+function trainingStateInputDefinitionMap() {
+    const definitions = Array.isArray(trainingConfig && trainingConfig.stateInputDefinitions)
+        ? trainingConfig.stateInputDefinitions
+        : [];
+    return Object.fromEntries(definitions.map((item) => [item.camelKey, item]));
+}
+
+function updateTrainingSectionState(element) {
+    const section = element && element.closest ? element.closest(".training-section") : null;
+    if (!section) {
+        return;
+    }
+    let hasOverrides = Boolean(section.querySelector(".field.override, .key-card.override, .state-input-card.override"));
+    if (trainingConfig && section.contains(trainingTrainRunList)) {
+        const trainDefaults = JSON.stringify(trainingConfig.trainRunIds || []);
+        const valDefaults = JSON.stringify(trainingConfig.valRunIds || []);
+        const trainCurrent = JSON.stringify(getSelectedTrainingRuns(trainingTrainRunList));
+        const valCurrent = JSON.stringify(getSelectedTrainingRuns(trainingValRunList));
+        hasOverrides = hasOverrides || trainCurrent !== trainDefaults || valCurrent !== valDefaults;
+    }
+    if (trainingConfig && section.contains(trainingTurnOversamplingEnabled)) {
+        const defaultEnabled = Boolean(trainingConfig.turnOversampling && trainingConfig.turnOversampling.enabled);
+        hasOverrides = hasOverrides || trainingTurnOversamplingEnabled.checked !== defaultEnabled;
+    }
+    section.classList.toggle("override", hasOverrides);
+}
+
+function compareTrainingFieldValue(input, defaultValue) {
+    if (!input) {
+        return false;
+    }
+    if (input.tagName === "SELECT" || input.type === "text") {
+        return String(input.value || "") !== String(defaultValue || "");
+    }
+    const current = Number(input.value);
+    const base = Number(defaultValue || 0);
+    return Number.isFinite(current) && Math.abs(current - base) > 1e-9;
+}
+
+function updateTrainingDefaultFieldState(input) {
+    if (!input) {
+        return;
+    }
+    const field = input.closest(".field");
+    if (!field) {
+        return;
+    }
+    const defaultValue = input.dataset.trainingDefaultValue || "";
+    const isOverride = compareTrainingFieldValue(input, defaultValue);
+    field.classList.toggle("override", isOverride);
+    updateTrainingSectionState(field);
+}
+
+function configureTrainingDefaultField(input, defaultValue, formatter = formatTrainingNumber) {
+    if (!input) {
+        return;
+    }
+    input.dataset.trainingDefaultValue = String(defaultValue);
+    const note = document.querySelector(`[data-training-default-note="${input.id}"]`);
+    if (note) {
+        const text = input.tagName === "SELECT"
+            ? String(defaultValue || "--")
+            : formatter(Number(defaultValue || 0));
+        note.textContent = `Default ${text}`;
+    }
+    if (!input.dataset.trainingDefaultBound) {
+        input.addEventListener("input", () => updateTrainingDefaultFieldState(input));
+        input.addEventListener("change", () => updateTrainingDefaultFieldState(input));
+        input.dataset.trainingDefaultBound = "true";
+    }
+    updateTrainingDefaultFieldState(input);
+}
+
+for (const button of document.querySelectorAll("[data-training-reset]")) {
+    button.addEventListener("click", (event) => {
+        event.preventDefault();
+        const input = document.getElementById(button.dataset.trainingReset || "");
+        if (!input || input.dataset.trainingDefaultValue === undefined) {
+            return;
+        }
+        input.value = input.dataset.trainingDefaultValue;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+}
 
 function setBusy(nextBusy) {
     busy = nextBusy;
@@ -209,6 +354,9 @@ function setBusy(nextBusy) {
         translationTuningApplyButton,
         translationTuningResetButton,
         translationTuningSaveButton,
+        actuatorTuningApplyButton,
+        actuatorTuningResetButton,
+        actuatorTuningSaveButton,
         trainingQueueJobButton,
         trainingResetDefaultsButton,
         trainingUseLastButton,
@@ -415,11 +563,20 @@ async function fetchActuatorState() {
     return result;
 }
 
-async function fetchTranslationState() {
+async function fetchActuatorTuningState() {
     const response = await fetch("/actuator/tuning", { cache: "no-store" });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
         throw new Error(result.error || "failed to load actuator tuning");
+    }
+    return result;
+}
+
+async function fetchTranslationTuningState() {
+    const response = await fetch("/translation/tuning", { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.error || "failed to load translation tuning");
     }
     return result;
 }
@@ -550,7 +707,7 @@ async function postInference(endpoint, payload = {}) {
     return postJSON(endpoint, payload, "inference request failed");
 }
 
-function renderInferenceStatus(controlState, status) {
+function renderInferenceStatus(controlState, status, actuatorState) {
     const telemetry = controlState && controlState.telemetry ? controlState.telemetry : null;
     const runtime = controlState && controlState.runtime ? controlState.runtime : null;
     const prediction = status && status.lastPrediction ? status.lastPrediction : null;
@@ -558,16 +715,29 @@ function renderInferenceStatus(controlState, status) {
     const telemetryAgeMs = telemetryTimestampMs > 0 ? Math.max(0, Date.now() - Number(telemetryTimestampMs)) : NaN;
 
     setLiveValue(inferenceState, status && status.state ? status.state : "idle");
-    setLiveValue(inferenceSteering, formatMetric(telemetry && telemetry.currentSpeed, 3));
-    setLiveValue(inferenceFutureYawDelta, formatMetric(telemetry && telemetry.currentYaw, 3));
-    setLiveValue(inferenceFutureYaw, formatMetric(telemetry && telemetry.yawRate, 3));
+    setLiveValue(inferenceSteering, formatMetric(telemetry && telemetry.currentSpeed, 3, "m/s"));
+    setLiveValue(inferenceFutureYawDelta, formatMetric(telemetry && telemetry.currentYaw, 3, "°"));
+    setLiveValue(inferenceFutureYaw, formatMetric(telemetry && telemetry.yawRate, 3, "°/s"));
     setLiveValue(inferenceCurrentYaw, formatMetric(telemetry && telemetry.steering, 3));
-    setLiveValue(inferenceHeadingError, formatMetric(telemetry && telemetry.acceleration, 3));
+    setLiveValue(inferenceHeadingError, formatMetric(telemetry && telemetry.routeHeadingError, 3, "°"));
+    setLiveValue(fivemBrake, formatMetric(telemetry && telemetry.brakePressureAvg, 3));
+    setLiveValue(fivemActualSteering, formatMetric(telemetry && telemetry.steering, 3));
+    setLiveValue(fivemActualAcceleration, formatMetric(telemetry && telemetry.acceleration, 3));
+    setLiveValue(fivemActualBrake, formatMetric(telemetry && telemetry.brakePressureAvg, 3));
+    setLiveValue(fivemNavIntent, formatRouteIntent(telemetry));
+    setLiveValue(fivemNavCode, telemetry
+        ? `${formatRouteLabel(telemetry.routeDirectionCode, telemetry)} · ${Number(telemetry.routeDirectionDistanceM || 0).toFixed(2)}m`
+        : "None");
+    setLiveValue(fivemRouteDelta, telemetry
+        ? `forward=${Number(telemetry.routeForwardDelta || 0).toFixed(3)} heading=${Number(telemetry.routeHeadingError || 0).toFixed(3)} distance=${Number(telemetry.routeDistance || 0).toFixed(3)}`
+        : "None");
+    setLiveValue(fivemNavOnehot, formatRouteOneHot(telemetry));
+    setLiveValue(inferenceControlChain, formatControlChain(prediction, actuatorState));
     setLiveValue(inferenceFutureSpeed, formatAgeMs(telemetryTimestampMs), {
         stale: !Number.isFinite(telemetryAgeMs) || telemetryAgeMs > 500,
     });
-    setLiveValue(inferenceDeltaSpeed, telemetry && telemetry.gameTimeMs ? String(telemetry.gameTimeMs) : "None");
-    setLiveValue(inferenceMoveIntent, runtime && runtime.fivemConnected ? "live" : "waiting", {
+    setLiveValue(inferenceGameTime, telemetry && telemetry.gameTimeMs ? String(telemetry.gameTimeMs) : "None");
+    setLiveValue(inferenceFiveMLink, runtime && runtime.fivemConnected ? "live" : "waiting", {
         stale: !(runtime && runtime.fivemConnected),
     });
 
@@ -583,9 +753,126 @@ function renderInferenceStatus(controlState, status) {
         ? prediction.selectedTelemetryTimestampsMs.join(", ")
         : "None");
     setLiveValue(inferenceDebugDir, prediction ? formatPlannerHorizon(prediction.rawPredControls) : "None");
+    setLiveValue(inferenceRawStateInputs, prediction ? formatStateInputMap(prediction.rawStateInputs) : "None");
+    setLiveValue(inferenceNormalizedStateInputs, prediction ? formatStateInputMap(prediction.normalizedStateInputs) : "None");
     setLiveValue(inferenceError, status && status.lastError ? status.lastError : "None", {
         stale: Boolean(status && status.lastError),
     });
+}
+
+function formatRouteIntent(telemetry) {
+    if (!telemetry) {
+        return "None";
+    }
+    const candidates = routeDirectionCandidates(telemetry);
+    let best = null;
+    for (const item of candidates) {
+        if (!best || item.value > best.value) {
+            best = item;
+        }
+    }
+    if (best && best.value >= 0.5) {
+        return best.label;
+    }
+    if (best && best.value > 0) {
+        return `${best.label} (${Number(best.value).toFixed(2)})`;
+    }
+    const routeCode = Number(telemetry.routeDirectionCode);
+    if (Number.isFinite(routeCode)) {
+        const routeLabel = formatRouteLabel(routeCode, telemetry);
+        if (routeLabel !== "unknown(0)") {
+            return routeLabel;
+        }
+    }
+    return "unknown";
+}
+
+function routeDirectionCandidates(telemetry) {
+    return [
+        { label: "unknown", value: Number(telemetry.routeDirectionUnknown || 0), code: 0 },
+        { label: "keep straight", value: Number(telemetry.routeDirectionKeepStraight || 0), code: 1 },
+        { label: "turn left", value: Number(telemetry.routeDirectionTurnLeft || 0), code: 2 },
+        { label: "turn right", value: Number(telemetry.routeDirectionTurnRight || 0), code: 3 },
+        { label: "reroute / wrong way", value: Number(telemetry.routeDirectionRerouteWrongWay || 0), code: 4 },
+    ];
+}
+
+function formatRouteLabel(code, telemetry = null) {
+    const nextCode = Number(code);
+    if (!Number.isFinite(nextCode)) {
+        return "unknown(0)";
+    }
+    if (nextCode === 0 && telemetry) {
+        const fallback = inferRouteLabelFromDelta(telemetry);
+        if (fallback) {
+            return `${fallback}(derived)`;
+        }
+    }
+    if (nextCode === 1) {
+        return "straight(1)";
+    }
+    if (nextCode === 2) {
+        return "left(2)";
+    }
+    if (nextCode === 3) {
+        return "right(3)";
+    }
+    if (nextCode === 4) {
+        return "reroute(4)";
+    }
+    const nearestInteger = Math.round(nextCode);
+    if (Number.isFinite(nearestInteger) && nearestInteger >= 1 && nearestInteger <= 4) {
+        return `code(${nearestInteger})`;
+    }
+    return `unknown(${nextCode})`;
+}
+
+function inferRouteLabelFromDelta(telemetry) {
+    const forwardDelta = Number(telemetry && telemetry.routeForwardDelta);
+    const headingError = Number(telemetry && telemetry.routeHeadingError);
+    const distance = Number(telemetry && telemetry.routeDistance);
+    if (!Number.isFinite(forwardDelta) || !Number.isFinite(headingError) || !Number.isFinite(distance) || distance <= 0) {
+        return "";
+    }
+    if (forwardDelta < 0) {
+        return "reroute";
+    }
+    if (headingError <= -22.5) {
+        return "left";
+    }
+    if (headingError >= 22.5) {
+        return "right";
+    }
+    return "straight";
+}
+
+function formatRouteOneHot(telemetry) {
+    if (!telemetry) {
+        return "None";
+    }
+    const oneHot = routeDirectionCandidates(telemetry).map((item) => {
+        const key = item.code === 1 ? "straight" : item.label.split(" ")[0];
+        return `${key}=${Number(item.value || 0).toFixed(0)}`;
+    }).join(" ");
+    const fallback = inferRouteLabelFromDelta(telemetry);
+    return fallback ? `${oneHot} derived=${fallback}` : oneHot;
+}
+
+function formatStateInputMap(values) {
+    if (!values || typeof values !== "object") {
+        return "None";
+    }
+    const entries = Object.entries(values);
+    if (!entries.length) {
+        return "None";
+    }
+    return entries.map(([key, value]) => {
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) {
+            return `${key}=${numeric.toFixed(3)}`;
+        }
+        return `${key}=${String(value)}`;
+    }).join(" ");
 }
 
 function formatTimestamp(value) {
@@ -651,10 +938,11 @@ function formatPlannerCommand(control) {
     }
     const steering = Number(control.steering ?? control.steer);
     const throttle = Number(control.throttle ?? control.acceleration);
+    const brake = Number(control.brakePressureAvg ?? control.brake ?? 0);
     if (!Number.isFinite(steering) || !Number.isFinite(throttle)) {
         return "None";
     }
-    return `steer=${steering.toFixed(3)} throttle=${throttle.toFixed(3)}`;
+    return `steer=${steering.toFixed(3)} throttle=${throttle.toFixed(3)} brake=${Number.isFinite(brake) ? brake.toFixed(3) : "0.000"}`;
 }
 
 function formatPlannerHorizon(controls) {
@@ -711,6 +999,7 @@ function formatControlLine(control, options = {}) {
     const parts = [
         `steer=${Number(control.steer || 0).toFixed(3)}`,
         `throttle=${Number(control.throttle || 0).toFixed(3)}`,
+        `brake=${Number((control.brakePressureAvg ?? control.brake) || 0).toFixed(3)}`,
     ];
     if (control.handbrake) {
         parts.push("handbrake=on");
@@ -733,6 +1022,32 @@ function formatControlLine(control, options = {}) {
     return parts.join(" ");
 }
 
+function formatControlCommandLine(label, control) {
+    const formatted = formatControlLine(control);
+    return `${label}: ${formatted === "None" ? "none" : formatted}`;
+}
+
+function formatControlChain(prediction, actuatorState) {
+    const lines = [];
+    if (prediction) {
+        lines.push(formatControlCommandLine("model raw", prediction.collapsedCommand));
+        if (prediction.throttleHeld) {
+            lines.push(`throttle hold: ${Number(prediction.heldThrottle || 0).toFixed(3)}`);
+        }
+        lines.push(formatControlCommandLine("processor", prediction.postProcessedCommand));
+    }
+    if (actuatorState && actuatorState.lastCommand) {
+        lines.push(formatControlCommandLine("request", actuatorState.lastCommand));
+    }
+    if (actuatorState && actuatorState.target) {
+        lines.push(formatControlCommandLine("target", actuatorState.target));
+    }
+    if (actuatorState && actuatorState.applied) {
+        lines.push(formatControlCommandLine("applied", actuatorState.applied));
+    }
+    return lines.length ? lines.join("\n") : "None";
+}
+
 function renderActuatorState(state) {
     const supported = state && state.supported !== false;
     const ready = Boolean(state && state.ready);
@@ -753,12 +1068,20 @@ function renderActuatorState(state) {
         includeEnabled: true,
         includeTimestamp: true,
     }));
+    setLiveValue(actuatorControlChain, formatControlChain(null, state));
+    const safety = state && state.target && state.target.safety ? state.target.safety : null;
+    setLiveValue(actuatorSpeedGovernor, formatSpeedGovernor(safety), {
+        stale: Boolean(safety && safety.speedLimitActive),
+    });
+    setLiveValue(actuatorBrakeGuard, formatBrakeGuard(safety), {
+        stale: Boolean(safety && (safety.brakeThresholdApplied || safety.reverseLockoutApplied)),
+    });
 
     const controllerStatus = [];
     if (state && state.target && state.target.timedOut) {
         controllerStatus.push("timeout neutralizing");
     } else if (state && state.applied && state.applied.holding) {
-        controllerStatus.push("holding latched input");
+        controllerStatus.push("applying latest input");
     } else if (state && state.target && state.target.enabled) {
         controllerStatus.push("tracking latest input");
     }
@@ -777,6 +1100,41 @@ function renderActuatorState(state) {
     setLiveValue(actuatorLastError, controllerStatus.join(" · "), {
         stale: Boolean(state && (state.lastError || state.lastApplyError)),
     });
+}
+
+function formatSpeedGovernor(safety) {
+    if (!safety) {
+        return "None";
+    }
+    const speed = Number(safety.currentSpeedKph);
+    const limit = Number(safety.speedLimitKph);
+    const overspeed = Number(safety.overspeedKph || 0);
+    const parts = [];
+    if (Number.isFinite(speed)) {
+        parts.push(`speed=${speed.toFixed(1)}kph`);
+    } else {
+        parts.push("speed=unknown");
+    }
+    parts.push(`cap=${Number.isFinite(limit) ? limit.toFixed(1) : "off"}kph`);
+    if (safety.speedLimitActive) {
+        parts.push(`limited +${overspeed.toFixed(1)}kph`);
+    }
+    if (safety.overspeedBrakeApplied) {
+        parts.push(`brake=${Number(safety.brakeAfter || 0).toFixed(2)}`);
+    }
+    return parts.join(" ");
+}
+
+function formatBrakeGuard(safety) {
+    if (!safety) {
+        return "None";
+    }
+    return [
+        `threshold>${Number(safety.modelBrakeThreshold || 0).toFixed(2)}`,
+        `brake ${Number(safety.brakeBefore || 0).toFixed(2)}->${Number(safety.brakeAfter || 0).toFixed(2)}`,
+        safety.brakeThresholdApplied ? "weak brake ignored" : "",
+        safety.reverseLockoutApplied ? "reverse lockout" : "",
+    ].filter(Boolean).join(" ");
 }
 
 function renderProcessorState(status) {
@@ -809,6 +1167,15 @@ function parseTuningInputValue(input, fallbackValue) {
     return nextValue;
 }
 
+function cloneActuatorTuning(tuning) {
+    if (!tuning || typeof tuning !== "object") {
+        return null;
+    }
+    return {
+        ...tuning,
+    };
+}
+
 function cloneTranslationTuning(tuning) {
     if (!tuning || typeof tuning !== "object") {
         return null;
@@ -816,6 +1183,20 @@ function cloneTranslationTuning(tuning) {
     return {
         ...tuning,
     };
+}
+
+function updateActuatorTuningActions() {
+    const hasState = Boolean(actuatorTuningState);
+    const saveSupported = Boolean(actuatorTuningState && actuatorTuningState.saveSupported);
+    if (actuatorTuningApplyButton) {
+        actuatorTuningApplyButton.disabled = busy || !actuatorTuningDirty || !hasState;
+    }
+    if (actuatorTuningResetButton) {
+        actuatorTuningResetButton.disabled = busy || !hasState;
+    }
+    if (actuatorTuningSaveButton) {
+        actuatorTuningSaveButton.disabled = busy || !hasState || !saveSupported;
+    }
 }
 
 function updateTranslationTuningActions() {
@@ -830,6 +1211,58 @@ function updateTranslationTuningActions() {
     if (translationTuningSaveButton) {
         translationTuningSaveButton.disabled = busy || !hasState || !saveSupported;
     }
+}
+
+function renderActuatorTuningState(tuningState) {
+    actuatorTuningState = tuningState || null;
+    const live = tuningState && tuningState.live ? tuningState.live : null;
+    const saved = tuningState && tuningState.saved ? tuningState.saved : null;
+
+    if (!actuatorTuningDirty || !actuatorTuningDraft) {
+        actuatorTuningDraft = cloneActuatorTuning(live);
+    }
+
+    const draft = actuatorTuningDraft || live || {};
+    for (const field of ACTUATOR_TUNING_FIELDS) {
+        if (field.input && (!actuatorTuningDirty || document.activeElement !== field.input)) {
+            field.input.value = formatTuningValue(draft[field.key]);
+        }
+        if (field.saved) {
+            field.saved.textContent = formatTuningValue(saved ? saved[field.key] : 0);
+        }
+    }
+
+    if (actuatorTuningStatus) {
+        if (!tuningState) {
+            actuatorTuningStatus.textContent = "Live actuator tuning unavailable.";
+        } else if (actuatorTuningDirty) {
+            actuatorTuningStatus.textContent = "Live edits pending apply.";
+        } else if (tuningState.saveSupported) {
+            actuatorTuningStatus.textContent = "Live actuator tuning synced. Save persists config.";
+        } else {
+            actuatorTuningStatus.textContent = "Live actuator tuning synced. Config save unavailable.";
+        }
+    }
+    if (actuatorTuningConfig) {
+        actuatorTuningConfig.textContent = tuningState && tuningState.configPath
+            ? `Config file: ${tuningState.configPath}`
+            : "Config file: unavailable";
+    }
+    updateActuatorTuningActions();
+}
+
+function buildActuatorTuningPayload() {
+    const base = cloneActuatorTuning(actuatorTuningState && actuatorTuningState.live);
+    if (!base) {
+        throw new Error("actuator tuning is unavailable");
+    }
+    const next = {
+        ...base,
+    };
+    for (const field of ACTUATOR_TUNING_FIELDS) {
+        next[field.key] = parseTuningInputValue(field.input, base[field.key]);
+    }
+    return next;
 }
 
 function renderTranslationTuningState(tuningState) {
@@ -853,13 +1286,13 @@ function renderTranslationTuningState(tuningState) {
 
     if (translationTuningStatus) {
         if (!tuningState) {
-            translationTuningStatus.textContent = "Live actuator tuning unavailable.";
+            translationTuningStatus.textContent = "Live translation tuning unavailable.";
         } else if (translationTuningDirty) {
-            translationTuningStatus.textContent = "Live edits pending apply.";
+            translationTuningStatus.textContent = "Live translation edits pending apply.";
         } else if (tuningState.saveSupported) {
-            translationTuningStatus.textContent = "Live actuator tuning synced. Save persists config.";
+            translationTuningStatus.textContent = "Live translation tuning synced. Save persists config.";
         } else {
-            translationTuningStatus.textContent = "Live actuator tuning synced. Config save unavailable.";
+            translationTuningStatus.textContent = "Live translation tuning synced. Config save unavailable.";
         }
     }
     if (translationTuningConfig) {
@@ -873,7 +1306,7 @@ function renderTranslationTuningState(tuningState) {
 function buildTranslationTuningPayload() {
     const base = cloneTranslationTuning(translationTuningState && translationTuningState.live);
     if (!base) {
-        throw new Error("actuator tuning is unavailable");
+        throw new Error("translation tuning is unavailable");
     }
     const next = {
         ...base,
@@ -888,7 +1321,14 @@ function buildTranslationTuningPayload() {
 function renderErrorSurface(state, runtime, inference, actuator) {
     uiErrorRuntime.textContent = runtime && runtime.lastError ? String(runtime.lastError) : "None";
     uiErrorInference.textContent = inference && inference.lastError ? String(inference.lastError) : "None";
-    uiErrorTranslation.textContent = "Bypassed in planner runtime";
+    const translationIssues = [];
+    if (state && state.lastError) {
+        translationIssues.push(String(state.lastError));
+    }
+    if (state && state.lastActuatorError) {
+        translationIssues.push(`actuator: ${state.lastActuatorError}`);
+    }
+    uiErrorTranslation.textContent = translationIssues.length ? translationIssues.join(" · ") : "None";
     uiErrorActuator.textContent = actuator && actuator.lastError
         ? String(actuator.lastError)
         : (actuator && actuator.lastApplyError ? String(actuator.lastApplyError) : "None");
@@ -898,12 +1338,18 @@ function renderErrorSurface(state, runtime, inference, actuator) {
 }
 
 async function refresh(forceModels = false) {
-    const tasks = [fetchState(), fetchInferenceStatus(), fetchActuatorState(), fetchTranslationState()];
+    const tasks = [
+        fetchState(),
+        fetchInferenceStatus(),
+        fetchActuatorState(),
+        fetchActuatorTuningState(),
+        fetchTranslationTuningState(),
+    ];
     const shouldRefreshModels = forceModels || (Date.now() - lastModelsRefreshAt > 10000);
     if (shouldRefreshModels) {
         tasks.push(fetchInferenceModels());
     }
-    const [state, inference, actuator, translationState, modelResult] = await Promise.all(tasks);
+    const [state, inference, actuator, actuatorTuning, translationTuning, modelResult] = await Promise.all(tasks);
     ensureSceneOptions(state.availableScenes);
     if (modelResult) {
         ensureModelOptions(modelResult.models);
@@ -914,11 +1360,12 @@ async function refresh(forceModels = false) {
     setLiveValue(activeScene, (state.runtime && state.runtime.activeSceneName) || "None");
     setLiveValue(lastCommand, formatCommand(state.lastCommand));
     renderQueue(state.pendingCommands);
-    renderInferenceStatus(state, inference);
+    renderInferenceStatus(state, inference, actuator);
     renderProcessorState(inference);
-    renderTranslationTuningState(translationState);
+    renderActuatorTuningState(actuatorTuning);
+    renderTranslationTuningState(translationTuning);
     renderActuatorState(actuator);
-    renderErrorSurface(translationState, state.runtime, inference, actuator);
+    renderErrorSurface(translationTuning, state.runtime, inference, actuator);
 
     if (!Array.isArray(state.availableScenes) || state.availableScenes.length === 0) {
         setBanner("Waiting for scene list from FiveM.", "");
@@ -1493,7 +1940,6 @@ function cloneTrainingStateInputs(stateInputs) {
         const item = stateInputs && stateInputs[key] || {};
         out[key] = {
             enabled: Boolean(item.enabled),
-            heads: Array.isArray(item.heads) ? item.heads.map((value) => String(value).trim()).filter(Boolean) : [],
         };
         if (typeof item.cap === "number" || item.cap) {
             out[key].cap = Number(item.cap || 0);
@@ -1508,15 +1954,12 @@ function buildTrainingDraftFromConfig(config) {
         notes: "",
         epochs: Number(config.epochs || 0),
         learningRate: Number(config.learningRate || 0),
+        smoothL1Beta: Number(config.smoothL1Beta || 0.1),
+        earlyStoppingMetric: String(config.earlyStoppingMetric || "drive_score"),
         widthMultiplier: Number(config.widthMultiplier || 1.5),
         trainRunIds: Array.isArray(config.trainRunIds) ? [...config.trainRunIds] : [],
         valRunIds: Array.isArray(config.valRunIds) ? [...config.valRunIds] : [],
         lossWeights: cloneTrainingMap(config.lossWeights),
-        consistency: cloneTrainingMap(config.consistency),
-        yawLossWeighting: {
-            enabled: Boolean(config.yawLossWeighting && config.yawLossWeighting.enabled),
-            values: cloneTrainingMap(config.yawLossWeighting),
-        },
         turnOversampling: {
             enabled: Boolean(config.turnOversampling && config.turnOversampling.enabled),
             values: cloneTrainingMap(config.turnOversampling),
@@ -1562,6 +2005,12 @@ function mergeTrainingDraft(config, draft) {
     if (typeof draft.learningRate === "number" && Number.isFinite(draft.learningRate) && draft.learningRate > 0) {
         merged.learningRate = draft.learningRate;
     }
+    if (typeof draft.smoothL1Beta === "number" && Number.isFinite(draft.smoothL1Beta) && draft.smoothL1Beta > 0) {
+        merged.smoothL1Beta = draft.smoothL1Beta;
+    }
+    if (typeof draft.earlyStoppingMetric === "string" && draft.earlyStoppingMetric.trim()) {
+        merged.earlyStoppingMetric = draft.earlyStoppingMetric.trim();
+    }
     if (typeof draft.widthMultiplier === "number" && Number.isFinite(draft.widthMultiplier) && draft.widthMultiplier > 0) {
         merged.widthMultiplier = draft.widthMultiplier;
     }
@@ -1576,23 +2025,13 @@ function mergeTrainingDraft(config, draft) {
             merged.lossWeights[key] = draft.lossWeights[key];
         }
     }
-    for (const key of config.allowedConsistencyKeys || []) {
-        if (draft.consistency && typeof draft.consistency[key] === "number" && Number.isFinite(draft.consistency[key])) {
-            merged.consistency[key] = draft.consistency[key];
-        }
-    }
-    if (draft.yawLossWeighting && typeof draft.yawLossWeighting === "object") {
-        merged.yawLossWeighting.enabled = Boolean(draft.yawLossWeighting.enabled);
-        for (const [key, value] of Object.entries(draft.yawLossWeighting.values || {})) {
-            if (Number.isFinite(value)) {
-                merged.yawLossWeighting.values[key] = Number(value);
-            }
-        }
-    }
     if (draft.turnOversampling && typeof draft.turnOversampling === "object") {
         merged.turnOversampling.enabled = Boolean(draft.turnOversampling.enabled);
-        for (const [key, value] of Object.entries(draft.turnOversampling.values || {})) {
-            if (Number.isFinite(value)) {
+        const turnOversamplingValues = draft.turnOversampling.values && typeof draft.turnOversampling.values === "object"
+            ? draft.turnOversampling.values
+            : draft.turnOversampling;
+        for (const [key, value] of Object.entries(turnOversamplingValues || {})) {
+            if (key !== "enabled" && Number.isFinite(value)) {
                 merged.turnOversampling.values[key] = Number(value);
             }
         }
@@ -1608,9 +2047,6 @@ function mergeTrainingDraft(config, draft) {
             }
             if (typeof source.cap === "number" && Number.isFinite(source.cap) && source.cap > 0) {
                 merged.stateInputs[sourceKey].cap = source.cap;
-            }
-            if (Array.isArray(source.heads)) {
-                merged.stateInputs[sourceKey].heads = source.heads.map((value) => String(value).trim()).filter(Boolean);
             }
         }
     }
@@ -1638,17 +2074,33 @@ function updateTrainingKeyCardState(input, defaultValue) {
     const numericValue = Number(input.value);
     const isOverride = Number.isFinite(numericValue) && Math.abs(numericValue - Number(defaultValue || 0)) > 1e-9;
     card.classList.toggle("override", isOverride);
+    updateTrainingSectionState(card);
 }
 
 function renderTrainingKeyGrid(container, keys, currentValues, defaultValues, prefix) {
     container.innerHTML = "";
     for (const key of keys) {
-        const wrapper = document.createElement("label");
+        const wrapper = document.createElement("div");
         wrapper.className = "key-card";
+
+        const headingRow = document.createElement("div");
+        headingRow.className = "key-card-heading";
 
         const heading = document.createElement("span");
         heading.className = "status-label";
         heading.textContent = key;
+
+        const resetButton = document.createElement("button");
+        resetButton.className = "ghost mini-button";
+        resetButton.type = "button";
+        resetButton.textContent = "Reset";
+
+        headingRow.appendChild(heading);
+        headingRow.appendChild(resetButton);
+
+        const label = document.createElement("label");
+        label.className = "field";
+        label.htmlFor = `${prefix}-${key}`;
 
         const input = document.createElement("input");
         input.type = "number";
@@ -1660,17 +2112,28 @@ function renderTrainingKeyGrid(container, keys, currentValues, defaultValues, pr
         input.addEventListener("input", () => {
             updateTrainingKeyCardState(input, defaultValues[key]);
         });
+        resetButton.addEventListener("click", () => {
+            input.value = String(defaultValues[key] ?? 0);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        });
 
         const note = document.createElement("span");
         note.className = "field-note";
         note.textContent = `Default ${formatTrainingNumber(defaultValues[key] ?? 0)}`;
 
-        wrapper.appendChild(heading);
-        wrapper.appendChild(input);
+        const marker = document.createElement("span");
+        marker.className = "override-marker";
+        marker.textContent = "Changed";
+
+        label.appendChild(input);
+        wrapper.appendChild(headingRow);
+        wrapper.appendChild(label);
         wrapper.appendChild(note);
+        wrapper.appendChild(marker);
         container.appendChild(wrapper);
         updateTrainingKeyCardState(input, defaultValues[key]);
     }
+    updateTrainingSectionState(container);
 }
 
 function renderTrainingRunCheckboxList(container, selectedRunIds) {
@@ -1681,6 +2144,7 @@ function renderTrainingRunCheckboxList(container, selectedRunIds) {
         empty.className = "empty-state";
         empty.textContent = "No runs found.";
         container.appendChild(empty);
+        updateTrainingRunSelectionState();
         return;
     }
     for (const run of inspectorRuns) {
@@ -1691,6 +2155,7 @@ function renderTrainingRunCheckboxList(container, selectedRunIds) {
         input.type = "checkbox";
         input.value = run.runId;
         input.checked = selected.has(run.runId);
+        input.addEventListener("change", updateTrainingRunSelectionState);
 
         const body = document.createElement("div");
         body.className = "training-run-body";
@@ -1715,6 +2180,7 @@ function renderTrainingRunCheckboxList(container, selectedRunIds) {
         option.appendChild(chip);
         container.appendChild(option);
     }
+    updateTrainingRunSelectionState();
 }
 
 function getSelectedTrainingRuns(container) {
@@ -1723,39 +2189,41 @@ function getSelectedTrainingRuns(container) {
         .filter(Boolean);
 }
 
+function updateTrainingRunSelectionState() {
+    if (!trainingConfig) {
+        return;
+    }
+    const section = trainingWidthMultiplierInput && trainingWidthMultiplierInput.closest(".training-section");
+    updateTrainingSectionState(section || trainingWidthMultiplierInput);
+}
+
 function buildYawFocusedBatchSpecs() {
     const trainRunIds = getSelectedTrainingRuns(trainingTrainRunList);
     const valRunIds = getSelectedTrainingRuns(trainingValRunList);
     const widthMultiplier = Number(trainingWidthMultiplierInput.value || trainingConfig.widthMultiplier || 1.5);
+    const smoothL1Beta = Number(trainingSmoothL1BetaInput.value || trainingConfig.smoothL1Beta || 0.1);
+    const earlyStoppingMetric = String(trainingEarlyStoppingMetricSelect.value || trainingConfig.earlyStoppingMetric || "drive_score");
     const stateInputs = readTrainingStateInputs();
 
     return [
         {
             name: "yaw-focus-a",
-            notes: "High future_yaw_delta weight with strong yaw consistency and oversampling.",
+            notes: "High future_yaw_delta weight with turn oversampling.",
             epochs: Number(trainingEpochsInput.value || trainingConfig.epochs || 15),
             learningRate: 0.001,
             widthMultiplier,
+            smoothL1Beta,
+            earlyStoppingMetric,
             trainRunIds,
             valRunIds,
             lossWeights: {
-                future_yaw_delta: 3.2,
-                yaw_rate: 0.8,
-                future_speed: 1.2,
-                move_intent: 0.7,
-                delta_speed: 0.4,
-            },
-            consistency: {
-                yaw_delta_vs_yaw_rate_weight: 2.0,
-                yaw_rate_scale_to_degrees: 57.29577951308232,
-                future_speed_vs_delta_speed_weight: 0.35,
-            },
-            yawLossWeighting: {
-                enabled: true,
-                base_weight: 1.0,
-                alpha: 2.4,
-                tau: 0.2,
-                max_scale: 3.8,
+                steering: 3.2,
+                acceleration: 1.2,
+                brakePressureAvg: 1.0,
+                future_speed: 1.1,
+                future_speed_delta: 1.2,
+                future_yaw_delta: 2.0,
+                future_yaw_rate: 0.8,
             },
             turnOversampling: {
                 enabled: true,
@@ -1775,26 +2243,18 @@ function buildYawFocusedBatchSpecs() {
             epochs: Number(trainingEpochsInput.value || trainingConfig.epochs || 15),
             learningRate: 0.0008,
             widthMultiplier,
+            smoothL1Beta,
+            earlyStoppingMetric,
             trainRunIds,
             valRunIds,
             lossWeights: {
-                future_yaw_delta: 3.6,
-                yaw_rate: 1.0,
+                steering: 3.6,
+                acceleration: 1.0,
+                brakePressureAvg: 0.9,
                 future_speed: 1.0,
-                move_intent: 0.6,
-                delta_speed: 0.35,
-            },
-            consistency: {
-                yaw_delta_vs_yaw_rate_weight: 2.4,
-                yaw_rate_scale_to_degrees: 57.29577951308232,
-                future_speed_vs_delta_speed_weight: 0.25,
-            },
-            yawLossWeighting: {
-                enabled: true,
-                base_weight: 1.0,
-                alpha: 2.8,
-                tau: 0.18,
-                max_scale: 4.2,
+                future_speed_delta: 1.2,
+                future_yaw_delta: 2.4,
+                future_yaw_rate: 1.0,
             },
             turnOversampling: {
                 enabled: true,
@@ -1814,26 +2274,18 @@ function buildYawFocusedBatchSpecs() {
             epochs: Number(trainingEpochsInput.value || trainingConfig.epochs || 15),
             learningRate: 0.0006,
             widthMultiplier,
+            smoothL1Beta,
+            earlyStoppingMetric,
             trainRunIds,
             valRunIds,
             lossWeights: {
-                future_yaw_delta: 2.9,
-                yaw_rate: 0.9,
+                steering: 2.9,
+                acceleration: 1.3,
+                brakePressureAvg: 1.0,
                 future_speed: 1.3,
-                move_intent: 0.75,
-                delta_speed: 0.45,
-            },
-            consistency: {
-                yaw_delta_vs_yaw_rate_weight: 1.8,
-                yaw_rate_scale_to_degrees: 57.29577951308232,
-                future_speed_vs_delta_speed_weight: 0.3,
-            },
-            yawLossWeighting: {
-                enabled: true,
-                base_weight: 1.0,
-                alpha: 2.0,
-                tau: 0.22,
-                max_scale: 3.4,
+                future_speed_delta: 1.2,
+                future_yaw_delta: 1.8,
+                future_yaw_rate: 0.9,
             },
             turnOversampling: {
                 enabled: true,
@@ -1849,30 +2301,22 @@ function buildYawFocusedBatchSpecs() {
         },
         {
             name: "yaw-focus-d",
-            notes: "Hardest yaw-focused sweep: strongest yaw head, strongest yaw consistency, still keeps intent present.",
+            notes: "Hardest yaw-focused sweep: strongest steering and future_yaw_delta targets while keeping auxiliary targets present.",
             epochs: Number(trainingEpochsInput.value || trainingConfig.epochs || 15),
             learningRate: 0.0009,
             widthMultiplier,
+            smoothL1Beta,
+            earlyStoppingMetric,
             trainRunIds,
             valRunIds,
             lossWeights: {
-                future_yaw_delta: 4.0,
-                yaw_rate: 1.1,
+                steering: 4.0,
+                acceleration: 0.9,
+                brakePressureAvg: 0.8,
                 future_speed: 0.9,
-                move_intent: 0.65,
-                delta_speed: 0.3,
-            },
-            consistency: {
-                yaw_delta_vs_yaw_rate_weight: 2.7,
-                yaw_rate_scale_to_degrees: 57.29577951308232,
-                future_speed_vs_delta_speed_weight: 0.2,
-            },
-            yawLossWeighting: {
-                enabled: true,
-                base_weight: 1.0,
-                alpha: 3.0,
-                tau: 0.16,
-                max_scale: 4.5,
+                future_speed_delta: 1.2,
+                future_yaw_delta: 2.7,
+                future_yaw_rate: 1.1,
             },
             turnOversampling: {
                 enabled: true,
@@ -1895,53 +2339,99 @@ function humanizeTrainingStateInputKey(key) {
         .replace(/^\w/, (match) => match.toUpperCase());
 }
 
-function renderTrainingStateInputs(stateInputs, allowedHeads) {
+function renderTrainingStateInputs(stateInputs) {
+    const definitionMap = trainingStateInputDefinitionMap();
     trainingStateInputsContainer.innerHTML = "";
     for (const key of TRAINING_STATE_INPUT_ORDER) {
         const item = stateInputs && stateInputs[key] || {};
+        const defaultItem = trainingConfig && trainingConfig.stateInputs && trainingConfig.stateInputs[key]
+            ? trainingConfig.stateInputs[key]
+            : {};
+        const definition = definitionMap[key] || {};
         const card = document.createElement("div");
-        card.className = "field";
+        card.className = "state-input-card";
         card.dataset.stateInputKey = key;
+
+        const headingRow = document.createElement("div");
+        headingRow.className = "state-input-heading";
 
         const title = document.createElement("span");
         title.className = "status-label";
         title.textContent = humanizeTrainingStateInputKey(key);
-        card.appendChild(title);
+
+        const resetButton = document.createElement("button");
+        resetButton.className = "ghost mini-button";
+        resetButton.type = "button";
+        resetButton.textContent = "Reset";
+        resetButton.addEventListener("click", () => {
+            enabledInput.checked = Boolean(defaultItem.enabled);
+            if (capInput) {
+                capInput.value = String(defaultItem.cap || item.cap || 0);
+            }
+            updateTrainingStateInputCardState(card);
+        });
+
+        headingRow.appendChild(title);
+        headingRow.appendChild(resetButton);
+        card.appendChild(headingRow);
 
         const enabledLabel = document.createElement("label");
-        enabledLabel.className = "status-label";
+        enabledLabel.className = "toggle-line";
         const enabledInput = document.createElement("input");
         enabledInput.type = "checkbox";
         enabledInput.dataset.role = "enabled";
         enabledInput.checked = Boolean(item.enabled);
+        enabledInput.addEventListener("change", () => updateTrainingStateInputCardState(card));
         enabledLabel.appendChild(enabledInput);
         enabledLabel.appendChild(document.createTextNode(" Enabled"));
         card.appendChild(enabledLabel);
 
+        let capInput = null;
         if (typeof item.cap === "number") {
-            const capInput = document.createElement("input");
+            capInput = document.createElement("input");
             capInput.type = "number";
             capInput.step = "0.001";
             capInput.min = "0";
             capInput.dataset.role = "cap";
             capInput.value = String(item.cap || 0);
             capInput.placeholder = "Cap";
+            capInput.addEventListener("input", () => updateTrainingStateInputCardState(card));
             card.appendChild(capInput);
         }
 
-        const headsSelect = document.createElement("select");
-        headsSelect.multiple = true;
-        headsSelect.dataset.role = "heads";
-        for (const head of allowedHeads || []) {
-            const option = document.createElement("option");
-            option.value = head;
-            option.textContent = head;
-            option.selected = Array.isArray(item.heads) && item.heads.includes(head);
-            headsSelect.appendChild(option);
+        const marker = document.createElement("span");
+        marker.className = "override-marker";
+        marker.textContent = "Changed";
+        card.appendChild(marker);
+
+        if (definition.plannerFusedOnly) {
+            const note = document.createElement("span");
+            note.className = "field-note";
+            note.textContent = "Fused planner input";
+            card.appendChild(note);
         }
-        card.appendChild(headsSelect);
         trainingStateInputsContainer.appendChild(card);
+        updateTrainingStateInputCardState(card);
     }
+    updateTrainingSectionState(trainingStateInputsContainer);
+}
+
+function updateTrainingStateInputCardState(card) {
+    if (!trainingConfig || !card) {
+        return;
+    }
+    const key = card.dataset.stateInputKey;
+    const defaultItem = trainingConfig.stateInputs && trainingConfig.stateInputs[key] ? trainingConfig.stateInputs[key] : {};
+    const enabledInput = card.querySelector('[data-role="enabled"]');
+    const capInput = card.querySelector('[data-role="cap"]');
+    const enabledChanged = Boolean(enabledInput && enabledInput.checked) !== Boolean(defaultItem.enabled);
+    let capChanged = false;
+    if (capInput && typeof defaultItem.cap === "number") {
+        const cap = Number(capInput.value);
+        capChanged = Number.isFinite(cap) && Math.abs(cap - Number(defaultItem.cap || 0)) > 1e-9;
+    }
+    card.classList.toggle("override", enabledChanged || capChanged);
+    updateTrainingSectionState(card);
 }
 
 function readTrainingStateInputs() {
@@ -1953,10 +2443,8 @@ function readTrainingStateInputs() {
         }
         const enabledInput = card.querySelector('[data-role="enabled"]');
         const capInput = card.querySelector('[data-role="cap"]');
-        const headsSelect = card.querySelector('[data-role="heads"]');
         const item = {
             enabled: Boolean(enabledInput && enabledInput.checked),
-            heads: Array.from(headsSelect && headsSelect.selectedOptions || []).map((option) => option.value),
         };
         if (capInput) {
             const cap = Number(capInput.value);
@@ -1970,6 +2458,26 @@ function readTrainingStateInputs() {
     return stateInputs;
 }
 
+function renderEarlyStoppingMetricOptions(selectedMetric) {
+    const metrics = Array.isArray(trainingConfig && trainingConfig.allowedEarlyStoppingMetrics)
+        ? trainingConfig.allowedEarlyStoppingMetrics
+        : ["drive_score", "val_loss", "control_loss", "control_mae_overall"];
+    trainingEarlyStoppingMetricSelect.innerHTML = "";
+    const seen = new Set();
+    for (const metric of [selectedMetric, ...metrics]) {
+        const value = String(metric || "").trim();
+        if (!value || seen.has(value)) {
+            continue;
+        }
+        seen.add(value);
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        option.selected = value === selectedMetric;
+        trainingEarlyStoppingMetricSelect.appendChild(option);
+    }
+}
+
 function applyTrainingDraftToForm(draft) {
     if (!trainingConfig) {
         return;
@@ -1979,7 +2487,14 @@ function applyTrainingDraftToForm(draft) {
     trainingNotesInput.value = resolved.notes || "";
     trainingEpochsInput.value = String(resolved.epochs || trainingConfig.epochs || 0);
     trainingLearningRateInput.value = String(resolved.learningRate || trainingConfig.learningRate || 0);
+    trainingSmoothL1BetaInput.value = String(resolved.smoothL1Beta || trainingConfig.smoothL1Beta || 0.1);
+    renderEarlyStoppingMetricOptions(resolved.earlyStoppingMetric || trainingConfig.earlyStoppingMetric || "drive_score");
     trainingWidthMultiplierInput.value = String(resolved.widthMultiplier || trainingConfig.widthMultiplier || 1.5);
+    configureTrainingDefaultField(trainingEpochsInput, Number(trainingConfig.epochs || 0), (value) => String(Math.trunc(value || 0)));
+    configureTrainingDefaultField(trainingLearningRateInput, Number(trainingConfig.learningRate || 0));
+    configureTrainingDefaultField(trainingSmoothL1BetaInput, Number(trainingConfig.smoothL1Beta || 0.1));
+    configureTrainingDefaultField(trainingEarlyStoppingMetricSelect, String(trainingConfig.earlyStoppingMetric || "drive_score"));
+    configureTrainingDefaultField(trainingWidthMultiplierInput, Number(trainingConfig.widthMultiplier || 1.5));
     renderTrainingKeyGrid(
         trainingLossWeights,
         trainingConfig.allowedLossWeightKeys || [],
@@ -1987,22 +2502,8 @@ function applyTrainingDraftToForm(draft) {
         trainingConfig.lossWeights || {},
         "training-loss",
     );
-    renderTrainingKeyGrid(
-        trainingConsistency,
-        trainingConfig.allowedConsistencyKeys || [],
-        resolved.consistency || {},
-        trainingConfig.consistency || {},
-        "training-consistency",
-    );
-    trainingYawLossWeightingEnabled.checked = Boolean(resolved.yawLossWeighting && resolved.yawLossWeighting.enabled);
-    renderTrainingKeyGrid(
-        trainingYawLossWeighting,
-        ["base_weight", "alpha", "tau", "max_scale"],
-        resolved.yawLossWeighting && resolved.yawLossWeighting.values || {},
-        trainingConfig.yawLossWeighting || {},
-        "training-yaw-loss-weighting",
-    );
     trainingTurnOversamplingEnabled.checked = Boolean(resolved.turnOversampling && resolved.turnOversampling.enabled);
+    updateTrainingTurnOversamplingEnabledState();
     renderTrainingKeyGrid(
         trainingTurnOversampling,
         [
@@ -2020,7 +2521,22 @@ function applyTrainingDraftToForm(draft) {
     );
     renderTrainingRunCheckboxList(trainingTrainRunList, resolved.trainRunIds || []);
     renderTrainingRunCheckboxList(trainingValRunList, resolved.valRunIds || []);
-    renderTrainingStateInputs(resolved.stateInputs, trainingConfig.allowedStateInputHeads || []);
+    renderTrainingStateInputs(resolved.stateInputs);
+}
+
+function updateTrainingTurnOversamplingEnabledState() {
+    if (!trainingConfig || !trainingTurnOversamplingEnabled) {
+        return;
+    }
+    const section = trainingTurnOversamplingEnabled.closest(".training-section");
+    if (!section) {
+        return;
+    }
+    const defaultEnabled = Boolean(trainingConfig.turnOversampling && trainingConfig.turnOversampling.enabled);
+    section.classList.toggle(
+        "override",
+        trainingTurnOversamplingEnabled.checked !== defaultEnabled || Boolean(section.querySelector(".key-card.override")),
+    );
 }
 
 function renderTrainingRuntimeMeta(config) {
@@ -2054,9 +2570,17 @@ function readTrainingFormSpec() {
     if (!Number.isFinite(learningRate) || learningRate <= 0) {
         throw new Error("learning rate must be a positive number");
     }
+    const smoothL1Beta = Number(trainingSmoothL1BetaInput.value);
+    if (!Number.isFinite(smoothL1Beta) || smoothL1Beta <= 0) {
+        throw new Error("Smooth L1 beta must be a positive number");
+    }
     const widthMultiplier = Number(trainingWidthMultiplierInput.value);
     if (!Number.isFinite(widthMultiplier) || widthMultiplier <= 0) {
         throw new Error("width multiplier must be a positive number");
+    }
+    const earlyStoppingMetric = String(trainingEarlyStoppingMetricSelect.value || "").trim();
+    if (!earlyStoppingMetric) {
+        throw new Error("early stopping metric is required");
     }
     const turnOversampling = normalizeTurnOversamplingValues({
         enabled: trainingTurnOversamplingEnabled.checked,
@@ -2067,15 +2591,12 @@ function readTrainingFormSpec() {
         notes: trainingNotesInput.value.trim(),
         epochs,
         learningRate,
+        smoothL1Beta,
+        earlyStoppingMetric,
         widthMultiplier,
         trainRunIds: getSelectedTrainingRuns(trainingTrainRunList),
         valRunIds: getSelectedTrainingRuns(trainingValRunList),
         lossWeights: getTrainingInputMap(trainingLossWeights),
-        consistency: getTrainingInputMap(trainingConsistency),
-        yawLossWeighting: {
-            enabled: trainingYawLossWeightingEnabled.checked,
-            ...getTrainingInputMap(trainingYawLossWeighting),
-        },
         turnOversampling,
         stateInputs: readTrainingStateInputs(),
     };
@@ -2099,45 +2620,42 @@ function normalizeTurnOversamplingValues(values) {
     return normalized;
 }
 
-function summarizeTrainingOverrides(job) {
+function trainingOverrideItems(job) {
     if (!trainingConfig || !job) {
-        return "No overrides";
+        return [];
     }
     const overrides = [];
     if (typeof job.epochs === "number" && Math.trunc(job.epochs) !== Math.trunc(Number(trainingConfig.epochs || 0))) {
-        overrides.push(`epochs ${job.epochs}`);
+        overrides.push({ label: "epochs", value: String(job.epochs) });
     }
     if (typeof job.learningRate === "number" && Math.abs(job.learningRate - Number(trainingConfig.learningRate || 0)) > 1e-9) {
-        overrides.push(`lr ${formatTrainingNumber(job.learningRate)}`);
+        overrides.push({ label: "lr", value: formatTrainingNumber(job.learningRate) });
+    }
+    if (typeof job.smoothL1Beta === "number" && Math.abs(job.smoothL1Beta - Number(trainingConfig.smoothL1Beta || 0.1)) > 1e-9) {
+        overrides.push({ label: "beta", value: formatTrainingNumber(job.smoothL1Beta) });
+    }
+    if (typeof job.earlyStoppingMetric === "string" && job.earlyStoppingMetric && job.earlyStoppingMetric !== String(trainingConfig.earlyStoppingMetric || "drive_score")) {
+        overrides.push({ label: "metric", value: job.earlyStoppingMetric });
     }
     if (typeof job.widthMultiplier === "number" && Math.abs(job.widthMultiplier - Number(trainingConfig.widthMultiplier || 1.5)) > 1e-9) {
-        overrides.push(`width ${formatTrainingNumber(job.widthMultiplier)}`);
+        overrides.push({ label: "width", value: formatTrainingNumber(job.widthMultiplier) });
     }
     const trainRunIds = Array.isArray(job.trainRunIds) ? job.trainRunIds : [];
     const valRunIds = Array.isArray(job.valRunIds) ? job.valRunIds : [];
     if (JSON.stringify(trainRunIds) !== JSON.stringify(trainingConfig.trainRunIds || [])) {
-        overrides.push(`train runs ${trainRunIds.length}`);
+        overrides.push({ label: "train runs", value: String(trainRunIds.length) });
     }
     if (JSON.stringify(valRunIds) !== JSON.stringify(trainingConfig.valRunIds || [])) {
-        overrides.push(`val runs ${valRunIds.length}`);
+        overrides.push({ label: "val runs", value: String(valRunIds.length) });
     }
     for (const key of trainingConfig.allowedLossWeightKeys || []) {
         const value = job.lossWeights && typeof job.lossWeights[key] === "number" ? job.lossWeights[key] : undefined;
         if (typeof value === "number" && Math.abs(value - Number(trainingConfig.lossWeights[key] || 0)) > 1e-9) {
-            overrides.push(`${key} ${formatTrainingNumber(value)}`);
-        }
-    }
-    for (const key of trainingConfig.allowedConsistencyKeys || []) {
-        const value = job.consistency && typeof job.consistency[key] === "number" ? job.consistency[key] : undefined;
-        if (typeof value === "number" && Math.abs(value - Number(trainingConfig.consistency[key] || 0)) > 1e-9) {
-            overrides.push(`${key} ${formatTrainingNumber(value)}`);
+            overrides.push({ label: key, value: formatTrainingNumber(value) });
         }
     }
     if (job.turnOversampling && typeof job.turnOversampling.enabled === "boolean" && job.turnOversampling.enabled !== Boolean(trainingConfig.turnOversampling && trainingConfig.turnOversampling.enabled)) {
-        overrides.push(`turn sampler ${job.turnOversampling.enabled ? "on" : "off"}`);
-    }
-    if (job.yawLossWeighting && typeof job.yawLossWeighting.enabled === "boolean" && job.yawLossWeighting.enabled !== Boolean(trainingConfig.yawLossWeighting && trainingConfig.yawLossWeighting.enabled)) {
-        overrides.push(`yaw weighting ${job.yawLossWeighting.enabled ? "on" : "off"}`);
+        overrides.push({ label: "turn sampler", value: job.turnOversampling.enabled ? "on" : "off" });
     }
     for (const key of TRAINING_STATE_INPUT_ORDER) {
         const jobItem = job.stateInputs && job.stateInputs[key] ? job.stateInputs[key] : null;
@@ -2145,13 +2663,20 @@ function summarizeTrainingOverrides(job) {
         if (!jobItem) {
             continue;
         }
-        const jobHeads = JSON.stringify(jobItem.heads || []);
-        const baseHeads = JSON.stringify(baseItem.heads || []);
-        if (Boolean(jobItem.enabled) !== Boolean(baseItem.enabled) || jobHeads !== baseHeads) {
-            overrides.push(`${humanizeTrainingStateInputKey(key)} ${jobItem.enabled ? (jobItem.heads || []).join("+") || "on" : "off"}`);
+        const jobCap = typeof jobItem.cap === "number" ? Number(jobItem.cap) : undefined;
+        const baseCap = typeof baseItem.cap === "number" ? Number(baseItem.cap) : undefined;
+        if (Boolean(jobItem.enabled) !== Boolean(baseItem.enabled) || (jobCap !== undefined && Math.abs(jobCap - Number(baseCap || 0)) > 1e-9)) {
+            overrides.push({ label: humanizeTrainingStateInputKey(key), value: jobItem.enabled ? "on" : "off" });
         }
     }
-    return overrides.length ? overrides.join(" · ") : "Using base defaults";
+    return overrides;
+}
+
+function summarizeTrainingOverrides(job) {
+    const overrides = trainingOverrideItems(job);
+    return overrides.length
+        ? overrides.map((item) => `${item.label} ${item.value}`).join(" · ")
+        : "Using base defaults";
 }
 
 function isTrainingJobTerminal(job) {
@@ -2251,8 +2776,25 @@ function createTrainingJobRow(job, options = {}) {
     header.appendChild(actions);
 
     const summary = document.createElement("div");
-    summary.className = "job-summary";
-    summary.textContent = summarizeTrainingOverrides(job);
+    const overrides = trainingOverrideItems(job);
+    if (overrides.length) {
+        summary.className = "job-summary-chips";
+        for (const override of overrides.slice(0, 12)) {
+            const chip = document.createElement("span");
+            chip.className = "override-chip";
+            chip.textContent = `${override.label}: ${override.value}`;
+            summary.appendChild(chip);
+        }
+        if (overrides.length > 12) {
+            const chip = document.createElement("span");
+            chip.className = "override-chip";
+            chip.textContent = `+${overrides.length - 12} more`;
+            summary.appendChild(chip);
+        }
+    } else {
+        summary.className = "job-summary";
+        summary.textContent = "Using base defaults";
+    }
 
     item.appendChild(header);
     item.appendChild(summary);
@@ -2511,6 +3053,27 @@ modelSelect.addEventListener("change", () => {
     selectedModelPath = modelSelect.value;
 });
 
+for (const field of ACTUATOR_TUNING_FIELDS) {
+    const input = field.input;
+    if (!input) {
+        continue;
+    }
+    input.addEventListener("input", () => {
+        actuatorTuningDirty = true;
+        if (actuatorTuningState && actuatorTuningState.live) {
+            const base = actuatorTuningDraft || cloneActuatorTuning(actuatorTuningState.live);
+            actuatorTuningDraft = {
+                ...base,
+                [field.key]: parseTuningInputValue(input, base[field.key]),
+            };
+        }
+        if (actuatorTuningStatus) {
+            actuatorTuningStatus.textContent = "Live edits pending apply.";
+        }
+        updateActuatorTuningActions();
+    });
+}
+
 for (const field of TRANSLATION_TUNING_FIELDS) {
     const input = field.input;
     if (!input) {
@@ -2526,20 +3089,20 @@ for (const field of TRANSLATION_TUNING_FIELDS) {
             };
         }
         if (translationTuningStatus) {
-            translationTuningStatus.textContent = "Live edits pending apply.";
+            translationTuningStatus.textContent = "Live translation edits pending apply.";
         }
         updateTranslationTuningActions();
     });
 }
 
-translationTuningApplyButton.addEventListener("click", async () => {
+actuatorTuningApplyButton.addEventListener("click", async () => {
     try {
         setBusy(true);
         setBanner("Applying live actuator tuning...", "");
-        const tuning = await postJSON("/actuator/tuning/apply", buildTranslationTuningPayload(), "failed to apply actuator tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
+        const tuning = await postJSON("/actuator/tuning/apply", buildActuatorTuningPayload(), "failed to apply actuator tuning");
+        actuatorTuningDirty = false;
+        actuatorTuningDraft = cloneActuatorTuning(tuning.live);
+        renderActuatorTuningState(tuning);
         setBanner("Live actuator tuning applied.", "success");
         await refresh();
     } catch (error) {
@@ -2549,14 +3112,65 @@ translationTuningApplyButton.addEventListener("click", async () => {
     }
 });
 
+translationTuningApplyButton.addEventListener("click", async () => {
+    try {
+        setBusy(true);
+        setBanner("Applying live translation tuning...", "");
+        const tuning = await postJSON("/translation/tuning/apply", buildTranslationTuningPayload(), "failed to apply translation tuning");
+        translationTuningDirty = false;
+        translationTuningDraft = cloneTranslationTuning(tuning.live);
+        renderTranslationTuningState(tuning);
+        setBanner("Live translation tuning applied.", "success");
+        await refresh();
+    } catch (error) {
+        setBanner(error instanceof Error ? error.message : "failed to apply translation tuning", "error");
+    } finally {
+        setBusy(false);
+    }
+});
+
 translationTuningResetButton.addEventListener("click", async () => {
+    try {
+        setBusy(true);
+        setBanner("Resetting live translation tuning...", "");
+        const tuning = await postJSON("/translation/tuning/reset", {}, "failed to reset translation tuning");
+        translationTuningDirty = false;
+        translationTuningDraft = cloneTranslationTuning(tuning.live);
+        renderTranslationTuningState(tuning);
+        setBanner("Live translation tuning reset.", "success");
+        await refresh();
+    } catch (error) {
+        setBanner(error instanceof Error ? error.message : "failed to reset translation tuning", "error");
+    } finally {
+        setBusy(false);
+    }
+});
+
+translationTuningSaveButton.addEventListener("click", async () => {
+    try {
+        setBusy(true);
+        setBanner("Saving translation tuning...", "");
+        const tuning = await postJSON("/translation/tuning/save", {}, "failed to save translation tuning");
+        translationTuningDirty = false;
+        translationTuningDraft = cloneTranslationTuning(tuning.live);
+        renderTranslationTuningState(tuning);
+        setBanner("Translation tuning saved.", "success");
+        await refresh();
+    } catch (error) {
+        setBanner(error instanceof Error ? error.message : "failed to save translation tuning", "error");
+    } finally {
+        setBusy(false);
+    }
+});
+
+actuatorTuningResetButton.addEventListener("click", async () => {
     try {
         setBusy(true);
         setBanner("Resetting live actuator tuning...", "");
         const tuning = await postJSON("/actuator/tuning/reset", {}, "failed to reset actuator tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
+        actuatorTuningDirty = false;
+        actuatorTuningDraft = cloneActuatorTuning(tuning.live);
+        renderActuatorTuningState(tuning);
         setBanner("Live actuator tuning reset.", "success");
         await refresh();
     } catch (error) {
@@ -2566,14 +3180,14 @@ translationTuningResetButton.addEventListener("click", async () => {
     }
 });
 
-translationTuningSaveButton.addEventListener("click", async () => {
+actuatorTuningSaveButton.addEventListener("click", async () => {
     try {
         setBusy(true);
         setBanner("Saving actuator tuning...", "");
         const tuning = await postJSON("/actuator/tuning/save", {}, "failed to save actuator tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
+        actuatorTuningDirty = false;
+        actuatorTuningDraft = cloneActuatorTuning(tuning.live);
+        renderActuatorTuningState(tuning);
         setBanner("Actuator tuning saved.", "success");
         await refresh();
     } catch (error) {
@@ -2680,6 +3294,10 @@ trainingUseLastButton.addEventListener("click", () => {
     }
     applyTrainingDraftToForm(mergeTrainingDraft(trainingConfig, loadTrainingDraft()));
     setTrainingBanner("Reapplied the last queued values from this browser.", "success");
+});
+
+trainingTurnOversamplingEnabled.addEventListener("change", () => {
+    updateTrainingTurnOversamplingEnabledState();
 });
 
 trainingQueueBatchButton.addEventListener("click", async () => {

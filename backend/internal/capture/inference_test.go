@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"image"
 	"io"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -182,12 +183,12 @@ func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
 					{0.00, 0.00},
 				}},
 				"pred_aux": [][][]float64{{
-					{5, 1, 0.1},
-					{6, 2, 0.2},
-					{7, 3, 0.3},
-					{8, 4, 0.4},
-					{9, 5, 0.5},
-					{10, 6, 0.6},
+					{5, 0.0, 1, 0.1},
+					{6, 1.0, 2, 0.2},
+					{7, 2.0, 3, 0.3},
+					{8, 3.0, 4, 0.4},
+					{9, 4.0, 5, 0.5},
+					{10, 5.0, 6, 0.6},
 				}},
 			})
 			return &http.Response{
@@ -230,6 +231,15 @@ func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
 	if len(prediction.RawPredControls) != 6 || len(prediction.RawPredAux) != 6 {
 		t.Fatalf("unexpected raw planner outputs: %+v", prediction)
 	}
+	if prediction.PredictionHorizon == nil {
+		t.Fatal("expected temporal prediction horizon to be recorded")
+	}
+	if len(prediction.PredictionHorizon.Points) != 6 || prediction.PredictionHorizon.Points[0].DtMs != 100 {
+		t.Fatalf("unexpected temporal horizon bins: %+v", prediction.PredictionHorizon.Points)
+	}
+	if point := prediction.PredictionHorizon.Points[0]; point.DesiredSpeedMPS == nil || math.Abs(*point.DesiredSpeedMPS-5) > 1e-9 {
+		t.Fatalf("expected future_speed aux to populate desired speed, got=%+v", point)
+	}
 }
 
 func TestBuildPlannerSelectionFailsWhenTelemetryIsUnavailable(t *testing.T) {
@@ -238,6 +248,79 @@ func TestBuildPlannerSelectionFailsWhenTelemetryIsUnavailable(t *testing.T) {
 	_, err := inferencer.buildPlannerSelection(predictionWindow{capturedAt: time.Unix(1710000000, 0).UTC()})
 	if err == nil || err.Error() != "planner telemetry is unavailable" {
 		t.Fatalf("expected telemetry unavailable error, got=%v", err)
+	}
+}
+
+func TestBuildPlannerSelectionRecordsFrameTelemetrySkew(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.TelemetryOffsets = []int{0}
+	cfg.TelemetryFeatureNames = []string{"current_speed"}
+	cfg.MaxFrameTelemetrySkew = 75 * time.Millisecond
+	nowValue := time.UnixMilli(1000).UTC()
+	store := control.NewStore(control.WithNowFunc(func() time.Time { return nowValue }))
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.0, TimestampMs: 1000})
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store)
+	inferencer.nowFunc = func() time.Time { return time.UnixMilli(1100).UTC() }
+
+	selection, err := inferencer.buildPlannerSelection(predictionWindow{
+		frameIndex:     7,
+		frameTimes:     []time.Time{time.UnixMilli(1100).UTC()},
+		capturedAt:     time.UnixMilli(1100).UTC(),
+		sequenceNumber: 3,
+	})
+	if err != nil {
+		t.Fatalf("buildPlannerSelection returned error: %v", err)
+	}
+	if selection.frameTelemetryAligned {
+		t.Fatalf("expected frame/telemetry skew to exceed threshold, got=%+v", selection)
+	}
+	if math.Abs(selection.frameTelemetrySkewMs-100) > 1e-9 {
+		t.Fatalf("unexpected skew: %+v", selection)
+	}
+	if selection.frameID == nil || *selection.frameID != 7 {
+		t.Fatalf("expected frame id to be captured, got=%+v", selection.frameID)
+	}
+}
+
+func TestBuildPredictionAdaptsLegacyImmediateControlToTemporalHorizon(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.FutureSteps = 6
+	actuatorCfg := actuator.DefaultConfig()
+	actuatorCfg.TemporalHorizonActuatorEnabled = true
+	inferencer := NewInferencer(cfg, actuatorCfg, control.NewStore())
+	now := time.UnixMilli(2000).UTC()
+	inferencer.nowFunc = func() time.Time { return now }
+
+	prediction, _, err := inferencer.buildPrediction(pythonPredictResponse{
+		PlannerFormat:      "temporal_telemetry_gru_v1",
+		ControlTargetNames: []string{"steering", "acceleration", "brakePressureAvg"},
+		PredControls: [][][]float64{{
+			{0.2, 0.4, 0.1},
+		}},
+	}, "http://planner.local", predictionWindow{
+		frameIndex:     1,
+		frameIndices:   []int{1},
+		frameTimes:     []time.Time{time.UnixMilli(1900).UTC()},
+		capturedAt:     time.UnixMilli(1900).UTC(),
+		sequenceNumber: 1,
+	}, plannerSelection{
+		selectedTelemetry: []control.RuntimeTelemetry{{CurrentSpeed: 3}},
+		telemetryTimesMs:  []int64{1900},
+		frameShape:        []int{1, 1, 3, cfg.FrameHeight, cfg.FrameWidth},
+		telemetryShape:    []int{1, 1, len(cfg.TelemetryFeatureNames)},
+	}, nil)
+	if err != nil {
+		t.Fatalf("buildPrediction returned error: %v", err)
+	}
+	if prediction.PredictionHorizon == nil {
+		t.Fatal("expected legacy immediate output to produce a temporal horizon")
+	}
+	if len(prediction.PredictionHorizon.Points) != len(actuator.DefaultPredictionHorizonDtMs) {
+		t.Fatalf("unexpected adapted horizon length: %+v", prediction.PredictionHorizon.Points)
+	}
+	first := prediction.PredictionHorizon.Points[0]
+	if first.Steer == nil || *first.Steer != 0.2 || first.Throttle == nil || *first.Throttle != 0.4 || first.Brake == nil || *first.Brake != 0.1 {
+		t.Fatalf("unexpected adapted point: %+v", first)
 	}
 }
 
@@ -275,5 +358,74 @@ func TestCollapsePlannerCommandIncludesBrakePressureAvgWhenPresent(t *testing.T)
 	}
 	if diff := command.Throttle - 0.31; diff < -1e-9 || diff > 1e-9 {
 		t.Fatalf("unexpected collapsed throttle: %+v", command)
+	}
+}
+
+func TestCollapsePlannerCommandConvertsNegativeThrottleToBrakePressureWhenPresent(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.HorizonMode = "weighted_short_horizon"
+	cfg.HorizonControlWeights = []float64{0.60, 0.30, 0.10}
+
+	command, err := collapsePlannerCommand([][]float64{
+		{0.40, -0.50, 0.10},
+		{0.20, -0.30, 0.80},
+		{-0.10, -0.10, 0.20},
+	}, []string{"steering", "acceleration", "brakePressureAvg"}, cfg)
+	if err != nil {
+		t.Fatalf("collapsePlannerCommand returned error: %v", err)
+	}
+	if math.Abs(command.Throttle-0.0) > 1e-9 {
+		t.Fatalf("expected no throttle when model requests reverse, got=%+v", command.Throttle)
+	}
+	if command.BrakePressureAvg < 0.5-1e-9 || command.BrakePressureAvg > 0.5+1e-9 {
+		t.Fatalf("expected brake from max abs(reverse demand) to dominate, got=%+v", command)
+	}
+}
+
+func TestStabilizeThrottleCommandHoldsOnDemandDrop(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.ThrottleHoldSeconds = 2
+	inf := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
+
+	now := time.UnixMilli(1000).UTC()
+	inf.nowFunc = func() time.Time { return now }
+	value, held := inf.stabilizeThrottleCommand(0.6, 8, now)
+	if held {
+		t.Fatalf("expected hold disabled on first throttle demand, got=%v value=%f", held, value)
+	}
+	if math.Abs(value-0.6) > 1e-9 {
+		t.Fatalf("unexpected throttled value: %f", value)
+	}
+
+	now = now.Add(500 * time.Millisecond)
+	value, held = inf.stabilizeThrottleCommand(0.3, 8, now)
+	if !held {
+		t.Fatalf("expected throttle hold after demand drop, got=%v value=%f", held, value)
+	}
+	if math.Abs(value-0.6) > 1e-9 {
+		t.Fatalf("expected held throttle to remain at previous peak, got=%f", value)
+	}
+
+	now = now.Add(2500 * time.Millisecond)
+	value, held = inf.stabilizeThrottleCommand(0.3, 8, now)
+	if held {
+		t.Fatalf("expected hold to expire, got=%v value=%f", held, value)
+	}
+	if math.Abs(value-0.3) > 1e-9 {
+		t.Fatalf("unexpected throttled value after hold window: %f", value)
+	}
+}
+
+func TestStabilizeThrottleCommandEnforcesMinWhenBelowFloor(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.ThrottleHoldMin = 0.12
+	inf := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
+
+	value, held := inf.stabilizeThrottleCommand(0.05, 0, time.UnixMilli(1200).UTC())
+	if held {
+		t.Fatalf("expected no hold when applying low throttle for first time")
+	}
+	if math.Abs(value-0.12) > 1e-9 {
+		t.Fatalf("expected throttle floor to apply below hold min, got=%f", value)
 	}
 }

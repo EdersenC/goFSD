@@ -118,6 +118,28 @@ type ControlTelemetryUpdate = {
     steering: number
     acceleration: number
     brakePressureAvg: number
+    vehicleExists: boolean
+    isInVehicle: boolean
+    positionX?: number
+    positionY?: number
+    positionZ?: number
+    velocityX?: number
+    velocityY?: number
+    velocityZ?: number
+    pitchDeg?: number
+    rollDeg?: number
+    gear?: number
+    rpm?: number
+    wheelAngle?: number
+    onGround?: boolean
+    collisionState?: string
+    routeDirectionCode: number
+    routeDirectionDistanceM: number
+    routeDirectionUnknown: number
+    routeDirectionKeepStraight: number
+    routeDirectionTurnLeft: number
+    routeDirectionTurnRight: number
+    routeDirectionRerouteWrongWay: number
     routeForwardDelta: number
     routeHeadingError: number
     routeDistance: number
@@ -334,6 +356,12 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             `yawRate=${Number(update?.yawRate ?? 0).toFixed(2)} ` +
             `steer=${Number(update?.steering ?? 0).toFixed(2)} ` +
             `accel=${Number(update?.acceleration ?? 0).toFixed(2)} ` +
+            `navCode=${Math.trunc(Number(update?.routeDirectionCode ?? 0))} ` +
+            `navOneHot=[u=${Math.trunc(Number(update?.routeDirectionUnknown ?? 0))}, ` +
+            `s=${Math.trunc(Number(update?.routeDirectionKeepStraight ?? 0))}, ` +
+            `l=${Math.trunc(Number(update?.routeDirectionTurnLeft ?? 0))}, ` +
+            `r=${Math.trunc(Number(update?.routeDirectionTurnRight ?? 0))}, ` +
+            `w=${Math.trunc(Number(update?.routeDirectionRerouteWrongWay ?? 0))}] ` +
             `routeFwd=${Number(update?.routeForwardDelta ?? 0).toFixed(2)} ` +
             `routeHeading=${Number(update?.routeHeadingError ?? 0).toFixed(2)} ` +
             `routeDistance=${Number(update?.routeDistance ?? 0).toFixed(2)} ` +
@@ -348,13 +376,35 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             yawRate: update?.yawRate ?? 0,
             steering: update?.steering ?? 0,
             acceleration: update?.acceleration ?? 0,
+            brakePressureAvg: update?.brakePressureAvg ?? 0,
+            vehicleExists: Boolean(update?.vehicleExists),
+            isInVehicle: Boolean(update?.isInVehicle),
+            positionX: update?.positionX,
+            positionY: update?.positionY,
+            positionZ: update?.positionZ,
+            velocityX: update?.velocityX,
+            velocityY: update?.velocityY,
+            velocityZ: update?.velocityZ,
+            pitchDeg: update?.pitchDeg,
+            rollDeg: update?.rollDeg,
+            gear: update?.gear,
+            rpm: update?.rpm,
+            wheelAngle: update?.wheelAngle,
+            onGround: update?.onGround,
+            collisionState: update?.collisionState ?? "",
+            routeDirectionCode: update?.routeDirectionCode ?? 0,
+            routeDirectionDistanceM: update?.routeDirectionDistanceM ?? 0,
+            routeDirectionUnknown: update?.routeDirectionUnknown ?? 0,
+            routeDirectionKeepStraight: update?.routeDirectionKeepStraight ?? 0,
+            routeDirectionTurnLeft: update?.routeDirectionTurnLeft ?? 0,
+            routeDirectionTurnRight: update?.routeDirectionTurnRight ?? 0,
+            routeDirectionRerouteWrongWay: update?.routeDirectionRerouteWrongWay ?? 0,
             routeForwardDelta: update?.routeForwardDelta ?? 0,
             routeHeadingError: update?.routeHeadingError ?? 0,
             routeDistance: update?.routeDistance ?? 0,
             leadVehicleDistance: update?.leadVehicleDistance ?? 0,
             hasLeadVehicle: Boolean(update?.hasLeadVehicle),
-            timestampMs: update?.timestampMs ?? 0
-            ,
+            timestampMs: update?.timestampMs ?? 0,
             gameTimeMs: update?.gameTimeMs ?? 0
         });
     } catch (err: any) {

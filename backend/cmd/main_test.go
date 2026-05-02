@@ -31,12 +31,12 @@ func TestRunReportRunsWritesDatasetReport(t *testing.T) {
 					Steering: 0.1,
 				},
 				Aux: datasetproc.GroupedLabelAux{
-					FutureYawDelta:       15.0,
-					FutureHorizonSeconds: 0.2,
-					DeltaSpeed:           0.0,
-					DeltaSpeedTarget:     0.0,
-					FutureSpeed:          5.0,
-					FutureSpeedTarget:    5.0,
+					FutureYawDelta:         15.0,
+					FutureHorizonSeconds:   0.2,
+					FutureSpeedDelta:       0.0,
+					FutureSpeedDeltaTarget: 0.0,
+					FutureSpeed:            5.0,
+					FutureSpeedTarget:      5.0,
 				},
 			},
 			TelemetryHistory: []datasetproc.GroupedTelemetryItem{
@@ -103,8 +103,8 @@ window_size = 3
 frame_stride = 2
 sample_stride = 2
 label_tolerance = "100ms"
-delta_speed_clip = 2.0
-delta_speed_normalize = true
+future_speed_delta_clip = 2.0
+future_speed_delta_normalize = true
 sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
 `)

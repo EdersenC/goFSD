@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"awesomeProject/internal/control"
 )
 
 type fakeController struct {
@@ -44,10 +46,10 @@ func TestStepAppliesNormalizedInputs(t *testing.T) {
 	if svc.applied.Steer != 0.6 {
 		t.Fatalf("unexpected steer: %f", svc.applied.Steer)
 	}
-	if diff := svc.applied.Throttle - 0.5; diff < -1e-9 || diff > 1e-9 {
+	if diff := svc.applied.Throttle - 0.7; diff < -1e-9 || diff > 1e-9 {
 		t.Fatalf("unexpected throttle: %f", svc.applied.Throttle)
 	}
-	if svc.applied.Brake != 0.2 {
+	if svc.applied.Brake != 0 {
 		t.Fatalf("unexpected brake: %f", svc.applied.Brake)
 	}
 }
@@ -59,11 +61,11 @@ func TestStepAppliesLiveActuatorTuning(t *testing.T) {
 	svc.controller = &fakeController{}
 	svc.ready = true
 	svc.supported = true
-	if _, err := svc.ApplyTuning(Tuning{
-		SteeringGain:  1.5,
-		ThrottleGain:  2.0,
-		ThrottleFloor: 0.35,
-	}); err != nil {
+	tuning := cfg.Tuning()
+	tuning.SteeringGain = 1.5
+	tuning.ThrottleGain = 2.0
+	tuning.ThrottleFloor = 0.35
+	if _, err := svc.ApplyTuning(tuning); err != nil {
 		t.Fatalf("ApplyTuning returned error: %v", err)
 	}
 
@@ -85,11 +87,70 @@ func TestStepAppliesLiveActuatorTuning(t *testing.T) {
 	if diff := svc.applied.Steer - 0.6; diff < -1e-9 || diff > 1e-9 {
 		t.Fatalf("unexpected tuned steer: %f", svc.applied.Steer)
 	}
-	if diff := svc.applied.Throttle - 0.05; diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("unexpected tuned throttle after brake conflict: %f", svc.applied.Throttle)
+	if diff := svc.applied.Throttle - 0.35; diff < -1e-9 || diff > 1e-9 {
+		t.Fatalf("unexpected tuned throttle after weak brake threshold: %f", svc.applied.Throttle)
 	}
-	if diff := svc.applied.Brake - 0.3; diff < -1e-9 || diff > 1e-9 {
+	if diff := svc.applied.Brake - 0.0; diff < -1e-9 || diff > 1e-9 {
 		t.Fatalf("unexpected brake: %f", svc.applied.Brake)
+	}
+}
+
+func TestStepAppliesSpeedLimitBrakeThresholdAndReverseLockout(t *testing.T) {
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 5.5, TimestampMs: now.UnixMilli()})
+	cfg := DefaultConfig()
+	cfg.StaleTimeout = time.Second
+	cfg.SpeedLimitKPH = 17.0
+	cfg.OverspeedBrakeMarginKPH = 2.0
+	cfg.OverspeedBrake = 0.25
+	cfg.ModelBrakeThreshold = 0.55
+	cfg.ReverseLockoutSpeedKPH = 1.0
+	svc := NewService(cfg, "", store)
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{
+			Throttle: 0.8,
+			Brake:    0.4,
+		},
+		Enabled:    true,
+		InputMode:  InputModeNormalized,
+		ReceivedAt: now.Format(time.RFC3339Nano),
+	}
+
+	if err := svc.step(now.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("step returned error: %v", err)
+	}
+	if svc.applied.Throttle != 0 {
+		t.Fatalf("expected speed limiter to cut throttle, got=%+v", svc.applied)
+	}
+	if svc.applied.Brake != 0.25 {
+		t.Fatalf("expected overspeed brake after weak model brake was ignored, got=%+v", svc.applied)
+	}
+	if !svc.target.Safety.BrakeThresholdApplied || !svc.target.Safety.SpeedLimitActive || !svc.target.Safety.OverspeedBrakeApplied {
+		t.Fatalf("expected safety debug flags, got=%+v", svc.target.Safety)
+	}
+
+	now = now.Add(100 * time.Millisecond)
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 0.1, TimestampMs: now.UnixMilli()})
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{
+			Brake: 0.9,
+		},
+		Enabled:    true,
+		InputMode:  InputModeNormalized,
+		ReceivedAt: now.Format(time.RFC3339Nano),
+	}
+	if err := svc.step(now.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("second step returned error: %v", err)
+	}
+	if svc.applied.Brake != 0 {
+		t.Fatalf("expected reverse lockout to suppress brake near stop, got=%+v", svc.applied)
+	}
+	if !svc.target.Safety.ReverseLockoutApplied {
+		t.Fatalf("expected reverse lockout debug flag, got=%+v", svc.target.Safety)
 	}
 }
 
@@ -100,30 +161,13 @@ func TestResolveTargetTimesOutToNeutralByDefault(t *testing.T) {
 		Enabled:      true,
 		InputMode:    InputModeNormalized,
 		ReceivedAt:   now.Add(-time.Second).Format(time.RFC3339Nano),
-	}, 100*time.Millisecond, false, now)
+	}, 100*time.Millisecond, now)
 
 	if target != (controlState{}) {
 		t.Fatalf("expected neutral target, got=%+v", target)
 	}
 	if !stale || enabled || !timedOut {
 		t.Fatalf("unexpected timeout flags stale=%v enabled=%v timedOut=%v", stale, enabled, timedOut)
-	}
-}
-
-func TestResolveTargetCanHoldLastCommandWhenConfigured(t *testing.T) {
-	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	target, stale, enabled, timedOut := resolveTarget(&commandEnvelope{
-		controlState: controlState{Steer: 0.2, Throttle: 0.4, Brake: 0.2},
-		Enabled:      true,
-		InputMode:    InputModeNormalized,
-		ReceivedAt:   now.Add(-time.Second).Format(time.RFC3339Nano),
-	}, 100*time.Millisecond, true, now)
-
-	if target.Throttle != 0.4 || target.Brake != 0.2 {
-		t.Fatalf("expected held throttle, got=%+v", target)
-	}
-	if !stale || !enabled || timedOut {
-		t.Fatalf("unexpected hold flags stale=%v enabled=%v timedOut=%v", stale, enabled, timedOut)
 	}
 }
 
@@ -145,6 +189,52 @@ func TestSubmitDefaultsToNormalizedInputMode(t *testing.T) {
 	}
 	if state.LastCommand.Brake != 0.3 {
 		t.Fatalf("expected brake to be stored on command, got=%+v", state.LastCommand)
+	}
+}
+
+func TestTemporalSubmitAdaptsLegacyCommandWhenEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TemporalHorizonActuatorEnabled = true
+	cfg.SpeedLimitKPH = 0
+	base := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	store := control.NewStore(control.WithNowFunc(func() time.Time { return base }))
+	store.UpdateTelemetry(control.TelemetryUpdate{
+		CurrentSpeed:  4.0,
+		CurrentYaw:    0,
+		VehicleExists: true,
+		IsInVehicle:   true,
+		TimestampMs:   base.UnixMilli(),
+	})
+	svc := NewService(cfg, "", store)
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.nowFunc = func() time.Time { return base }
+
+	state, err := svc.Submit(CommandRequest{
+		Steer:            0.6,
+		Throttle:         0.7,
+		BrakePressureAvg: 0,
+		TimestampMs:      base.UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("Submit returned error: %v", err)
+	}
+	if state.LastCommand == nil || svc.temporalBuffer.ActivePlan == nil {
+		t.Fatalf("expected command and temporal plan to be stored, state=%+v", state)
+	}
+
+	if err := svc.step(base.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("step returned error: %v", err)
+	}
+	if svc.target.Temporal == nil || svc.target.Temporal.PlanState != PlanStateFresh {
+		t.Fatalf("expected fresh temporal trace, got=%+v", svc.target.Temporal)
+	}
+	if svc.applied.Steer <= 0 || svc.applied.Steer > cfg.TemporalSteeringMaxDelta {
+		t.Fatalf("expected smoothed temporal steer, got=%+v", svc.applied)
+	}
+	if svc.applied.Throttle <= 0 || svc.applied.Throttle > cfg.TemporalThrottleMaxDelta {
+		t.Fatalf("expected smoothed temporal throttle, got=%+v", svc.applied)
 	}
 }
 
@@ -206,11 +296,10 @@ func TestApplyResetAndSaveTuning(t *testing.T) {
 	}
 
 	svc := NewService(DefaultConfig(), path)
-	next := Tuning{
-		SteeringGain:  1.4,
-		ThrottleGain:  1.8,
-		ThrottleFloor: 0.22,
-	}
+	next := DefaultConfig().Tuning()
+	next.SteeringGain = 1.4
+	next.ThrottleGain = 1.8
+	next.ThrottleFloor = 0.22
 	state, err := svc.ApplyTuning(next)
 	if err != nil {
 		t.Fatalf("ApplyTuning returned error: %v", err)
@@ -239,7 +328,7 @@ func TestApplyResetAndSaveTuning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig returned error: %v", err)
 	}
-	if loaded.SteeringGain != next.SteeringGain || loaded.ThrottleGain != next.ThrottleGain || loaded.ThrottleFloor != next.ThrottleFloor {
-		t.Fatalf("unexpected persisted config: %+v", loaded)
+	if loaded.Tuning() != next {
+		t.Fatalf("unexpected persisted config: got=%+v want=%+v", loaded.Tuning(), next)
 	}
 }

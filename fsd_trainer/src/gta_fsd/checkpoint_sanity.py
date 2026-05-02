@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -11,41 +12,36 @@ import torch
 from dataset import FsdDataset
 from inference import (
     DEFAULT_CONFIG_PATH,
+    PLANNER_FORMAT,
     build_model,
     checkpoint_sample_stride,
     load_checkpoint,
     load_config as load_inference_config,
     resolve_checkpoint_frame_count,
     resolve_checkpoint_frame_stride,
+    resolve_checkpoint_target_names,
+    resolve_checkpoint_target_transform_registry,
     resolve_existing_path,
     select_device,
 )
-from heads import head_layout_metadata, head_specs_metadata, resolve_checkpoint_head_specs
-from image_io import load_rgb_tensor_from_path
-from model_output import single_control_prediction_from_output, single_tensor_mapping
+from state_inputs import state_input_config_from_metadata, state_inputs_metadata
+from target_transforms import denormalize_target_tensor, target_transform_metadata
 from train import TrainConfig, load_config as load_train_config
-from state_inputs import (
-    CURRENT_SPEED_KEY,
-    ROUTE_FORWARD_DELTA_KEY,
-    StateInputConfig,
-    state_input_config_from_metadata,
-    state_inputs_metadata,
-)
-from target_transforms import (
-    legacy_delta_speed_target_transform,
-    resolve_checkpoint_delta_speed_target_transform,
-)
 
 
 DEBUG_FRAMES_ROOT_NAME = "awesomeProject-inference-frames"
 DEFAULT_SAMPLE_COUNT = 10
 DEFAULT_DUMP_WINDOW_COUNT = 5
 FLAT_CONTROL_RANGE_EPSILON = 1e-4
+LEGACY_SCALAR_HEAD_ERROR = (
+    "Legacy scalar-head planner has been removed. "
+    "Use temporal planner outputs pred_controls/pred_aux."
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a strict control-only checkpoint sanity pass on dataset samples and dumped live frames."
+        description="Run a temporal checkpoint sanity pass against dataset samples."
     )
     parser.add_argument(
         "--config",
@@ -57,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         type=Path,
         default=None,
-        help="Optional checkpoint override. Defaults to inference.checkpoint from the TOML.",
+        help="Optional temporal checkpoint override. Defaults to inference.checkpoint from the TOML.",
     )
     parser.add_argument(
         "--device",
@@ -87,13 +83,13 @@ def parse_args() -> argparse.Namespace:
         "--debug-dir",
         type=Path,
         default=None,
-        help="Optional debug frame dump directory. Defaults to the latest dump in the temp-frame root.",
+        help="Accepted for old command lines, but image-only debug frame checks are not valid for temporal planners.",
     )
     parser.add_argument(
         "--dump-window-count",
         type=int,
         default=DEFAULT_DUMP_WINDOW_COUNT,
-        help=f"Number of live frame windows to inspect. Default: {DEFAULT_DUMP_WINDOW_COUNT}.",
+        help="Accepted for old command lines; temporal sanity uses dataset telemetry instead.",
     )
     parser.add_argument(
         "--output-json",
@@ -142,17 +138,6 @@ def resolve_debug_dir(override: Path | None) -> Path:
     return resolve_latest_debug_dir(resolve_debug_frames_root())
 
 
-def load_frame_tensor(frame_path: Path, image_size: tuple[int, int]) -> torch.Tensor:
-    return load_rgb_tensor_from_path(frame_path, image_size)
-
-
-def list_debug_frame_paths(debug_dir: Path) -> list[Path]:
-    frame_paths = sorted(path for path in debug_dir.glob("frame-*.jpg") if path.is_file())
-    if not frame_paths:
-        raise FileNotFoundError(f"No debug frames found in {debug_dir}")
-    return frame_paths
-
-
 def build_debug_windows(
     frame_paths: list[Path],
     *,
@@ -184,43 +169,34 @@ def build_debug_windows(
     return windows
 
 
-def predict_control_outputs(
-    model: Any,
-    device: torch.device,
-    stacked_frames: torch.Tensor,
-    *,
-    state_inputs: dict[str, torch.Tensor] | None = None,
-) -> dict[str, float]:
-    x = stacked_frames.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    model_state_inputs = {
-        key: value.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-        for key, value in (state_inputs or {}).items()
-    }
-    with torch.no_grad():
-        output = model(x, state_inputs=model_state_inputs)
-    delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
-    return single_control_prediction_from_output(
-        output,
-        head_specs=model.head_specs,
-        delta_speed_transform=delta_speed_transform,
-    )
-
-
 def summarize_control_ranges(items: Iterable[dict[str, Any]]) -> dict[str, dict[str, float | bool]]:
     results = list(items)
     summary: dict[str, dict[str, float | bool]] = {}
-    control_names = sorted({
-        str(control_name)
-        for item in results
-        for control_name in (item.get("control_outputs") or {}).keys()
-        if isinstance(item.get("control_outputs"), dict)
-    })
-    for control_name in control_names:
-        values = [
-            float(item["control_outputs"][control_name])
-            for item in results
-            if isinstance(item.get("control_outputs"), dict) and control_name in item["control_outputs"]
-        ]
+    control_names: list[str] = []
+    seen_control_names: set[str] = set()
+    for item in results:
+        names = item.get("control_target_names")
+        if not isinstance(names, list):
+            continue
+        for raw_name in names:
+            control_name = str(raw_name)
+            if control_name in seen_control_names:
+                continue
+            seen_control_names.add(control_name)
+            control_names.append(control_name)
+    for control_index, control_name in enumerate(control_names):
+        values: list[float] = []
+        for item in results:
+            pred_controls = item.get("pred_controls")
+            if not isinstance(pred_controls, list):
+                continue
+            for batch in pred_controls:
+                if not isinstance(batch, list):
+                    continue
+                for row in batch:
+                    if not isinstance(row, list) or control_index >= len(row):
+                        continue
+                    values.append(float(row[control_index]))
         if not values:
             continue
         min_value = min(values)
@@ -236,6 +212,57 @@ def summarize_control_ranges(items: Iterable[dict[str, Any]]) -> dict[str, dict[
     return summary
 
 
+def _require_temporal_checkpoint(checkpoint: dict[str, Any]) -> None:
+    if str(checkpoint.get("planner_format", "")).strip() != PLANNER_FORMAT:
+        raise ValueError(LEGACY_SCALAR_HEAD_ERROR)
+
+
+def _rows(
+    values: torch.Tensor,
+    names: tuple[str, ...],
+    future_offsets: tuple[int, ...],
+) -> list[dict[str, float | int]]:
+    sample = values.detach().float().cpu()
+    rows: list[dict[str, float | int]] = []
+    for horizon_index, offset in enumerate(future_offsets):
+        row: dict[str, float | int] = {"offset": int(offset)}
+        for target_index, name in enumerate(names):
+            row[name] = float(sample[horizon_index, target_index].item())
+        rows.append(row)
+    return rows
+
+
+def _mean_or_zero(total: float, count: int) -> float:
+    return 0.0 if count <= 0 else float(total / count)
+
+
+def _init_target_sums(names: tuple[str, ...]) -> dict[str, dict[str, float | int]]:
+    return {name: {"abs_sum": 0.0, "denorm_abs_sum": 0.0, "count": 0} for name in names}
+
+
+def _update_target_sums(
+    sums: dict[str, dict[str, float | int]],
+    *,
+    names: tuple[str, ...],
+    normalized_abs: torch.Tensor,
+    denorm_abs: torch.Tensor,
+) -> None:
+    for index, name in enumerate(names):
+        sums[name]["abs_sum"] = float(sums[name]["abs_sum"]) + float(normalized_abs[..., index].sum().item())
+        sums[name]["denorm_abs_sum"] = float(sums[name]["denorm_abs_sum"]) + float(denorm_abs[..., index].sum().item())
+        sums[name]["count"] = int(sums[name]["count"]) + int(normalized_abs[..., index].numel())
+
+
+def _finalize_target_sums(sums: dict[str, dict[str, float | int]]) -> dict[str, dict[str, float]]:
+    return {
+        name: {
+            "normalized_mae": _mean_or_zero(float(values["abs_sum"]), int(values["count"])),
+            "denormalized_mae": _mean_or_zero(float(values["denorm_abs_sum"]), int(values["count"])),
+        }
+        for name, values in sums.items()
+    }
+
+
 def evaluate_dataset_samples(
     model: Any,
     device: torch.device,
@@ -246,14 +273,27 @@ def evaluate_dataset_samples(
     run_id: str,
     sample_start: int,
     sample_count: int,
+    image_offsets: tuple[int, ...],
+    telemetry_offsets: tuple[int, ...],
+    future_offsets: tuple[int, ...],
+    telemetry_feature_names: tuple[str, ...],
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    target_transforms: dict[str, Any],
 ) -> dict[str, Any]:
     dataset = FsdDataset(
         run_id=run_id,
         data_root=data_root,
         image_size=image_size,
         expected_window_size=expected_window_size,
-        state_input_config=model.state_input_config,
-        head_specs=model.head_specs,
+        image_offsets=image_offsets,
+        telemetry_offsets=telemetry_offsets,
+        future_offsets=future_offsets,
+        telemetry_feature_names=telemetry_feature_names,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+        target_transforms=target_transforms,
+        state_input_config=getattr(model, "state_input_config", None),
     )
     if sample_start < 0:
         raise ValueError("sample_start must be >= 0")
@@ -263,86 +303,73 @@ def evaluate_dataset_samples(
         raise IndexError(f"sample_start out of range: {sample_start}, dataset size={len(dataset)}")
 
     sample_end = min(len(dataset), sample_start + sample_count)
+    control_sums = _init_target_sums(control_target_names)
+    aux_sums = _init_target_sums(aux_target_names)
     results: list[dict[str, Any]] = []
-    delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
-    for sample_index in range(sample_start, sample_end):
-        stacked_frames, state_inputs, targets = dataset[sample_index]
-        sample_meta = dataset.samples[sample_index]
-        results.append({
-            "sample_index": sample_index,
-            "trip_key": sample_meta.get("trip_key"),
-            "frame_paths": [str(path) for path in sample_meta.get("frame_paths", [])],
-            "state_inputs": single_tensor_mapping(state_inputs),
-            "control_outputs": predict_control_outputs(model, device, stacked_frames, state_inputs=state_inputs),
-            "target": single_tensor_mapping(targets, delta_speed_transform=delta_speed_transform),
-        })
+
+    with torch.no_grad():
+        for sample_index in range(sample_start, sample_end):
+            images, telemetry, state_inputs, target_controls, target_aux = dataset[sample_index]
+            sample_meta = dataset._load_sample(sample_index)
+            images_batch = images.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+            telemetry_batch = telemetry.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+            state_inputs_batch = state_inputs.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+            target_controls_batch = target_controls.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+            target_aux_batch = target_aux.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+
+            output = model(images_batch, telemetry_batch, state_inputs_batch)
+            pred_controls = output["pred_controls"]
+            pred_aux = output["pred_aux"]
+
+            control_abs = (pred_controls - target_controls_batch).abs()
+            aux_abs = (pred_aux - target_aux_batch).abs()
+            denorm_pred_controls = denormalize_target_tensor(pred_controls, control_target_names, target_transforms)
+            denorm_target_controls = denormalize_target_tensor(target_controls_batch, control_target_names, target_transforms)
+            denorm_pred_aux = denormalize_target_tensor(pred_aux, aux_target_names, target_transforms)
+            denorm_target_aux = denormalize_target_tensor(target_aux_batch, aux_target_names, target_transforms)
+            denorm_control_abs = (denorm_pred_controls - denorm_target_controls).abs()
+            denorm_aux_abs = (denorm_pred_aux - denorm_target_aux).abs()
+
+            _update_target_sums(
+                control_sums,
+                names=control_target_names,
+                normalized_abs=control_abs,
+                denorm_abs=denorm_control_abs,
+            )
+            _update_target_sums(
+                aux_sums,
+                names=aux_target_names,
+                normalized_abs=aux_abs,
+                denorm_abs=denorm_aux_abs,
+            )
+
+            results.append({
+                "sample_index": sample_index,
+                "trip_key": sample_meta.get("trip_key"),
+                "frame_paths": [str(path) for path in sample_meta.get("frame_paths", [])],
+                "shapes": {
+                    "images": list(images_batch.shape),
+                    "telemetry": list(telemetry_batch.shape),
+                    "state_inputs": list(state_inputs_batch.shape),
+                    "pred_controls": list(pred_controls.shape),
+                    "pred_aux": list(pred_aux.shape),
+                    "target_controls": list(target_controls_batch.shape),
+                    "target_aux": list(target_aux_batch.shape),
+                },
+                "pred_controls": _rows(denorm_pred_controls[0], control_target_names, future_offsets),
+                "target_controls": _rows(denorm_target_controls[0], control_target_names, future_offsets),
+                "pred_aux": _rows(denorm_pred_aux[0], aux_target_names, future_offsets),
+                "target_aux": _rows(denorm_target_aux[0], aux_target_names, future_offsets),
+            })
 
     return {
         "run_id": run_id,
         "dataset_size": len(dataset),
         "sample_start": sample_start,
         "sample_count": len(results),
+        "control_target_mae": _finalize_target_sums(control_sums),
+        "aux_target_mae": _finalize_target_sums(aux_sums),
         "results": results,
-        "control_ranges": summarize_control_ranges(results),
-    }
-
-
-def evaluate_debug_windows(
-    model: Any,
-    device: torch.device,
-    *,
-    debug_dir: Path,
-    image_size: tuple[int, int],
-    window_size: int,
-    frame_stride: int,
-    dump_window_count: int,
-    state_input_config: StateInputConfig,
-) -> dict[str, Any]:
-    if dump_window_count < 1:
-        raise ValueError("dump_window_count must be > 0")
-    if state_input_config.current_speed_enabled or state_input_config.route_forward_delta_enabled:
-        return {
-            "debug_dir": str(debug_dir),
-            "frame_count": 0,
-            "window_size": window_size,
-            "frame_stride": frame_stride,
-            "window_count": 0,
-            "results": [],
-            "control_ranges": {},
-            "skipped_reason": (
-                "state-input-enabled checkpoints require live telemetry; "
-                "debug frame dumps are image-only"
-            ),
-        }
-
-    frame_paths = list_debug_frame_paths(debug_dir)
-    windows = build_debug_windows(
-        frame_paths,
-        window_size=window_size,
-        frame_stride=frame_stride,
-        limit=dump_window_count,
-    )
-
-    results: list[dict[str, Any]] = []
-    for window_index, window_paths in enumerate(windows):
-        frame_tensors = [load_frame_tensor(path, image_size) for path in window_paths]
-        stacked_frames = torch.cat(frame_tensors, dim=0)
-        start_frame_index = frame_paths.index(window_paths[0])
-        results.append({
-            "window_index": window_index,
-            "start_frame_index": start_frame_index,
-            "frame_paths": [str(path) for path in window_paths],
-            "control_outputs": predict_control_outputs(model, device, stacked_frames),
-        })
-
-    return {
-        "debug_dir": str(debug_dir),
-        "frame_count": len(frame_paths),
-        "window_size": window_size,
-        "frame_stride": frame_stride,
-        "window_count": len(results),
-        "results": results,
-        "control_ranges": summarize_control_ranges(results),
     }
 
 
@@ -351,34 +378,42 @@ def build_output(
     checkpoint: dict[str, Any],
     device: torch.device,
     dataset_results: dict[str, Any],
-    debug_results: dict[str, Any],
 ) -> dict[str, Any]:
-    head_specs = resolve_checkpoint_head_specs(checkpoint)
+    _require_temporal_checkpoint(checkpoint)
+    future_offsets = tuple(int(value) for value in (checkpoint.get("future_offsets") or []))
+    control_target_names, aux_target_names = resolve_checkpoint_target_names(
+        checkpoint,
+        future_steps=len(future_offsets),
+    )
+    target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
     return {
         "checkpoint": {
             "path": str(checkpoint_path),
             "device": str(device),
             "epoch": int(checkpoint.get("epoch", 0) or 0),
+            "planner_format": PLANNER_FORMAT,
             "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
             "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
             "sample_stride": checkpoint_sample_stride(checkpoint),
             "input_channels": int(checkpoint.get("input_channels", 0) or 0),
-            "delta_speed_target_transform": resolve_checkpoint_delta_speed_target_transform(checkpoint).metadata(),
-            "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
-            "head_specs": checkpoint.get("head_specs", head_specs_metadata(head_specs)),
+            "future_offsets": list(future_offsets),
+            "telemetry_feature_names": list(checkpoint.get("telemetry_feature_names", [])),
+            "control_target_names": list(control_target_names),
+            "aux_target_names": list(aux_target_names),
+            "target_transforms": target_transform_metadata(target_transforms),
             "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config_from_metadata(None))),
         },
         "dataset_samples": dataset_results,
-        "debug_windows": debug_results,
     }
 
 
 def print_plain(output: dict[str, Any]) -> None:
     checkpoint = output["checkpoint"]
     dataset_samples = output["dataset_samples"]
-    debug_windows = output["debug_windows"]
 
     print(f"Checkpoint: {checkpoint['path']}")
+    print(f"Device: {checkpoint['device']}")
+    print(f"Planner format: {checkpoint['planner_format']}")
     print(
         "Model window: "
         f"size={checkpoint['frame_window_size']} "
@@ -386,7 +421,9 @@ def print_plain(output: dict[str, Any]) -> None:
         f"sample_stride={checkpoint['sample_stride']} "
         f"input_channels={checkpoint['input_channels']}"
     )
-    print(f"Device: {checkpoint['device']}")
+    print(f"Future offsets: {checkpoint['future_offsets']}")
+    print(f"Control targets: {checkpoint['control_target_names']}")
+    print(f"Aux targets: {checkpoint['aux_target_names']}")
     print()
     print(
         "Dataset samples: "
@@ -395,39 +432,30 @@ def print_plain(output: dict[str, Any]) -> None:
         f"count={dataset_samples['sample_count']} "
         f"dataset_size={dataset_samples['dataset_size']}"
     )
-    for control_name, stats in dataset_samples.get("control_ranges", {}).items():
+    print("Control per-target MAE:")
+    for target_name, values in dataset_samples.get("control_target_mae", {}).items():
         print(
-            f"dataset_{control_name}: "
-            f"min={float(stats['min']):.6f} "
-            f"max={float(stats['max']):.6f} "
-            f"mean={float(stats['mean']):.6f} "
-            f"range={float(stats['range']):.6f} "
-            f"flat={bool(stats['flat'])}"
+            f"  {target_name}: "
+            f"normalized={float(values['normalized_mae']):.6f} "
+            f"denormalized={float(values['denormalized_mae']):.6f}"
         )
-    for item in dataset_samples.get("results", []):
+    print("Aux per-target MAE:")
+    for target_name, values in dataset_samples.get("aux_target_mae", {}).items():
         print(
-            f"sample[{item['sample_index']}]: "
-            f"controls={item['control_outputs']} "
-            f"target={item['target']}"
+            f"  {target_name}: "
+            f"normalized={float(values['normalized_mae']):.6f} "
+            f"denormalized={float(values['denormalized_mae']):.6f}"
         )
-    print()
-    print(
-        "Debug windows: "
-        f"dir={debug_windows['debug_dir']} "
-        f"frames={debug_windows['frame_count']} "
-        f"windows={debug_windows['window_count']}"
-    )
-    for control_name, stats in debug_windows.get("control_ranges", {}).items():
-        print(
-            f"debug_{control_name}: "
-            f"min={float(stats['min']):.6f} "
-            f"max={float(stats['max']):.6f} "
-            f"mean={float(stats['mean']):.6f} "
-            f"range={float(stats['range']):.6f} "
-            f"flat={bool(stats['flat'])}"
-        )
-    for item in debug_windows.get("results", []):
-        print(f"window[{item['window_index']}]: controls={item['control_outputs']}")
+
+    first_result = next(iter(dataset_samples.get("results", [])), None)
+    if isinstance(first_result, dict):
+        print()
+        print(f"First sample: index={first_result['sample_index']} trip={first_result.get('trip_key')}")
+        print(f"Shapes: {first_result['shapes']}")
+        print(f"Pred controls: {first_result['pred_controls']}")
+        print(f"Target controls: {first_result['target_controls']}")
+        print(f"Pred aux: {first_result['pred_aux']}")
+        print(f"Target aux: {first_result['target_aux']}")
 
 
 def main() -> None:
@@ -444,11 +472,30 @@ def main() -> None:
     checkpoint_path = resolve_existing_path(checkpoint_raw, args.config)
     device = select_device(device_name)
     checkpoint = load_checkpoint(checkpoint_path, device)
+    _require_temporal_checkpoint(checkpoint)
     frame_count = resolve_checkpoint_frame_count(checkpoint, inference_config)
-    frame_stride = resolve_checkpoint_frame_stride(checkpoint, inference_config)
+    _ = resolve_checkpoint_frame_stride(checkpoint, inference_config)
+    image_offsets = tuple(int(value) for value in (checkpoint.get("image_offsets") or train_config.dataset.image_offsets))
+    telemetry_offsets = tuple(int(value) for value in (checkpoint.get("telemetry_offsets") or train_config.dataset.telemetry_offsets))
+    future_offsets = tuple(int(value) for value in (checkpoint.get("future_offsets") or train_config.dataset.future_offsets))
+    telemetry_feature_names = tuple(
+        str(value)
+        for value in (checkpoint.get("telemetry_feature_names") or train_config.dataset.telemetry_feature_names)
+    )
+    control_target_names, aux_target_names = resolve_checkpoint_target_names(
+        checkpoint,
+        future_steps=len(future_offsets),
+    )
+    target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
     model = build_model(checkpoint, device, frame_count)
-    state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
 
+    if args.debug_dir is not None:
+        print(
+            "debug-dir was provided, but temporal checkpoint sanity requires telemetry-backed dataset samples; "
+            "image-only debug windows were skipped."
+        )
+
+    started = time.perf_counter()
     dataset_results = evaluate_dataset_samples(
         model,
         device,
@@ -458,20 +505,17 @@ def main() -> None:
         run_id=run_id,
         sample_start=sample_start,
         sample_count=args.sample_count,
+        image_offsets=image_offsets,
+        telemetry_offsets=telemetry_offsets,
+        future_offsets=future_offsets,
+        telemetry_feature_names=telemetry_feature_names,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+        target_transforms=target_transforms,
     )
-    debug_dir = resolve_debug_dir(args.debug_dir)
-    debug_results = evaluate_debug_windows(
-        model,
-        device,
-        debug_dir=debug_dir,
-        image_size=(train_config.dataset.image_width, train_config.dataset.image_height),
-        window_size=frame_count,
-        frame_stride=frame_stride,
-        dump_window_count=args.dump_window_count,
-        state_input_config=state_input_config,
-    )
+    output = build_output(checkpoint_path, checkpoint, device, dataset_results)
+    output["elapsed_s"] = time.perf_counter() - started
 
-    output = build_output(checkpoint_path, checkpoint, device, dataset_results, debug_results)
     if args.output_json:
         print(json.dumps(output, indent=2))
     else:

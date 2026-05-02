@@ -27,7 +27,7 @@ telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
 future_offsets = [1, 2, 3, 4, 5, 6]
 telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
 control_target_names = ["steering", "acceleration", "brakePressureAvg"]
-aux_target_names = ["future_speed", "future_yaw_delta", "future_yaw_rate"]
+aux_target_names = ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"]
 label_tolerance = "120ms"
 sync_flash_brightness_threshold = 250.0
 sync_flash_frame_limit = 45
@@ -48,10 +48,9 @@ high_speed_steer_gain = 0.8
 steer_gain_fade_speed_mps = 6.5
 steer_response_blend = 0.6
 max_target_speed_kph = 17.0
-move_intent_on_threshold = 0.7
-move_intent_off_threshold = 0.3
-move_intent_hold_speed_max = 5.5
 steer_command_rate_per_second = 6.0
+throttle_hold_seconds = 2.3
+throttle_hold_min = 0.09
 `)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -94,14 +93,14 @@ steer_command_rate_per_second = 6.0
 	if cfg.MaxTargetSpeedKPH != 17.0 {
 		t.Fatalf("unexpected max target speed kph: %f", cfg.MaxTargetSpeedKPH)
 	}
-	if cfg.MoveIntentOnThreshold != 0.7 || cfg.MoveIntentOffThreshold != 0.3 {
-		t.Fatalf("unexpected move intent thresholds: on=%f off=%f", cfg.MoveIntentOnThreshold, cfg.MoveIntentOffThreshold)
-	}
-	if cfg.MoveIntentHoldSpeedMax != 5.5 {
-		t.Fatalf("unexpected move intent hold speed max: %f", cfg.MoveIntentHoldSpeedMax)
-	}
 	if cfg.SteerCommandRatePerSec != 6.0 {
 		t.Fatalf("unexpected steer command rate: %f", cfg.SteerCommandRatePerSec)
+	}
+	if cfg.ThrottleHoldSeconds != 2.3 {
+		t.Fatalf("unexpected throttle hold seconds: %f", cfg.ThrottleHoldSeconds)
+	}
+	if cfg.ThrottleHoldMin != 0.09 {
+		t.Fatalf("unexpected throttle hold min: %f", cfg.ThrottleHoldMin)
 	}
 }
 
@@ -131,56 +130,20 @@ func TestLoadInferenceConfigFallsBackToDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.SteerResponseBlend != defaultSteerResponseBlend {
 		t.Fatalf("unexpected default steer response blend: %f", cfg.SteerResponseBlend)
 	}
-	if cfg.MoveIntentOnThreshold != defaultMoveIntentOnThreshold || cfg.MoveIntentOffThreshold != defaultMoveIntentOffThreshold {
-		t.Fatalf("unexpected default move intent thresholds: on=%f off=%f", cfg.MoveIntentOnThreshold, cfg.MoveIntentOffThreshold)
-	}
 	if cfg.SteerCommandRatePerSec != defaultSteerCommandRatePerSecond {
 		t.Fatalf("unexpected default steer command rate: %f", cfg.SteerCommandRatePerSec)
+	}
+	if cfg.ThrottleHoldSeconds != defaultThrottleHoldSeconds {
+		t.Fatalf("unexpected default throttle hold seconds: %f", cfg.ThrottleHoldSeconds)
+	}
+	if cfg.ThrottleHoldMin != defaultThrottleHoldMin {
+		t.Fatalf("unexpected default throttle hold min: %f", cfg.ThrottleHoldMin)
 	}
 	if cfg.PredictionTimeout != defaultPredictionTimeout {
 		t.Fatalf("unexpected default inference timeout: %s", cfg.PredictionTimeout)
 	}
 	if cfg.AlignmentTolerance != defaultAlignmentTolerance {
 		t.Fatalf("unexpected default alignment tolerance: %s", cfg.AlignmentTolerance)
-	}
-}
-
-func TestLoadInferenceConfigDerivesHysteresisFromLegacyMoveIntentThreshold(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "train_config.toml")
-	content := []byte(`
-[dataset]
-image_width = 320
-image_height = 180
-window_size = 5
-image_offsets = [-8, -6, -4, -2, 0]
-frame_stride = 2
-sample_stride = 10
-telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
-future_offsets = [1, 2, 3, 4, 5, 6]
-telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
-control_target_names = ["steering", "acceleration", "brakePressureAvg"]
-aux_target_names = ["future_speed", "future_yaw_delta", "future_yaw_rate"]
-
-[backend.inference]
-move_intent_threshold = 0.65
-`)
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := LoadInferenceConfig(path)
-	if err != nil {
-		t.Fatalf("LoadInferenceConfig returned error: %v", err)
-	}
-	if cfg.MoveIntentThreshold != 0.65 {
-		t.Fatalf("unexpected legacy threshold: %f", cfg.MoveIntentThreshold)
-	}
-	if cfg.MoveIntentOnThreshold != 0.65 {
-		t.Fatalf("unexpected derived on threshold: %f", cfg.MoveIntentOnThreshold)
-	}
-	if cfg.MoveIntentOffThreshold != 0.50 {
-		t.Fatalf("unexpected derived off threshold: %f", cfg.MoveIntentOffThreshold)
 	}
 }
 
@@ -195,8 +158,8 @@ window_size = 7
 frame_stride = 3
 sample_stride = 9
 label_tolerance = "75ms"
-delta_speed_clip = 1.5
-delta_speed_normalize = false
+future_speed_delta_clip = 1.5
+future_speed_delta_normalize = false
 sync_flash_brightness_threshold = 200.5
 sync_flash_frame_limit = 25
 `)
@@ -217,8 +180,8 @@ sync_flash_frame_limit = 25
 	if cfg.LabelTolerance != 75*time.Millisecond {
 		t.Fatalf("unexpected label tolerance: %s", cfg.LabelTolerance)
 	}
-	if cfg.DeltaSpeedClip != 1.5 || cfg.DeltaSpeedNormalize {
-		t.Fatalf("unexpected delta-speed transform config: %+v", cfg)
+	if cfg.FutureSpeedDeltaClip != 1.5 || cfg.FutureSpeedDeltaNormalize {
+		t.Fatalf("unexpected future-speed-delta transform config: %+v", cfg)
 	}
 	if cfg.SyncFlashBrightnessThreshold != 200.5 || cfg.SyncFlashFrameLimit != 25 {
 		t.Fatalf("unexpected sync-flash config: %+v", cfg)

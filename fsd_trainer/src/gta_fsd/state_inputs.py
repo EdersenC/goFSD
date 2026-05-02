@@ -7,8 +7,6 @@ from typing import Any, Mapping
 import torch
 from torch import Tensor
 
-from heads import HEAD_SPECS
-
 
 CURRENT_SPEED_KEY = "current_speed"
 ROUTE_FORWARD_DELTA_KEY = "route_forward_delta"
@@ -16,6 +14,11 @@ ROUTE_HEADING_ERROR_KEY = "route_heading_error"
 ROUTE_DISTANCE_KEY = "route_distance"
 LEAD_VEHICLE_DISTANCE_KEY = "lead_vehicle_distance"
 HAS_LEAD_VEHICLE_KEY = "has_lead_vehicle"
+ROUTE_DIRECTION_UNKNOWN_KEY = "route_direction_unknown"
+ROUTE_DIRECTION_KEEP_STRAIGHT_KEY = "route_direction_keep_straight"
+ROUTE_DIRECTION_TURN_LEFT_KEY = "route_direction_turn_left"
+ROUTE_DIRECTION_TURN_RIGHT_KEY = "route_direction_turn_right"
+ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY = "route_direction_reroute_wrong_way"
 
 DEFAULT_CURRENT_SPEED_CAP = 25.0
 DEFAULT_ROUTE_FORWARD_DELTA_CAP = 1.5
@@ -23,13 +26,6 @@ DEFAULT_ROUTE_HEADING_ERROR_CAP = 180.0
 DEFAULT_ROUTE_DISTANCE_CAP = 100.0
 DEFAULT_LEAD_VEHICLE_DISTANCE_CAP = 100.0
 DEFAULT_WIDTH_MULTIPLIER = 1.5
-
-DEFAULT_LEGACY_HEADS = (
-    "delta_speed",
-    "future_speed",
-    "move_intent",
-    "future_yaw_delta",
-)
 
 NORMALIZATION_POSITIVE_CAP = "positive_cap"
 NORMALIZATION_SIGNED_CAP = "signed_cap"
@@ -44,7 +40,7 @@ class StateInputDefinition:
     normalization: str
     default_cap: float | None
     default_enabled: bool
-    default_heads: tuple[str, ...]
+    planner_fused_only: bool = False
 
 
 STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
@@ -55,7 +51,7 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_POSITIVE_CAP,
         default_cap=DEFAULT_CURRENT_SPEED_CAP,
         default_enabled=True,
-        default_heads=DEFAULT_LEGACY_HEADS,
+        planner_fused_only=True,
     ),
     StateInputDefinition(
         key=ROUTE_FORWARD_DELTA_KEY,
@@ -64,7 +60,7 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_SIGNED_CAP,
         default_cap=DEFAULT_ROUTE_FORWARD_DELTA_CAP,
         default_enabled=True,
-        default_heads=DEFAULT_LEGACY_HEADS,
+        planner_fused_only=True,
     ),
     StateInputDefinition(
         key=ROUTE_HEADING_ERROR_KEY,
@@ -73,7 +69,6 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_SIGNED_CAP,
         default_cap=DEFAULT_ROUTE_HEADING_ERROR_CAP,
         default_enabled=False,
-        default_heads=(),
     ),
     StateInputDefinition(
         key=ROUTE_DISTANCE_KEY,
@@ -82,7 +77,6 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_POSITIVE_CAP,
         default_cap=DEFAULT_ROUTE_DISTANCE_CAP,
         default_enabled=False,
-        default_heads=(),
     ),
     StateInputDefinition(
         key=LEAD_VEHICLE_DISTANCE_KEY,
@@ -91,7 +85,6 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_POSITIVE_CAP,
         default_cap=DEFAULT_LEAD_VEHICLE_DISTANCE_CAP,
         default_enabled=False,
-        default_heads=(),
     ),
     StateInputDefinition(
         key=HAS_LEAD_VEHICLE_KEY,
@@ -100,7 +93,51 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_BINARY,
         default_cap=None,
         default_enabled=False,
-        default_heads=(),
+    ),
+    StateInputDefinition(
+        key=ROUTE_DIRECTION_UNKNOWN_KEY,
+        camel_key="routeDirectionUnknown",
+        label_key="routeDirectionUnknown",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=ROUTE_DIRECTION_KEEP_STRAIGHT_KEY,
+        camel_key="routeDirectionKeepStraight",
+        label_key="routeDirectionKeepStraight",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=ROUTE_DIRECTION_TURN_LEFT_KEY,
+        camel_key="routeDirectionTurnLeft",
+        label_key="routeDirectionTurnLeft",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=ROUTE_DIRECTION_TURN_RIGHT_KEY,
+        camel_key="routeDirectionTurnRight",
+        label_key="routeDirectionTurnRight",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY,
+        camel_key="routeDirectionRerouteWrongWay",
+        label_key="routeDirectionRerouteWrongWay",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
     ),
 )
 
@@ -110,14 +147,25 @@ STATE_INPUT_DEFINITIONS_BY_KEY: dict[str, StateInputDefinition] = {
 STATE_INPUT_DEFINITIONS_BY_CAMEL: dict[str, StateInputDefinition] = {
     definition.camel_key: definition for definition in STATE_INPUT_DEFINITIONS
 }
-ACTIVE_HEAD_NAMES: tuple[str, ...] = tuple(spec.name for spec in HEAD_SPECS)
-ACTIVE_HEAD_NAME_SET = frozenset(ACTIVE_HEAD_NAMES)
+ROUTE_DIRECTION_KEYS: tuple[str, ...] = (
+    ROUTE_DIRECTION_UNKNOWN_KEY,
+    ROUTE_DIRECTION_KEEP_STRAIGHT_KEY,
+    ROUTE_DIRECTION_TURN_LEFT_KEY,
+    ROUTE_DIRECTION_TURN_RIGHT_KEY,
+    ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY,
+)
+ROUTE_DIRECTION_DEFAULTS: dict[str, float] = {
+    ROUTE_DIRECTION_UNKNOWN_KEY: 1.0,
+    ROUTE_DIRECTION_KEEP_STRAIGHT_KEY: 0.0,
+    ROUTE_DIRECTION_TURN_LEFT_KEY: 0.0,
+    ROUTE_DIRECTION_TURN_RIGHT_KEY: 0.0,
+    ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY: 0.0,
+}
 
 
 @dataclass(frozen=True)
 class StateInputSpec:
     enabled: bool = False
-    heads: tuple[str, ...] = ()
     cap: float | None = None
 
 
@@ -131,7 +179,6 @@ class StateInputConfig:
             key,
             StateInputSpec(
                 enabled=definition.default_enabled,
-                heads=definition.default_heads,
                 cap=definition.default_cap,
             ),
         )
@@ -156,6 +203,8 @@ def state_input_definition(key: str) -> StateInputDefinition:
 
 
 def training_state_input_config(raw_metadata: Any | None = None) -> StateInputConfig:
+    if isinstance(raw_metadata, StateInputConfig):
+        return raw_metadata
     if raw_metadata is None:
         return default_training_state_input_config()
     if not isinstance(raw_metadata, Mapping):
@@ -168,7 +217,6 @@ def default_training_state_input_config() -> StateInputConfig:
     for definition in STATE_INPUT_DEFINITIONS:
         specs[definition.key] = StateInputSpec(
             enabled=definition.default_enabled,
-            heads=definition.default_heads,
             cap=definition.default_cap,
         )
     return StateInputConfig(specs=specs)
@@ -178,7 +226,6 @@ def default_inference_state_input_config() -> StateInputConfig:
     return StateInputConfig(specs={
         definition.key: StateInputSpec(
             enabled=False,
-            heads=(),
             cap=definition.default_cap,
         )
         for definition in STATE_INPUT_DEFINITIONS
@@ -191,7 +238,7 @@ def state_inputs_metadata(config: StateInputConfig) -> dict[str, Any]:
         spec = config.spec(definition.key)
         item: dict[str, Any] = {
             "enabled": bool(spec.enabled),
-            "heads": list(spec.heads),
+            "planner_fused_only": bool(definition.planner_fused_only),
         }
         if definition.default_cap is not None:
             item["cap"] = float(resolve_state_input_cap(config, definition.key))
@@ -199,11 +246,28 @@ def state_inputs_metadata(config: StateInputConfig) -> dict[str, Any]:
     return payload
 
 
+def state_input_definitions_metadata() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": definition.key,
+            "camelKey": definition.camel_key,
+            "labelKey": definition.label_key,
+            "normalization": definition.normalization,
+            "plannerFusedOnly": bool(definition.planner_fused_only),
+            "defaultEnabled": bool(definition.default_enabled),
+            "defaultCap": None if definition.default_cap is None else float(definition.default_cap),
+        }
+        for definition in STATE_INPUT_DEFINITIONS
+    ]
+
+
 def state_input_config_from_metadata(
     raw_metadata: Any,
     *,
     fallback_to_training_defaults: bool = False,
 ) -> StateInputConfig:
+    if isinstance(raw_metadata, StateInputConfig):
+        return raw_metadata
     if not isinstance(raw_metadata, Mapping):
         return default_training_state_input_config() if fallback_to_training_defaults else default_inference_state_input_config()
 
@@ -221,9 +285,7 @@ def state_input_config_from_metadata(
         cap = definition.default_cap
         if definition.default_cap is not None:
             cap = _coerce_positive_float(raw_item.get("cap"), resolve_state_input_cap(base, definition.key))
-        raw_heads = raw_item.get("heads", specs[definition.key].heads)
-        heads = normalize_state_input_heads(raw_heads, definition.key)
-        specs[definition.key] = StateInputSpec(enabled=enabled, heads=heads, cap=cap)
+        specs[definition.key] = StateInputSpec(enabled=enabled, cap=cap)
     return StateInputConfig(specs=specs)
 
 
@@ -237,45 +299,6 @@ def resolve_state_input_cap(config: StateInputConfig, key: str) -> float:
     return _coerce_positive_float(cap, float(definition.default_cap))
 
 
-def state_input_head_map(config: StateInputConfig) -> dict[str, list[str]]:
-    return {
-        definition.key: list(config.spec(definition.key).heads)
-        for definition in STATE_INPUT_DEFINITIONS
-        if config.spec(definition.key).enabled
-    }
-
-
-def current_speed_fused_head_names(config: StateInputConfig) -> tuple[str, ...]:
-    return config.spec(CURRENT_SPEED_KEY).heads if config.is_enabled(CURRENT_SPEED_KEY) else ()
-
-
-def route_forward_delta_fused_head_names(config: StateInputConfig) -> tuple[str, ...]:
-    return config.spec(ROUTE_FORWARD_DELTA_KEY).heads if config.is_enabled(ROUTE_FORWARD_DELTA_KEY) else ()
-
-
-def normalize_state_input_heads(raw_heads: Any, input_name: str) -> tuple[str, ...]:
-    if raw_heads is None:
-        return ()
-    if not isinstance(raw_heads, (list, tuple)):
-        raise ValueError(f"{input_name} heads must be a list")
-    resolved: list[str] = []
-    seen: set[str] = set()
-    for raw_head in raw_heads:
-        head_name = str(raw_head).strip()
-        if not head_name:
-            continue
-        if head_name not in ACTIVE_HEAD_NAME_SET:
-            raise ValueError(
-                f"{input_name} head {head_name!r} is unsupported; "
-                f"expected one of {list(ACTIVE_HEAD_NAMES)}"
-            )
-        if head_name in seen:
-            continue
-        seen.add(head_name)
-        resolved.append(head_name)
-    return tuple(resolved)
-
-
 def build_state_inputs_from_label(
     label: dict[str, Any],
     config: StateInputConfig,
@@ -287,6 +310,18 @@ def build_state_inputs_from_label(
         normalized = normalize_state_input_value_from_mapping(label, definition.key, config)
         state_inputs[definition.key] = torch.tensor(normalized, dtype=torch.float32)
     return state_inputs
+
+
+def build_state_input_vector_from_mapping(
+    source: Mapping[str, Any],
+    config: StateInputConfig,
+) -> Tensor:
+    values = [
+        normalize_state_input_value_from_mapping(source, definition.key, config)
+        for definition in STATE_INPUT_DEFINITIONS
+        if config.is_enabled(definition.key)
+    ]
+    return torch.tensor(values, dtype=torch.float32)
 
 
 def normalize_state_input_value_from_mapping(
@@ -304,22 +339,65 @@ def resolve_state_input_raw_value(
     definition: StateInputDefinition,
     config: StateInputConfig,
 ) -> Any:
+    if definition.key in ROUTE_DIRECTION_KEYS:
+        route_defaults = resolve_route_direction_defaults(source)
+        if route_defaults is not None:
+            return route_defaults[definition.key]
     if definition.key == LEAD_VEHICLE_DISTANCE_KEY:
         has_lead = resolve_has_lead_vehicle_raw_value(source)
         if not has_lead:
             return resolve_state_input_cap(config, LEAD_VEHICLE_DISTANCE_KEY)
-    if definition.label_key not in source:
+    if definition.label_key in source:
+        return source[definition.label_key]
+    if definition.camel_key in source:
+        return source[definition.camel_key]
+    if definition.key not in source:
         raise ValueError(
             f"failed to build state input '{definition.key}': missing {definition.label_key}"
         )
-    return source[definition.label_key]
+    return source[definition.key]
+
+
+def resolve_route_direction_defaults(source: Mapping[str, Any]) -> dict[str, float] | None:
+    has_any_route_direction = False
+    resolved: dict[str, float] = {}
+    for definition in STATE_INPUT_DEFINITIONS:
+        if definition.key not in ROUTE_DIRECTION_KEYS:
+            continue
+        if definition.label_key in source:
+            resolved[definition.key] = 1.0 if _coerce_bool(source[definition.label_key], definition.key) else 0.0
+            has_any_route_direction = True
+        elif definition.camel_key in source:
+            resolved[definition.key] = 1.0 if _coerce_bool(source[definition.camel_key], definition.key) else 0.0
+            has_any_route_direction = True
+        elif definition.key in source:
+            resolved[definition.key] = 1.0 if _coerce_bool(source[definition.key], definition.key) else 0.0
+            has_any_route_direction = True
+    if has_any_route_direction:
+        for key in ROUTE_DIRECTION_KEYS:
+            resolved.setdefault(key, 0.0)
+        return resolved
+
+    missing_all = all(
+        definition.label_key not in source and definition.camel_key not in source
+        and definition.key not in source
+        for definition in STATE_INPUT_DEFINITIONS
+        if definition.key in ROUTE_DIRECTION_KEYS
+    )
+    if missing_all:
+        return dict(ROUTE_DIRECTION_DEFAULTS)
+    return None
 
 
 def resolve_has_lead_vehicle_raw_value(source: Mapping[str, Any]) -> bool:
     definition = state_input_definition(HAS_LEAD_VEHICLE_KEY)
-    if definition.label_key not in source:
+    if definition.label_key in source:
+        return _coerce_bool(source[definition.label_key], definition.key)
+    if definition.camel_key in source:
+        return _coerce_bool(source[definition.camel_key], definition.key)
+    if definition.key not in source:
         raise ValueError(f"failed to build state input '{HAS_LEAD_VEHICLE_KEY}': missing {definition.label_key}")
-    return _coerce_bool(source[definition.label_key], definition.key)
+    return _coerce_bool(source[definition.key], definition.key)
 
 
 def normalize_state_input_value(key: str, raw_value: Any, config: StateInputConfig) -> float:
@@ -361,7 +439,7 @@ def normalize_current_speed_value(raw_value: Any, cap: float = DEFAULT_CURRENT_S
         CURRENT_SPEED_KEY,
         raw_value,
         StateInputConfig(specs={
-            CURRENT_SPEED_KEY: StateInputSpec(enabled=True, heads=(), cap=cap),
+            CURRENT_SPEED_KEY: StateInputSpec(enabled=True, cap=cap),
         }),
     )
 
@@ -371,7 +449,7 @@ def normalize_current_speed_tensor(value: Tensor, cap: float = DEFAULT_CURRENT_S
         CURRENT_SPEED_KEY,
         value,
         StateInputConfig(specs={
-            CURRENT_SPEED_KEY: StateInputSpec(enabled=True, heads=(), cap=cap),
+            CURRENT_SPEED_KEY: StateInputSpec(enabled=True, cap=cap),
         }),
     )
 
@@ -381,7 +459,7 @@ def normalize_route_forward_delta_value(raw_value: Any, cap: float = DEFAULT_ROU
         ROUTE_FORWARD_DELTA_KEY,
         raw_value,
         StateInputConfig(specs={
-            ROUTE_FORWARD_DELTA_KEY: StateInputSpec(enabled=True, heads=(), cap=cap),
+            ROUTE_FORWARD_DELTA_KEY: StateInputSpec(enabled=True, cap=cap),
         }),
     )
 
@@ -391,7 +469,7 @@ def normalize_route_forward_delta_tensor(value: Tensor, cap: float = DEFAULT_ROU
         ROUTE_FORWARD_DELTA_KEY,
         value,
         StateInputConfig(specs={
-            ROUTE_FORWARD_DELTA_KEY: StateInputSpec(enabled=True, heads=(), cap=cap),
+            ROUTE_FORWARD_DELTA_KEY: StateInputSpec(enabled=True, cap=cap),
         }),
     )
 

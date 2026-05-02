@@ -37,6 +37,28 @@ type ControlTelemetryUpdate = {
     steering: number
     acceleration: number
     brakePressureAvg: number
+    vehicleExists: boolean
+    isInVehicle: boolean
+    positionX?: number
+    positionY?: number
+    positionZ?: number
+    velocityX?: number
+    velocityY?: number
+    velocityZ?: number
+    pitchDeg?: number
+    rollDeg?: number
+    gear?: number
+    rpm?: number
+    wheelAngle?: number
+    onGround?: boolean
+    collisionState?: string
+    routeDirectionCode: number
+    routeDirectionDistanceM: number
+    routeDirectionUnknown: number
+    routeDirectionKeepStraight: number
+    routeDirectionTurnLeft: number
+    routeDirectionTurnRight: number
+    routeDirectionRerouteWrongWay: number
     routeForwardDelta: number
     routeHeadingError: number
     routeDistance: number
@@ -206,6 +228,28 @@ setTick(() => {
         steering: telemetry.steering,
         acceleration: telemetry.acceleration,
         brakePressureAvg: telemetry.brakePressureAvg,
+        vehicleExists: telemetry.vehicleExists,
+        isInVehicle: telemetry.isInVehicle,
+        positionX: telemetry.positionX,
+        positionY: telemetry.positionY,
+        positionZ: telemetry.positionZ,
+        velocityX: telemetry.velocityX,
+        velocityY: telemetry.velocityY,
+        velocityZ: telemetry.velocityZ,
+        pitchDeg: telemetry.pitchDeg,
+        rollDeg: telemetry.rollDeg,
+        gear: telemetry.gear,
+        rpm: telemetry.rpm,
+        wheelAngle: telemetry.wheelAngle,
+        onGround: telemetry.onGround,
+        collisionState: telemetry.collisionState,
+        routeDirectionCode: telemetry.routeDirectionCode,
+        routeDirectionDistanceM: telemetry.routeDirectionDistanceM,
+        routeDirectionUnknown: telemetry.routeDirectionUnknown,
+        routeDirectionKeepStraight: telemetry.routeDirectionKeepStraight,
+        routeDirectionTurnLeft: telemetry.routeDirectionTurnLeft,
+        routeDirectionTurnRight: telemetry.routeDirectionTurnRight,
+        routeDirectionRerouteWrongWay: telemetry.routeDirectionRerouteWrongWay,
         routeForwardDelta,
         routeHeadingError,
         routeDistance,
@@ -222,6 +266,12 @@ setTick(() => {
             `steer=${telemetry.steering.toFixed(2)} ` +
             `accel=${telemetry.acceleration.toFixed(2)} ` +
             `brakeAvg=${telemetry.brakePressureAvg.toFixed(2)} ` +
+            `navCode=${telemetry.routeDirectionCode} ` +
+            `navOneHot=[u=${Number(telemetry.routeDirectionUnknown || 0).toFixed(0)}, ` +
+            `s=${Number(telemetry.routeDirectionKeepStraight || 0).toFixed(0)}, ` +
+            `l=${Number(telemetry.routeDirectionTurnLeft || 0).toFixed(0)}, ` +
+            `r=${Number(telemetry.routeDirectionTurnRight || 0).toFixed(0)}, ` +
+            `w=${Number(telemetry.routeDirectionRerouteWrongWay || 0).toFixed(0)}] ` +
             `routeFwd=${routeForwardDelta.toFixed(2)} ` +
             `routeHeading=${routeHeadingError.toFixed(2)} ` +
             `routeDistance=${routeDistance.toFixed(2)} ` +

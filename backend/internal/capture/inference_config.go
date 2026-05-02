@@ -14,10 +14,9 @@ const (
 	defaultHorizonMode                 = "weighted_short_horizon"
 	defaultPredictionTimeout           = 250 * time.Millisecond
 	defaultAlignmentTolerance          = 125 * time.Millisecond
+	defaultMaxFrameTelemetrySkew       = 75 * time.Millisecond
 	defaultTargetSpeedErrorGain        = 0.5
 	defaultTargetSpeedDeadband         = 0.05
-	defaultDeltaSpeedTrimGain          = 0.25
-	defaultDeltaSpeedDeadband          = 0.02
 	defaultHeadingErrorDeadbandDeg     = 2.5
 	defaultHeadingErrorFullLockDeg     = 45.0
 	defaultLowSpeedSteerGain           = 1.35
@@ -28,11 +27,9 @@ const (
 	defaultLaunchSpeedThreshold        = 1.0
 	defaultLaunchTargetSpeedMargin     = 0.75
 	defaultMaxTargetSpeedKPH           = 17.0
-	defaultMoveIntentThreshold         = 0.55
-	defaultMoveIntentOnThreshold       = 0.60
-	defaultMoveIntentOffThreshold      = 0.40
-	defaultMoveIntentHoldSpeedMax      = 4.0
 	defaultSteerCommandRatePerSecond   = 4.0
+	defaultThrottleHoldSeconds         = 2.0
+	defaultThrottleHoldMin             = 0.12
 )
 
 type InferenceConfig struct {
@@ -60,12 +57,11 @@ type InferenceConfig struct {
 	HorizonMode                     string
 	HorizonControlWeights           []float64
 	AlignmentTolerance              time.Duration
+	MaxFrameTelemetrySkew           time.Duration
 	TelemetryNormalizationEnabled   bool
 	TelemetryNormalizationStatsPath string
 	TargetSpeedErrorGain            float64
 	TargetSpeedDeadband             float64
-	DeltaSpeedTrimGain              float64
-	DeltaSpeedDeadband              float64
 	HeadingErrorDeadbandDeg         float64
 	HeadingErrorFullLockDeg         float64
 	LowSpeedSteerGain               float64
@@ -76,11 +72,9 @@ type InferenceConfig struct {
 	LaunchSpeedThreshold            float64
 	LaunchTargetSpeedMargin         float64
 	MaxTargetSpeedKPH               float64
-	MoveIntentThreshold             float64
-	MoveIntentOnThreshold           float64
-	MoveIntentOffThreshold          float64
-	MoveIntentHoldSpeedMax          float64
 	SteerCommandRatePerSec          float64
+	ThrottleHoldSeconds             float64
+	ThrottleHoldMin                 float64
 }
 
 type backendSection struct {
@@ -103,12 +97,11 @@ type backendInferenceSection struct {
 	HorizonMode                     string    `toml:"horizon_mode"`
 	HorizonControlWeights           []float64 `toml:"horizon_control_weights"`
 	AlignmentTolerance              string    `toml:"alignment_tolerance"`
+	MaxFrameTelemetrySkew           string    `toml:"max_frame_telemetry_skew"`
 	TelemetryNormalizationEnabled   *bool     `toml:"telemetry_normalization_enabled"`
 	TelemetryNormalizationStatsPath string    `toml:"telemetry_normalization_stats_path"`
 	TargetSpeedErrorGain            *float64  `toml:"target_speed_error_gain"`
 	TargetSpeedDeadband             *float64  `toml:"target_speed_deadband"`
-	DeltaSpeedTrimGain              *float64  `toml:"delta_speed_trim_gain"`
-	DeltaSpeedDeadband              *float64  `toml:"delta_speed_deadband"`
 	HeadingErrorDeadbandDeg         *float64  `toml:"heading_error_deadband_deg"`
 	HeadingErrorFullLockDeg         *float64  `toml:"heading_error_full_lock_deg"`
 	LowSpeedSteerGain               *float64  `toml:"low_speed_steer_gain"`
@@ -119,11 +112,9 @@ type backendInferenceSection struct {
 	LaunchSpeedThreshold            *float64  `toml:"launch_speed_threshold"`
 	LaunchTargetSpeedMargin         *float64  `toml:"launch_target_speed_margin"`
 	MaxTargetSpeedKPH               *float64  `toml:"max_target_speed_kph"`
-	MoveIntentThreshold             *float64  `toml:"move_intent_threshold"`
-	MoveIntentOnThreshold           *float64  `toml:"move_intent_on_threshold"`
-	MoveIntentOffThreshold          *float64  `toml:"move_intent_off_threshold"`
-	MoveIntentHoldSpeedMax          *float64  `toml:"move_intent_hold_speed_max"`
 	SteerCommandRatePerSec          *float64  `toml:"steer_command_rate_per_second"`
+	ThrottleHoldSeconds             *float64  `toml:"throttle_hold_seconds"`
+	ThrottleHoldMin                 *float64  `toml:"throttle_hold_min"`
 }
 
 func DefaultInferenceConfig() InferenceConfig {
@@ -159,14 +150,13 @@ func DefaultInferenceConfig() InferenceConfig {
 		FutureSteps:             6,
 		TelemetryFeatureNames:   []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
 		ControlOutputNames:      []string{"steering", "acceleration", "brakePressureAvg"},
-		AuxOutputNames:          []string{"future_speed", "future_yaw_delta", "future_yaw_rate"},
+		AuxOutputNames:          []string{"future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"},
 		HorizonMode:             defaultHorizonMode,
 		HorizonControlWeights:   []float64{0.60, 0.30, 0.10},
 		AlignmentTolerance:      defaultAlignmentTolerance,
+		MaxFrameTelemetrySkew:   defaultMaxFrameTelemetrySkew,
 		TargetSpeedErrorGain:    defaultTargetSpeedErrorGain,
 		TargetSpeedDeadband:     defaultTargetSpeedDeadband,
-		DeltaSpeedTrimGain:      defaultDeltaSpeedTrimGain,
-		DeltaSpeedDeadband:      defaultDeltaSpeedDeadband,
 		HeadingErrorDeadbandDeg: defaultHeadingErrorDeadbandDeg,
 		HeadingErrorFullLockDeg: defaultHeadingErrorFullLockDeg,
 		LowSpeedSteerGain:       defaultLowSpeedSteerGain,
@@ -177,11 +167,9 @@ func DefaultInferenceConfig() InferenceConfig {
 		LaunchSpeedThreshold:    defaultLaunchSpeedThreshold,
 		LaunchTargetSpeedMargin: defaultLaunchTargetSpeedMargin,
 		MaxTargetSpeedKPH:       defaultMaxTargetSpeedKPH,
-		MoveIntentThreshold:     defaultMoveIntentThreshold,
-		MoveIntentOnThreshold:   defaultMoveIntentOnThreshold,
-		MoveIntentOffThreshold:  defaultMoveIntentOffThreshold,
-		MoveIntentHoldSpeedMax:  defaultMoveIntentHoldSpeedMax,
 		SteerCommandRatePerSec:  defaultSteerCommandRatePerSecond,
+		ThrottleHoldSeconds:     defaultThrottleHoldSeconds,
+		ThrottleHoldMin:         defaultThrottleHoldMin,
 	}
 }
 
@@ -331,6 +319,13 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		}
 		cfg.AlignmentTolerance = duration
 	}
+	if strings.TrimSpace(section.MaxFrameTelemetrySkew) != "" {
+		duration, err := time.ParseDuration(strings.TrimSpace(section.MaxFrameTelemetrySkew))
+		if err != nil {
+			return InferenceConfig{}, fmt.Errorf("invalid backend.inference.max_frame_telemetry_skew: %w", err)
+		}
+		cfg.MaxFrameTelemetrySkew = duration
+	}
 	if section.TelemetryNormalizationEnabled != nil {
 		cfg.TelemetryNormalizationEnabled = *section.TelemetryNormalizationEnabled
 	}
@@ -342,12 +337,6 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	}
 	if section.TargetSpeedDeadband != nil {
 		cfg.TargetSpeedDeadband = *section.TargetSpeedDeadband
-	}
-	if section.DeltaSpeedTrimGain != nil {
-		cfg.DeltaSpeedTrimGain = *section.DeltaSpeedTrimGain
-	}
-	if section.DeltaSpeedDeadband != nil {
-		cfg.DeltaSpeedDeadband = *section.DeltaSpeedDeadband
 	}
 	if section.HeadingErrorDeadbandDeg != nil {
 		cfg.HeadingErrorDeadbandDeg = *section.HeadingErrorDeadbandDeg
@@ -379,24 +368,14 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if section.MaxTargetSpeedKPH != nil {
 		cfg.MaxTargetSpeedKPH = *section.MaxTargetSpeedKPH
 	}
-	if section.MoveIntentThreshold != nil {
-		cfg.MoveIntentThreshold = *section.MoveIntentThreshold
-	}
-	if section.MoveIntentOnThreshold != nil {
-		cfg.MoveIntentOnThreshold = *section.MoveIntentOnThreshold
-	} else if section.MoveIntentThreshold != nil {
-		cfg.MoveIntentOnThreshold = *section.MoveIntentThreshold
-	}
-	if section.MoveIntentOffThreshold != nil {
-		cfg.MoveIntentOffThreshold = *section.MoveIntentOffThreshold
-	} else if section.MoveIntentThreshold != nil {
-		cfg.MoveIntentOffThreshold = clamp(*section.MoveIntentThreshold-0.15, 0.0, 1.0)
-	}
-	if section.MoveIntentHoldSpeedMax != nil {
-		cfg.MoveIntentHoldSpeedMax = *section.MoveIntentHoldSpeedMax
-	}
 	if section.SteerCommandRatePerSec != nil {
 		cfg.SteerCommandRatePerSec = *section.SteerCommandRatePerSec
+	}
+	if section.ThrottleHoldSeconds != nil {
+		cfg.ThrottleHoldSeconds = *section.ThrottleHoldSeconds
+	}
+	if section.ThrottleHoldMin != nil {
+		cfg.ThrottleHoldMin = *section.ThrottleHoldMin
 	}
 
 	if strings.TrimSpace(cfg.ModelDevice) == "" {
@@ -418,8 +397,8 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		ControlTargetNames:           append([]string(nil), cfg.ControlOutputNames...),
 		AuxTargetNames:               append([]string(nil), cfg.AuxOutputNames...),
 		LabelTolerance:               datasetConfig.LabelTolerance,
-		DeltaSpeedClip:               datasetConfig.DeltaSpeedClip,
-		DeltaSpeedNormalize:          datasetConfig.DeltaSpeedNormalize,
+		FutureSpeedDeltaClip:         datasetConfig.FutureSpeedDeltaClip,
+		FutureSpeedDeltaNormalize:    datasetConfig.FutureSpeedDeltaNormalize,
 		SyncFlashBrightnessThreshold: datasetConfig.SyncFlashBrightnessThreshold,
 		SyncFlashFrameLimit:          datasetConfig.SyncFlashFrameLimit,
 	}); err != nil {
@@ -436,6 +415,9 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	}
 	if cfg.AlignmentTolerance <= 0 {
 		return InferenceConfig{}, fmt.Errorf("backend inference alignment_tolerance must be > 0")
+	}
+	if cfg.MaxFrameTelemetrySkew <= 0 {
+		return InferenceConfig{}, fmt.Errorf("backend inference max_frame_telemetry_skew must be > 0")
 	}
 	if len(cfg.ImageOffsets) != cfg.WindowSize {
 		return InferenceConfig{}, fmt.Errorf("backend inference image_offsets length must match window_size")
@@ -488,12 +470,6 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if cfg.TargetSpeedDeadband < 0 {
 		return InferenceConfig{}, fmt.Errorf("backend inference target_speed_deadband must be >= 0")
 	}
-	if cfg.DeltaSpeedTrimGain < 0 {
-		return InferenceConfig{}, fmt.Errorf("backend inference delta_speed_trim_gain must be >= 0")
-	}
-	if cfg.DeltaSpeedDeadband < 0 {
-		return InferenceConfig{}, fmt.Errorf("backend inference delta_speed_deadband must be >= 0")
-	}
 	if cfg.HeadingErrorDeadbandDeg < 0 {
 		return InferenceConfig{}, fmt.Errorf("backend inference heading_error_deadband_deg must be >= 0")
 	}
@@ -524,23 +500,14 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if cfg.MaxTargetSpeedKPH < 0 {
 		return InferenceConfig{}, fmt.Errorf("backend inference max_target_speed_kph must be >= 0")
 	}
-	if cfg.MoveIntentThreshold < 0 || cfg.MoveIntentThreshold > 1 {
-		return InferenceConfig{}, fmt.Errorf("backend inference move_intent_threshold must be in [0,1]")
-	}
-	if cfg.MoveIntentOnThreshold < 0 || cfg.MoveIntentOnThreshold > 1 {
-		return InferenceConfig{}, fmt.Errorf("backend inference move_intent_on_threshold must be in [0,1]")
-	}
-	if cfg.MoveIntentOffThreshold < 0 || cfg.MoveIntentOffThreshold > 1 {
-		return InferenceConfig{}, fmt.Errorf("backend inference move_intent_off_threshold must be in [0,1]")
-	}
-	if cfg.MoveIntentOffThreshold > cfg.MoveIntentOnThreshold {
-		return InferenceConfig{}, fmt.Errorf("backend inference move_intent_off_threshold must be <= move_intent_on_threshold")
-	}
-	if cfg.MoveIntentHoldSpeedMax < 0 {
-		return InferenceConfig{}, fmt.Errorf("backend inference move_intent_hold_speed_max must be >= 0")
-	}
 	if cfg.SteerCommandRatePerSec < 0 {
 		return InferenceConfig{}, fmt.Errorf("backend inference steer_command_rate_per_second must be >= 0")
+	}
+	if cfg.ThrottleHoldSeconds < 0 {
+		return InferenceConfig{}, fmt.Errorf("backend inference throttle_hold_seconds must be >= 0")
+	}
+	if cfg.ThrottleHoldMin < 0 || cfg.ThrottleHoldMin > 1 {
+		return InferenceConfig{}, fmt.Errorf("backend inference throttle_hold_min must be in [0,1]")
 	}
 
 	return cfg, nil

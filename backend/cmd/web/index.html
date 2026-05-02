@@ -253,6 +253,12 @@
             min-height: 96px;
         }
 
+        .status-item.chain {
+            grid-column: span 2;
+            background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(56, 189, 248, 0.01));
+            border-color: rgba(56, 189, 248, 0.42);
+        }
+
         .status-item.span-2 {
             grid-column: span 2;
         }
@@ -276,6 +282,14 @@
             font-weight: 500;
             word-break: break-word;
             transition: color 140ms ease, text-shadow 140ms ease;
+        }
+
+        .status-value.chain {
+            font-size: 13px;
+            line-height: 1.42;
+            letter-spacing: 0;
+            font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+            white-space: pre-wrap;
         }
 
         .status-value.live-change {
@@ -672,6 +686,78 @@
             gap: 12px;
         }
 
+        .training-section {
+            display: grid;
+            gap: 12px;
+            padding: 14px;
+            border-radius: 16px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            background: rgba(7, 12, 22, 0.42);
+        }
+
+        .training-section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .training-section-header .section-heading {
+            margin: 0;
+        }
+
+        .field.override,
+        .key-card.override,
+        .state-input-card.override {
+            border-color: rgba(56, 189, 248, 0.42);
+            box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.14);
+        }
+
+        .field.with-reset {
+            padding: 12px;
+            border-radius: 14px;
+            border: 1px solid transparent;
+            background: rgba(15, 23, 42, 0.36);
+        }
+
+        .field-heading,
+        .key-card-heading,
+        .state-input-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .mini-button {
+            width: auto;
+            padding: 6px 9px;
+            border-radius: 10px;
+            font-size: 11px;
+            line-height: 1;
+        }
+
+        .override-marker {
+            display: none;
+            width: fit-content;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(56, 189, 248, 0.12);
+            border: 1px solid rgba(56, 189, 248, 0.32);
+            color: #bae6fd;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .training-section.override > .training-section-header .override-marker,
+        .field.override > .override-marker,
+        .key-card.override > .override-marker,
+        .state-input-card.override > .override-marker {
+            display: inline-flex;
+        }
+
         .key-grid.single-column {
             grid-template-columns: 1fr;
         }
@@ -685,13 +771,37 @@
             border: 1px solid var(--line);
         }
 
-        .key-card.override {
-            border-color: rgba(56, 189, 248, 0.34);
-            box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.12);
-        }
-
         .key-card .field-note {
             display: block;
+        }
+
+        .state-input-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .state-input-card {
+            display: grid;
+            gap: 10px;
+            padding: 12px;
+            border-radius: 14px;
+            background: var(--panel-strong);
+            border: 1px solid var(--line);
+        }
+
+        .toggle-line {
+            display: inline-flex;
+            width: fit-content;
+            align-items: center;
+            gap: 8px;
+            color: var(--text);
+        }
+
+        .toggle-line input {
+            width: 18px;
+            height: 18px;
+            margin: 0;
         }
 
         .runtime-meta-grid {
@@ -761,6 +871,25 @@
             font-size: 12px;
             line-height: 1.45;
             word-break: break-word;
+        }
+
+        .job-summary-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .override-chip {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: rgba(56, 189, 248, 0.10);
+            border: 1px solid rgba(56, 189, 248, 0.24);
+            color: #dbeafe;
+            font-size: 12px;
+            line-height: 1.2;
         }
 
         .job-detail-grid {
@@ -865,6 +994,7 @@
             .controls-row,
             .inspector-toolbar,
             .key-grid,
+            .state-input-grid,
             .runtime-meta-grid,
             .job-detail-grid {
                 grid-template-columns: 1fr;
@@ -1027,11 +1157,11 @@
                             <div id="inference-state" class="status-value">idle</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Speed</span>
+                            <span class="status-label">Vehicle Speed</span>
                             <div id="inference-steering" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Yaw</span>
+                            <span class="status-label">Vehicle Yaw</span>
                             <div id="inference-future-yaw-delta" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
@@ -1039,12 +1169,48 @@
                             <div id="inference-future-yaw" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Steering</span>
+                            <span class="status-label">Vehicle Steering</span>
                             <div id="inference-current-yaw" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Acceleration</span>
+                            <span class="status-label">Route Heading Error (deg)</span>
                             <div id="inference-heading-error" class="status-value">0.0000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Brake Pressure Avg</span>
+                            <div id="fivem-brake" class="status-value">0.0000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Actual Steering Cmd</span>
+                            <div id="fivem-actual-steering" class="status-value">0.0000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Actual Acceleration</span>
+                            <div id="fivem-actual-acceleration" class="status-value">0.0000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Actual Brake</span>
+                            <div id="fivem-actual-brake" class="status-value">0.0000</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Nav Intent</span>
+                            <div id="fivem-nav-intent" class="status-value">unknown</div>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Nav Direction / Dist</span>
+                            <div id="fivem-nav-code" class="status-value">0 / 0.000</div>
+                        </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Route Delta</span>
+                            <div id="fivem-route-delta" class="status-value">forward=0.000 heading=0.000 distance=0.000</div>
+                        </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Nav One-Hot</span>
+                            <div id="fivem-nav-onehot" class="status-value">unknown=1 straight=0 left=0 right=0 reroute=0</div>
+                        </div>
+                        <div class="status-item chain">
+                            <span class="status-label">Inference Chain</span>
+                            <div id="inference-control-chain" class="status-value chain">none</div>
                         </div>
                         <div class="status-item">
                             <span class="status-label">Telemetry Age</span>
@@ -1052,11 +1218,11 @@
                         </div>
                         <div class="status-item">
                             <span class="status-label">Game Time</span>
-                            <div id="inference-delta-speed" class="status-value">0.0000</div>
+                            <div id="inference-game-time" class="status-value">0.0000</div>
                         </div>
                         <div class="status-item">
                             <span class="status-label">FiveM Link</span>
-                            <div id="inference-move-intent" class="status-value">None</div>
+                            <div id="inference-fivem-link" class="status-value">None</div>
                         </div>
                     </div>
                 </div>
@@ -1080,7 +1246,7 @@
                             <div id="inference-control-semantics" class="status-value">unknown</div>
                         </div>
                         <div class="status-item">
-                            <span class="status-label">Final Command</span>
+                            <span class="status-label">Processor Output</span>
                             <div id="inference-debug-frames" class="status-value">0 / 0</div>
                         </div>
                         <div class="status-item span-2">
@@ -1096,26 +1262,34 @@
                             <div id="inference-debug-dir" class="status-value">None</div>
                         </div>
                         <div class="status-item span-2">
+                            <span class="status-label">Raw State Inputs</span>
+                            <div id="inference-raw-state-inputs" class="status-value">None</div>
+                        </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Normalized State Inputs</span>
+                            <div id="inference-normalized-state-inputs" class="status-value">None</div>
+                        </div>
+                        <div class="status-item span-2">
                             <span class="status-label">Inference Error</span>
                             <div id="inference-error" class="status-value">None</div>
                         </div>
                     </div>
                 </div>
                 <div>
-                    <h3 class="section-heading">Actuator Processor</h3>
-                    <div class="inference-grid">
-                        <div class="status-item">
-                            <span class="status-label">Source</span>
-                            <div id="translation-mode" class="status-value">idle</div>
-                        </div>
-                        <div class="status-item span-2">
-                            <span class="status-label">Raw Input</span>
-                            <div id="translation-command" class="status-value">None</div>
-                        </div>
-                        <div class="status-item">
-                            <span class="status-label">Final Output</span>
-                            <div id="translation-submit-status" class="status-value">idle</div>
-                        </div>
+                        <h3 class="section-heading">Actuator Processor</h3>
+                        <div class="inference-grid">
+                            <div class="status-item">
+                                <span class="status-label">Source</span>
+                                <div id="translation-mode" class="status-value">idle</div>
+                            </div>
+                            <div class="status-item span-2">
+                                <span class="status-label">Planner Raw</span>
+                                <div id="translation-command" class="status-value">None</div>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Clipped/Filtered Output</span>
+                                <div id="translation-submit-status" class="status-value">idle</div>
+                            </div>
                         <div class="status-item">
                             <span class="status-label">Clamp / Deadzone</span>
                             <div id="translation-heading" class="status-value">0.000 / 0.000</div>
@@ -1157,8 +1331,94 @@
                             <span class="status-label">Applied Input</span>
                             <div id="actuator-applied" class="status-value">steer=0.000 throttle=0.000</div>
                         </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Speed Governor</span>
+                            <div id="actuator-speed-governor" class="status-value">None</div>
+                        </div>
+                        <div class="status-item chain">
+                            <span class="status-label">Actuator Command Path</span>
+                            <div id="actuator-control-chain" class="status-value chain">none</div>
+                        </div>
+                        <div class="status-item span-2">
+                            <span class="status-label">Brake Guard</span>
+                            <div id="actuator-brake-guard" class="status-value">None</div>
+                        </div>
                     </div>
                 </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-title-row">
+                <h2>Live Translation Tuning</h2>
+                <span class="subtle">Tune planner-to-controller scalers without restarting services.</span>
+            </div>
+            <p class="muted">Adjust these controls when steering/throttle responsiveness or hold timing need live tuning.</p>
+            <div class="tuning-grid">
+                <label class="field" for="translation-tuning-heading-deadband">
+                    <span class="status-label">Heading Deadband Deg</span>
+                    <input id="translation-tuning-heading-deadband" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="translation-saved-heading-deadband">2.500</span></span>
+                </label>
+                <label class="field" for="translation-tuning-steer-deadzone">
+                    <span class="status-label">Steer Deadzone</span>
+                    <input id="translation-tuning-steer-deadzone" type="number" step="0.01" min="0" max="1">
+                    <span class="field-note">Saved <span id="translation-saved-steer-deadzone">0.020</span></span>
+                </label>
+                <label class="field" for="translation-tuning-max-steer-scale">
+                    <span class="status-label">Max Steer Scale</span>
+                    <input id="translation-tuning-max-steer-scale" type="number" step="0.01" min="0.01" max="1">
+                    <span class="field-note">Saved <span id="translation-saved-max-steer-scale">1.000</span></span>
+                </label>
+                <label class="field" for="translation-tuning-steer-output-gain">
+                    <span class="status-label">Steer Output Gain</span>
+                    <input id="translation-tuning-steer-output-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="translation-saved-steer-output-gain">1.000</span></span>
+                </label>
+                <label class="field" for="translation-tuning-steer-low-gain">
+                    <span class="status-label">Steer Gain Low</span>
+                    <input id="translation-tuning-steer-low-gain" type="number" step="0.01" min="0">
+                    <span class="field-note">Saved <span id="translation-saved-steer-low-gain">1.350</span></span>
+                </label>
+                <label class="field" for="translation-tuning-steer-high-gain">
+                    <span class="status-label">Steer Gain High</span>
+                    <input id="translation-tuning-steer-high-gain" type="number" step="0.01" min="0">
+                    <span class="field-note">Saved <span id="translation-saved-steer-high-gain">0.750</span></span>
+                </label>
+                <label class="field" for="translation-tuning-steer-fade-speed">
+                    <span class="status-label">Steer Fade Speed MPS</span>
+                    <input id="translation-tuning-steer-fade-speed" type="number" step="0.1" min="0.01">
+                    <span class="field-note">Saved <span id="translation-saved-steer-fade-speed">5.000</span></span>
+                </label>
+                <label class="field" for="translation-tuning-throttle-gain">
+                    <span class="status-label">Throttle Gain</span>
+                    <input id="translation-tuning-throttle-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="translation-saved-throttle-gain">1.000</span></span>
+                </label>
+                <label class="field" for="translation-tuning-throttle-hold-seconds">
+                    <span class="status-label">Throttle Hold Seconds</span>
+                    <input id="translation-tuning-throttle-hold-seconds" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="translation-saved-throttle-hold-seconds">2.000</span></span>
+                </label>
+                <label class="field" for="translation-tuning-throttle-hold-min">
+                    <span class="status-label">Throttle Hold Min</span>
+                    <input id="translation-tuning-throttle-hold-min" type="number" step="0.01" min="0" max="1">
+                    <span class="field-note">Saved <span id="translation-saved-throttle-hold-min">0.120</span></span>
+                </label>
+                <label class="field" for="translation-tuning-max-target-speed-kph">
+                    <span class="status-label">Max Target Speed KPH</span>
+                    <input id="translation-tuning-max-target-speed-kph" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="translation-saved-max-target-speed-kph">17.000</span></span>
+                </label>
+            </div>
+            <div class="tuning-actions">
+                <button id="translation-tuning-apply" class="secondary">Apply Translation Tuning</button>
+                <button id="translation-tuning-reset" class="secondary">Reset Translation Tuning</button>
+                <button id="translation-tuning-save" class="secondary">Save Translation Tuning</button>
+            </div>
+            <div class="tuning-meta">
+                <span id="translation-tuning-status">Live translation tuning unavailable.</span>
+                <span id="translation-tuning-config">Config file: unavailable</span>
             </div>
         </section>
 
@@ -1169,30 +1429,55 @@
             </div>
             <p class="muted">These controls are on the active planner path. Increase steering gain and throttle gain if the controller feels too weak. Use throttle floor to keep small positive throttle from collapsing to zero.</p>
             <div class="tuning-grid">
-                <label class="field" for="translation-tuning-target-speed-gain">
+                <label class="field" for="actuator-tuning-steering-gain">
                     <span class="status-label">Steering Gain</span>
-                    <input id="translation-tuning-target-speed-gain" type="number" step="0.01" min="0.01">
-                    <span class="field-note">Saved <span id="translation-saved-target-speed-gain">1.000</span></span>
+                    <input id="actuator-tuning-steering-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="actuator-saved-steering-gain">1.000</span></span>
                 </label>
-                <label class="field" for="translation-tuning-throttle-gain">
+                <label class="field" for="actuator-tuning-throttle-gain">
                     <span class="status-label">Throttle Gain</span>
-                    <input id="translation-tuning-throttle-gain" type="number" step="0.01" min="0.01">
-                    <span class="field-note">Saved <span id="translation-saved-throttle-gain">1.000</span></span>
+                    <input id="actuator-tuning-throttle-gain" type="number" step="0.01" min="0.01">
+                    <span class="field-note">Saved <span id="actuator-saved-throttle-gain">1.000</span></span>
                 </label>
-                <label class="field" for="translation-tuning-throttle-hold-min">
+                <label class="field" for="actuator-tuning-throttle-floor">
                     <span class="status-label">Throttle Floor</span>
-                    <input id="translation-tuning-throttle-hold-min" type="number" step="0.01" min="0" max="1">
-                    <span class="field-note">Saved <span id="translation-saved-throttle-hold-min">0.000</span></span>
+                    <input id="actuator-tuning-throttle-floor" type="number" step="0.01" min="0" max="1">
+                    <span class="field-note">Saved <span id="actuator-saved-throttle-floor">0.000</span></span>
+                </label>
+                <label class="field" for="actuator-tuning-speed-limit">
+                    <span class="status-label">Speed Limit KPH</span>
+                    <input id="actuator-tuning-speed-limit" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="actuator-saved-speed-limit">17.000</span></span>
+                </label>
+                <label class="field" for="actuator-tuning-overspeed-margin">
+                    <span class="status-label">Overspeed Margin KPH</span>
+                    <input id="actuator-tuning-overspeed-margin" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="actuator-saved-overspeed-margin">2.000</span></span>
+                </label>
+                <label class="field" for="actuator-tuning-overspeed-brake">
+                    <span class="status-label">Overspeed Brake</span>
+                    <input id="actuator-tuning-overspeed-brake" type="number" step="0.01" min="0" max="1">
+                    <span class="field-note">Saved <span id="actuator-saved-overspeed-brake">0.250</span></span>
+                </label>
+                <label class="field" for="actuator-tuning-model-brake-threshold">
+                    <span class="status-label">Model Brake Threshold</span>
+                    <input id="actuator-tuning-model-brake-threshold" type="number" step="0.01" min="0.51" max="1">
+                    <span class="field-note">Saved <span id="actuator-saved-model-brake-threshold">0.550</span></span>
+                </label>
+                <label class="field" for="actuator-tuning-reverse-lockout">
+                    <span class="status-label">Reverse Lockout KPH</span>
+                    <input id="actuator-tuning-reverse-lockout" type="number" step="0.1" min="0">
+                    <span class="field-note">Saved <span id="actuator-saved-reverse-lockout">1.000</span></span>
                 </label>
             </div>
             <div class="tuning-actions">
-                <button id="translation-tuning-apply" class="secondary">Apply Live Tuning</button>
-                <button id="translation-tuning-reset" class="secondary">Reset Live Tuning</button>
-                <button id="translation-tuning-save" class="secondary">Save Tuning</button>
+                <button id="actuator-tuning-apply" class="secondary">Apply Live Tuning</button>
+                <button id="actuator-tuning-reset" class="secondary">Reset Live Tuning</button>
+                <button id="actuator-tuning-save" class="secondary">Save Tuning</button>
             </div>
             <div class="tuning-meta">
-                <span id="translation-tuning-status">Live tuning unavailable.</span>
-                <span id="translation-tuning-config">Config file: unavailable</span>
+                <span id="actuator-tuning-status">Live tuning unavailable.</span>
+                <span id="actuator-tuning-config">Config file: unavailable</span>
             </div>
         </section>
 
@@ -1346,73 +1631,104 @@
                         <span class="subtle">Queue one training run with optimizer, sampling, fusion, and dataset split overrides.</span>
                     </div>
                     <div class="controls">
-                        <div class="controls-row">
-                            <label class="field" for="training-name">
-                                <span class="status-label">Name</span>
-                                <input id="training-name" type="text" placeholder="future-yaw sweep a">
-                            </label>
-                            <label class="field" for="training-learning-rate">
-                                <span class="status-label">Learning Rate</span>
-                                <input id="training-learning-rate" type="number" step="0.000001" min="0">
-                            </label>
-                            <label class="field" for="training-epochs">
-                                <span class="status-label">Epochs</span>
-                                <input id="training-epochs" type="number" step="1" min="1">
+                        <div class="training-section">
+                            <div class="training-section-header">
+                                <h3 class="section-heading">Basics</h3>
+                                <span class="override-marker">Changed</span>
+                            </div>
+                            <div class="controls-row">
+                                <label class="field" for="training-name">
+                                    <span class="status-label">Name</span>
+                                    <input id="training-name" type="text" placeholder="future-yaw sweep a">
+                                </label>
+                                <label class="field with-reset" for="training-learning-rate">
+                                    <span class="field-heading">
+                                        <span class="status-label">Learning Rate</span>
+                                        <button class="ghost mini-button" type="button" data-training-reset="training-learning-rate">Reset</button>
+                                    </span>
+                                    <input id="training-learning-rate" type="number" step="0.000001" min="0">
+                                    <span class="field-note" data-training-default-note="training-learning-rate"></span>
+                                </label>
+                                <label class="field with-reset" for="training-epochs">
+                                    <span class="field-heading">
+                                        <span class="status-label">Epochs</span>
+                                        <button class="ghost mini-button" type="button" data-training-reset="training-epochs">Reset</button>
+                                    </span>
+                                    <input id="training-epochs" type="number" step="1" min="1">
+                                    <span class="field-note" data-training-default-note="training-epochs"></span>
+                                </label>
+                            </div>
+                            <div class="controls-row">
+                                <label class="field with-reset" for="training-smooth-l1-beta">
+                                    <span class="field-heading">
+                                        <span class="status-label">Smooth L1 Beta</span>
+                                        <button class="ghost mini-button" type="button" data-training-reset="training-smooth-l1-beta">Reset</button>
+                                    </span>
+                                    <input id="training-smooth-l1-beta" type="number" step="0.000001" min="0">
+                                    <span class="field-note" data-training-default-note="training-smooth-l1-beta"></span>
+                                </label>
+                                <label class="field with-reset" for="training-early-stopping-metric">
+                                    <span class="field-heading">
+                                        <span class="status-label">Early Stopping Metric</span>
+                                        <button class="ghost mini-button" type="button" data-training-reset="training-early-stopping-metric">Reset</button>
+                                    </span>
+                                    <select id="training-early-stopping-metric"></select>
+                                    <span class="field-note" data-training-default-note="training-early-stopping-metric"></span>
+                                </label>
+                            </div>
+                            <label class="field" for="training-notes">
+                                <span class="status-label">Notes</span>
+                                <textarea id="training-notes" placeholder="Why this run exists, what changed, and what you expect to learn."></textarea>
                             </label>
                         </div>
-                        <label class="field" for="training-notes">
-                            <span class="status-label">Notes</span>
-                            <textarea id="training-notes" placeholder="Why this run exists, what changed, and what you expect to learn."></textarea>
-                        </label>
-                        <div class="stack">
-                            <div>
-                                <h3 class="section-heading">Head Loss Weights</h3>
-                                <div id="training-loss-weights" class="key-grid"></div>
-                            </div>
-                            <div>
-                                <h3 class="section-heading">Consistency Weights</h3>
-                                <div id="training-consistency" class="key-grid"></div>
-                            </div>
-                            <div>
-                                <div class="card-title-row">
-                                    <h3 class="section-heading">Yaw Loss Weighting</h3>
-                                    <label class="status-label">
-                                        <input id="training-yaw-loss-weighting-enabled" type="checkbox">
-                                        Enabled
-                                    </label>
-                                </div>
-                                <div id="training-yaw-loss-weighting" class="key-grid"></div>
-                            </div>
-                            <div>
-                                <div class="card-title-row">
-                                    <h3 class="section-heading">Turn Oversampling</h3>
-                                    <label class="status-label">
-                                        <input id="training-turn-oversampling-enabled" type="checkbox">
-                                        Enabled
-                                    </label>
-                                </div>
-                                <div id="training-turn-oversampling" class="key-grid"></div>
-                            </div>
-                            <div>
+                        <div class="training-section">
+                            <div class="training-section-header">
                                 <h3 class="section-heading">Dataset Split</h3>
+                                <span class="override-marker">Changed</span>
+                            </div>
                             <div class="controls-row controls-row-halves">
-                                <div class="field">
-                                    <span class="status-label">Width Multiplier</span>
+                                <label class="field with-reset" for="training-width-multiplier">
+                                    <span class="field-heading">
+                                        <span class="status-label">Width Multiplier</span>
+                                        <button class="ghost mini-button" type="button" data-training-reset="training-width-multiplier">Reset</button>
+                                    </span>
                                     <input id="training-width-multiplier" type="number" step="0.1" min="0.1" placeholder="1.5">
-                                </div>
+                                    <span class="field-note" data-training-default-note="training-width-multiplier"></span>
+                                </label>
                                 <div class="field">
                                     <span class="status-label">Training Runs</span>
                                     <div id="training-train-run-list" class="training-run-list"></div>
                                 </div>
                                 <div class="field">
                                     <span class="status-label">Validation Runs</span>
-                                        <div id="training-val-run-list" class="training-run-list"></div>
-                                    </div>
+                                    <div id="training-val-run-list" class="training-run-list"></div>
                                 </div>
                             </div>
-                            <div>
-                                <h3 class="section-heading">State Inputs</h3>
-                                <div id="training-state-inputs" class="stack"></div>
+                        </div>
+                        <div class="stack">
+                            <div class="training-section">
+                                <div class="training-section-header">
+                                    <h3 class="section-heading">Target Loss Weights</h3>
+                                    <span class="override-marker">Changed</span>
+                                </div>
+                                <div id="training-loss-weights" class="key-grid"></div>
+                            </div>
+                            <div class="training-section">
+                                <div class="training-section-header">
+                                    <h3 class="section-heading">Turn Oversampling</h3>
+                                    <label class="toggle-line">
+                                        <input id="training-turn-oversampling-enabled" type="checkbox">
+                                        Enabled
+                                    </label>
+                                </div>
+                                <div id="training-turn-oversampling" class="key-grid"></div>
+                            </div>
+                            <div class="training-section">
+                                <div class="training-section-header">
+                                    <h3 class="section-heading">State Inputs</h3>
+                                    <span class="override-marker">Changed</span>
+                                </div>
+                                <div id="training-state-inputs" class="state-input-grid"></div>
                             </div>
                         </div>
                         <div class="button-grid">
@@ -1432,7 +1748,7 @@
                     <div class="controls">
                         <label class="field" for="training-batch-json">
                             <span class="status-label">Job Spec JSON</span>
-                            <textarea id="training-batch-json" placeholder='[{"name":"yaw","epochs":15,"learningRate":0.001,"widthMultiplier":1.5,"trainRunIds":["2026-04-21_07-35-15PM_tga5xm"],"valRunIds":["2026-04-21_01-15-24AM_3t2ph2"],"turnOversampling":{"enabled":true},"stateInputs":{"currentSpeed":{"enabled":true,"heads":["future_speed","delta_speed"]}}}]'></textarea>
+                            <textarea id="training-batch-json" placeholder='[{"name":"yaw","epochs":15,"learningRate":0.001,"widthMultiplier":1.5,"trainRunIds":["2026-04-21_07-35-15PM_tga5xm"],"valRunIds":["2026-04-21_01-15-24AM_3t2ph2"],"turnOversampling":{"enabled":true},"stateInputs":{"currentSpeed":{"enabled":true},"routeForwardDelta":{"enabled":true}}}]'></textarea>
                         </label>
                         <div class="button-grid">
                             <button id="training-load-yaw-batch" class="ghost" type="button">Load 4 Yaw Samples</button>

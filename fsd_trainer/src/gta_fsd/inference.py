@@ -11,38 +11,35 @@ import torch
 
 from config import (
     DEFAULT_CONTROL_TARGET_NAMES,
+    DEFAULT_AUX_TARGET_NAMES,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
     normalize_windows_drive_path,
     parse_dataset_window,
 )
 from dataset import FsdDataset
-from heads import (
-    head_layout_metadata,
-    head_specs_metadata,
-    resolve_checkpoint_head_specs,
-    validate_checkpoint_head_layout,
-)
-from model_output import (
-    single_control_prediction_from_output,
-    single_prediction_from_output,
-    single_tensor_mapping,
-)
 from models.planner import DrivingCNN
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
+    state_input_definition,
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
 from target_transforms import (
-    legacy_delta_speed_target_transform,
-    resolve_checkpoint_delta_speed_target_transform,
+    TargetTransform,
+    denormalize_target_tensor,
+    target_transform_metadata,
+    resolve_checkpoint_target_transforms,
 )
 
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "train_config.toml"
 PLANNER_FORMAT = "temporal_telemetry_gru_v1"
+LEGACY_SCALAR_HEAD_ERROR = (
+    "Legacy scalar-head planner has been removed. "
+    "Use temporal planner outputs pred_controls/pred_aux."
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +50,7 @@ class InferenceConfig:
     run_id: str | None
     sample_index: int
     output_json: bool
+    metadata_only: bool
     image_width: int
     image_height: int
     window_size: int
@@ -103,6 +101,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print structured JSON instead of plain text.",
     )
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Load checkpoint metadata without running dataset sample inference.",
+    )
     return parser.parse_args()
 
 
@@ -130,6 +133,7 @@ def load_config(path: Path) -> InferenceConfig:
         run_id=run_id,
         sample_index=int(inference_raw.get("sample_index", 0)),
         output_json=bool(inference_raw.get("output_json", False)),
+        metadata_only=bool(inference_raw.get("metadata_only", False)),
         image_width=image_width,
         image_height=image_height,
         window_size=window_size,
@@ -146,6 +150,7 @@ def resolve_config(args: argparse.Namespace) -> InferenceConfig:
     run_id = args.run_id if args.run_id is not None else file_config.run_id
     sample_index = args.sample_index if args.sample_index is not None else file_config.sample_index
     output_json = args.output_json or file_config.output_json
+    metadata_only = bool(args.metadata_only or file_config.metadata_only)
 
     if device not in SUPPORTED_DEVICES:
         raise ValueError(f"device must be one of: {', '.join(sorted(SUPPORTED_DEVICES))}")
@@ -157,6 +162,7 @@ def resolve_config(args: argparse.Namespace) -> InferenceConfig:
         run_id=run_id,
         sample_index=sample_index,
         output_json=output_json,
+        metadata_only=metadata_only,
         image_width=file_config.image_width,
         image_height=file_config.image_height,
         window_size=file_config.window_size,
@@ -210,32 +216,9 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint is missing model_state_dict: {checkpoint_path}")
     planner_format = str(checkpoint.get("planner_format", "")).strip()
-    if planner_format and planner_format != PLANNER_FORMAT:
-        raise ValueError(f"Unsupported planner_format={planner_format} in {checkpoint_path}")
-    if not planner_format:
-        validate_checkpoint_head_layout(checkpoint)
+    if planner_format != PLANNER_FORMAT:
+        raise ValueError(f"{LEGACY_SCALAR_HEAD_ERROR} checkpoint={checkpoint_path}")
     return checkpoint
-
-
-def remap_legacy_state_dict_keys(state_dict: Mapping[str, Any]) -> dict[str, Any]:
-    remapped: dict[str, Any] = {}
-    legacy_head_prefixes = (
-        "heads.steer.",
-        "heads.future_steer.",
-        "heads.steering.",
-    )
-    for key, value in state_dict.items():
-        new_key = key
-        for legacy_prefix in legacy_head_prefixes:
-            if key.startswith(legacy_prefix):
-                new_key = f"heads.future_yaw_delta.{key[len(legacy_prefix):]}"
-                break
-        if key.startswith("current_speed_encoder."):
-            new_key = f"state_input_encoders.current_speed.{key[len('current_speed_encoder.'):]}"
-        elif key.startswith("route_forward_delta_encoder."):
-            new_key = f"state_input_encoders.route_forward_delta.{key[len('route_forward_delta_encoder.'):]}"
-        remapped[new_key] = value
-    return remapped
 
 
 def resolve_checkpoint_width_multiplier(checkpoint: dict[str, Any]) -> float:
@@ -253,6 +236,98 @@ def resolve_checkpoint_width_multiplier(checkpoint: dict[str, Any]) -> float:
     return DEFAULT_WIDTH_MULTIPLIER
 
 
+def resolve_checkpoint_dropout(checkpoint: dict[str, Any], *, fallback: float = 0.1) -> float:
+    model_metadata = checkpoint.get("model", {})
+    if isinstance(model_metadata, dict) and model_metadata.get("dropout") is not None:
+        return float(model_metadata["dropout"])
+    return float(fallback)
+
+
+def resolve_checkpoint_visual_temporal(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    model_metadata = checkpoint.get("model", {})
+    raw = model_metadata.get("visual_temporal", {}) if isinstance(model_metadata, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "type": str(raw.get("type", "gru")).strip().lower(),
+        "hidden_dim": int(raw.get("hidden_dim", 256)),
+        "num_layers": int(raw.get("num_layers", 1)),
+        "bidirectional": bool(raw.get("bidirectional", False)),
+        "dropout": float(raw.get("dropout", 0.0)),
+        "image_order": str(raw.get("image_order", "oldest_to_newest")),
+    }
+
+
+def resolve_checkpoint_horizon_decoder(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    model_metadata = checkpoint.get("model", {})
+    raw = model_metadata.get("horizon_decoder", {}) if isinstance(model_metadata, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "horizon_embed_dim": int(raw.get("horizon_embed_dim", 32)),
+        "hidden_dim": int(raw.get("hidden_dim", 256)),
+        "num_layers": int(raw.get("num_layers", 2)),
+        "dropout": float(raw.get("dropout", 0.1)),
+    }
+
+
+def _decoder_output_bias(state_dict: Mapping[str, Any], prefix: str) -> torch.Tensor | None:
+    candidates: list[tuple[int, torch.Tensor]] = []
+    for key, value in state_dict.items():
+        if not key.startswith(prefix) or not key.endswith(".bias") or not isinstance(value, torch.Tensor):
+            continue
+        parts = key.split(".")
+        if len(parts) == 3 and parts[1].isdigit():
+            candidates.append((int(parts[1]), value))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def resolve_checkpoint_aux_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
+    names = checkpoint.get("aux_target_names")
+    if isinstance(names, list) and names:
+        normalized = [str(name).strip() for name in names if str(name).strip()]
+        if normalized:
+            return normalized
+
+    if future_steps <= 0:
+        return list(DEFAULT_AUX_TARGET_NAMES)
+
+    state_dict = checkpoint.get("model_state_dict", {})
+    aux_decoder_bias = _decoder_output_bias(state_dict, "aux_decoder.")
+    if isinstance(aux_decoder_bias, torch.Tensor) and aux_decoder_bias.ndim == 1 and aux_decoder_bias.numel() > 0:
+        aux_dim = int(aux_decoder_bias.numel())
+        if aux_dim == 4:
+            return ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"]
+        if aux_dim == 3:
+            return ["future_speed", "future_yaw_delta", "future_yaw_rate"]
+        return [f"future_aux_{index}" for index in range(aux_dim)]
+    return list(DEFAULT_AUX_TARGET_NAMES)
+
+
+def resolve_checkpoint_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+    control_target_names = resolve_checkpoint_control_target_names(
+        checkpoint,
+        future_steps=len(future_offsets) if future_steps <= 0 else future_steps,
+    )
+    aux_target_names = resolve_checkpoint_aux_target_names(
+        checkpoint,
+        future_steps=len(future_offsets) if future_steps <= 0 else future_steps,
+    )
+    return tuple(control_target_names), tuple(aux_target_names)
+
+
+def resolve_checkpoint_target_transform_registry(checkpoint: dict[str, Any]) -> dict[str, TargetTransform]:
+    future_steps = len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+    control_target_names, aux_target_names = resolve_checkpoint_target_names(checkpoint, future_steps=future_steps)
+    target_names = tuple(control_target_names) + tuple(aux_target_names)
+    return resolve_checkpoint_target_transforms(checkpoint, target_names)
+
+
 def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
     planner_format = str(checkpoint.get("planner_format", "")).strip()
     width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
@@ -268,10 +343,18 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
         control_target_names = resolve_checkpoint_control_target_names(checkpoint, future_steps=len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]))
         telemetry_offsets = checkpoint.get("telemetry_offsets") or [-8, -7, -6, -5, -4, -3, -2, -1, 0]
         future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+        aux_target_names = resolve_checkpoint_aux_target_names(
+            checkpoint,
+            future_steps=len(future_offsets),
+        )
+        state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
         model_metadata = checkpoint.get("model", {})
         telemetry_hidden_dim = 128
         if isinstance(model_metadata, dict) and model_metadata.get("telemetry_hidden_dim") is not None:
             telemetry_hidden_dim = int(model_metadata["telemetry_hidden_dim"])
+        dropout = resolve_checkpoint_dropout(checkpoint)
+        visual_temporal = resolve_checkpoint_visual_temporal(checkpoint)
+        horizon_decoder = resolve_checkpoint_horizon_decoder(checkpoint)
         model = DrivingCNN(
             frame_count=frame_count,
             telemetry_feature_dim=len(telemetry_feature_names),
@@ -279,16 +362,28 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
             telemetry_sequence_length=len(telemetry_offsets),
             horizon=len(future_offsets),
             control_dim=len(control_target_names),
+            aux_dim=len(aux_target_names),
+            state_input_dim=len(state_input_config.enabled_keys()),
             width_multiplier=width_multiplier,
+            dropout=dropout,
+            visual_temporal_enabled=bool(visual_temporal["enabled"]),
+            visual_temporal_type=str(visual_temporal["type"]),
+            visual_temporal_hidden_dim=int(visual_temporal["hidden_dim"]),
+            visual_temporal_num_layers=int(visual_temporal["num_layers"]),
+            visual_temporal_bidirectional=bool(visual_temporal["bidirectional"]),
+            visual_temporal_dropout=float(visual_temporal["dropout"]),
+            horizon_decoder_enabled=bool(horizon_decoder["enabled"]),
+            horizon_embed_dim=int(horizon_decoder["horizon_embed_dim"]),
+            horizon_decoder_hidden_dim=int(horizon_decoder["hidden_dim"]),
+            horizon_decoder_num_layers=int(horizon_decoder["num_layers"]),
+            horizon_decoder_dropout=float(horizon_decoder["dropout"]),
         ).to(device)
         model.load_state_dict(checkpoint["model_state_dict"])
+        model.state_input_config = state_input_config
         model.eval()
         return model
 
-    raise ValueError(
-        "Legacy scalar-head checkpoints are no longer supported by the live runtime. "
-        "Load a temporal_telemetry_gru_v1 planner checkpoint instead."
-    )
+    raise ValueError(LEGACY_SCALAR_HEAD_ERROR)
 
 
 def resolve_checkpoint_control_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
@@ -297,13 +392,13 @@ def resolve_checkpoint_control_target_names(checkpoint: dict[str, Any], *, futur
         return [str(name).strip() for name in names if str(name).strip()]
 
     state_dict = checkpoint.get("model_state_dict", {})
-    control_head_bias = state_dict.get("control_head.bias")
-    if isinstance(control_head_bias, torch.Tensor) and future_steps > 0:
-        control_dim = int(control_head_bias.numel()) // future_steps
-        if control_dim == 2:
-            return ["steering", "acceleration"]
+    control_decoder_bias = _decoder_output_bias(state_dict, "control_decoder.")
+    if isinstance(control_decoder_bias, torch.Tensor) and control_decoder_bias.ndim == 1:
+        control_dim = int(control_decoder_bias.numel())
         if control_dim == len(DEFAULT_CONTROL_TARGET_NAMES):
             return list(DEFAULT_CONTROL_TARGET_NAMES)
+        if control_dim == 2:
+            return ["steering", "acceleration"]
     return ["steering", "acceleration"]
 
 
@@ -348,46 +443,71 @@ def run_sample_inference(
     sample_index: int,
     image_size: tuple[int, int],
     expected_window_size: int,
+    control_target_names: tuple[str, ...],
+    aux_target_names: tuple[str, ...],
+    target_transforms: dict[str, TargetTransform] | None,
 ) -> dict[str, Any]:
     dataset = FsdDataset(
         run_id=run_id,
         data_root=data_root,
         image_size=image_size,
         expected_window_size=expected_window_size,
-        state_input_config=model.state_input_config,
-        head_specs=model.head_specs,
+        control_target_names=control_target_names,
+        aux_target_names=aux_target_names,
+        target_transforms=target_transforms,
+        state_input_config=getattr(model, "state_input_config", None),
     )
     if sample_index < 0 or sample_index >= len(dataset):
         raise IndexError(f"sample_index out of range: {sample_index}, dataset size={len(dataset)}")
 
-    x, state_inputs, targets = dataset[sample_index]
-    sample_meta = dataset.samples[sample_index]
-    x = x.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-    model_state_inputs = {
-        key: value.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-        for key, value in state_inputs.items()
-    }
+    images, telemetry, state_inputs, target_controls, target_aux = dataset[sample_index]
+    sample_meta = dataset._load_sample(sample_index)
+    images = images.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    telemetry = telemetry.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+    state_inputs = state_inputs.unsqueeze(0).to(device, non_blocking=device.type == "cuda")
 
     with torch.no_grad():
-        output = model(x, state_inputs=model_state_inputs)
-    head_specs = model.head_specs
-    delta_speed_transform = getattr(model, "delta_speed_target_transform", legacy_delta_speed_target_transform())
+        output = model(images, telemetry, state_inputs)
+
+    pred_controls = denormalize_target_tensor(
+        output["pred_controls"],
+        control_target_names,
+        target_transforms or {},
+    )
+    pred_aux = denormalize_target_tensor(
+        output["pred_aux"],
+        aux_target_names,
+        target_transforms or {},
+    )
+    denorm_target_controls = denormalize_target_tensor(
+        target_controls,
+        control_target_names,
+        target_transforms or {},
+    )
+    denorm_target_aux = denormalize_target_tensor(
+        target_aux,
+        aux_target_names,
+        target_transforms or {},
+    )
 
     return {
         "sample_index": sample_index,
         "frame_paths": [str(path) for path in sample_meta.get("frame_paths", [])],
-        "state_inputs": single_tensor_mapping(state_inputs),
-        "outputs": single_prediction_from_output(
-            output,
-            head_specs=head_specs,
-            delta_speed_transform=delta_speed_transform,
-        ),
-        "control_outputs": single_control_prediction_from_output(
-            output,
-            head_specs=head_specs,
-            delta_speed_transform=delta_speed_transform,
-        ),
-        "target": single_tensor_mapping(targets, delta_speed_transform=delta_speed_transform),
+        "state_inputs": {
+            definition.camel_key: float(state_inputs[0, index].item())
+            for index, key in enumerate(dataset.state_input_config.enabled_keys())
+            for definition in [state_input_definition(key)]
+        },
+        "pred_controls": pred_controls.detach().cpu().tolist(),
+        "pred_aux": pred_aux.detach().cpu().tolist(),
+        "target_controls": denorm_target_controls.detach().cpu().tolist(),
+        "target_aux": denorm_target_aux.detach().cpu().tolist(),
+        "pred_controls_normalized": output["pred_controls"].detach().cpu().tolist(),
+        "pred_aux_normalized": output["pred_aux"].detach().cpu().tolist(),
+        "target_controls_normalized": target_controls.detach().cpu().tolist(),
+        "target_aux_normalized": target_aux.detach().cpu().tolist(),
+        "control_target_names": list(control_target_names),
+        "aux_target_names": list(aux_target_names),
     }
 
 
@@ -397,20 +517,33 @@ def build_output(
     device: torch.device,
     sample_result: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    head_specs = resolve_checkpoint_head_specs(checkpoint)
+    future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+    control_target_names, aux_target_names = resolve_checkpoint_target_names(
+        checkpoint,
+        future_steps=len(future_offsets),
+    )
+    target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
     output: dict[str, Any] = {
         "checkpoint": str(checkpoint_path),
         "device": str(device),
         "epoch": int(checkpoint.get("epoch", 0)),
+        "planner_format": PLANNER_FORMAT,
         "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
         "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
         "sample_stride": checkpoint_sample_stride(checkpoint),
         "input_channels": int(checkpoint.get("input_channels", 0) or 0),
-        "model": {"width_multiplier": resolve_checkpoint_width_multiplier(checkpoint)},
-        "delta_speed_target_transform": resolve_checkpoint_delta_speed_target_transform(checkpoint).metadata(),
-        "head_specs": checkpoint.get("head_specs", head_specs_metadata(head_specs)),
-        "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
+        "model": {
+            "width_multiplier": resolve_checkpoint_width_multiplier(checkpoint),
+            "dropout": resolve_checkpoint_dropout(checkpoint),
+            "visual_temporal": resolve_checkpoint_visual_temporal(checkpoint),
+            "horizon_decoder": resolve_checkpoint_horizon_decoder(checkpoint),
+        },
+        "target_transforms": target_transform_metadata(target_transforms),
         "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config_from_metadata(None))),
+        "future_offsets": list(future_offsets),
+        "telemetry_feature_names": list(checkpoint.get("telemetry_feature_names", [])),
+        "control_target_names": list(control_target_names),
+        "aux_target_names": list(aux_target_names),
         "train_metrics": checkpoint.get("train_metrics"),
         "val_metrics": checkpoint.get("val_metrics"),
     }
@@ -433,13 +566,35 @@ def print_plain(output: dict[str, Any]) -> None:
         )
     model_metadata = output.get("model") or {}
     if isinstance(model_metadata, dict):
-        print(f"Model: width_multiplier={float(model_metadata.get('width_multiplier', DEFAULT_WIDTH_MULTIPLIER)):.3f}")
+        print(
+            "Model: "
+            f"width_multiplier={float(model_metadata.get('width_multiplier', DEFAULT_WIDTH_MULTIPLIER)):.3f} "
+            f"dropout={float(model_metadata.get('dropout', 0.0)):.3f}"
+        )
+        visual_temporal = model_metadata.get("visual_temporal")
+        if isinstance(visual_temporal, dict):
+            print(
+                "Visual temporal: "
+                f"enabled={bool(visual_temporal.get('enabled', True))} "
+                f"type={visual_temporal.get('type', 'gru')} "
+                f"hidden_dim={int(visual_temporal.get('hidden_dim', 256))} "
+                f"image_order={visual_temporal.get('image_order', 'oldest_to_newest')}"
+            )
+        horizon_decoder = model_metadata.get("horizon_decoder")
+        if isinstance(horizon_decoder, dict):
+            print(
+                "Horizon decoder: "
+                f"enabled={bool(horizon_decoder.get('enabled', True))} "
+                f"horizon_embed_dim={int(horizon_decoder.get('horizon_embed_dim', 32))} "
+                f"hidden_dim={int(horizon_decoder.get('hidden_dim', 256))} "
+                f"num_layers={int(horizon_decoder.get('num_layers', 2))}"
+            )
     state_inputs = output.get("state_inputs") or {}
     if isinstance(state_inputs, dict):
         for name, item in state_inputs.items():
             if not isinstance(item, dict) or not item.get("enabled"):
                 continue
-            description = f"State input: {name} heads={list(item.get('heads', []))}"
+            description = f"State input: {name}"
             if "cap" in item:
                 description += f" cap={float(item.get('cap', 0.0)):.3f}"
             print(description)
@@ -455,21 +610,20 @@ def print_plain(output: dict[str, Any]) -> None:
 
     sample = output.get("sample")
     if isinstance(sample, dict):
-        control_outputs = sample["control_outputs"]
-        all_outputs = sample["outputs"]
-        target = sample["target"]
-        aux_outputs = {key: value for key, value in all_outputs.items() if key not in control_outputs}
         print()
         print(f"Sample index: {sample['sample_index']}")
-        print(f"Control outputs: {control_outputs}")
-        if aux_outputs:
-            print(f"Aux outputs:     {aux_outputs}")
-        print(f"Targets:         {target}")
+        print(f"Control target names: {sample.get('control_target_names', [])}")
+        print(f"Aux target names: {sample.get('aux_target_names', [])}")
+        print(f"Pred controls: {sample.get('pred_controls')}")
+        print(f"Pred aux:      {sample.get('pred_aux')}")
+        print(f"Target controls: {sample.get('target_controls')}")
+        print(f"Target aux:      {sample.get('target_aux')}")
         frame_paths = sample.get("frame_paths") or []
         if frame_paths:
             print("Frames:")
             for frame_path in frame_paths:
                 print(f"  {frame_path}")
+        return
 
 
 def main() -> None:
@@ -481,9 +635,15 @@ def main() -> None:
     frame_count = resolve_checkpoint_frame_count(checkpoint, config)
     _ = resolve_checkpoint_frame_stride(checkpoint, config)
     model = build_model(checkpoint, device, frame_count)
+    target_names_future_steps = len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+    control_target_names, aux_target_names = resolve_checkpoint_target_names(
+        checkpoint,
+        future_steps=target_names_future_steps,
+    )
+    target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
 
     sample_result: dict[str, Any] | None = None
-    if config.run_id or config.data_root:
+    if not config.metadata_only and (config.run_id or config.data_root):
         if not config.run_id or not config.data_root:
             raise ValueError("Both inference.run_id and inference.data_root are required for sample inference")
         sample_result = run_sample_inference(
@@ -494,6 +654,9 @@ def main() -> None:
             sample_index=config.sample_index,
             image_size=(config.image_width, config.image_height),
             expected_window_size=config.window_size,
+            control_target_names=control_target_names,
+            aux_target_names=aux_target_names,
+            target_transforms=target_transforms,
         )
 
     output = build_output(checkpoint_path, checkpoint, device, sample_result)

@@ -3,12 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from target_transforms import (
-    DeltaSpeedTargetTransform,
-    delta_speed_target_transform_from_config,
-)
-
-
 DEFAULT_IMAGE_WIDTH = 480
 DEFAULT_IMAGE_HEIGHT = 480
 DEFAULT_WINDOW_SIZE = 3
@@ -27,9 +21,11 @@ DEFAULT_TELEMETRY_FEATURE_NAMES = (
     "acceleration",
 )
 DEFAULT_CONTROL_TARGET_NAMES = ("steering", "acceleration", "brakePressureAvg")
-DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_yaw_delta", "future_yaw_rate")
+DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate")
 DEFAULT_AUX_LOSS_WEIGHT = 0.3
 DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
+DEFAULT_LOSS_FUNCTION = "smooth_l1"
+DEFAULT_SMOOTH_L1_BETA = 0.1
 DEFAULT_TELEMETRY_HIDDEN_DIM = 128
 
 
@@ -40,6 +36,10 @@ def normalize_windows_drive_path(value: str) -> str:
             cleaned += "\\"
         elif cleaned[2] not in ("\\", "/"):
             cleaned = f"{cleaned[:2]}\\{cleaned[2:]}"
+    if os.name != "nt" and len(cleaned) >= 3 and cleaned[1] == ":" and cleaned[2] in ("\\", "/"):
+        drive = cleaned[0].lower()
+        rest = cleaned[2:].replace("\\", "/")
+        return f"/mnt/{drive}{rest}"
     return cleaned
 
 
@@ -150,7 +150,3 @@ def parse_temporal_dataset_config(
         aux_target_names,
     )
 
-
-def parse_delta_speed_target_transform(raw: dict[str, Any]) -> DeltaSpeedTargetTransform:
-    dataset_raw = raw.get("dataset", {})
-    return delta_speed_target_transform_from_config(dataset_raw)

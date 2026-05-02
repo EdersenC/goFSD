@@ -129,6 +129,8 @@ type Service struct {
 	motionActive           bool
 	motionLatched          bool
 	mode                   string
+	throttleHoldUntil      time.Time
+	throttleHoldValue      float64
 }
 
 func NewService(cfg Config, configPath string, actuatorSink actuatorSubmitter) *Service {
@@ -293,10 +295,17 @@ func (s *Service) translate(sample Sample, now time.Time) (Trace, error) {
 
 	explicitStop := motionIntent == MotionIntentStop
 	deltaSeconds := s.longitudinalDeltaSeconds(now)
+	rawLongitudinalDemand := math.Max(rawLongitudinal, 0)
 	driveHoldEligible := motionActive &&
 		motionIntent != MotionIntentStop &&
 		speedError >= -tuning.LongitudinalDeadband
-	heldThrottle, throttleHeld := s.stabilizeDriveCommand(math.Max(rawLongitudinal, 0), speedError, driveHoldEligible, deltaSeconds, tuning)
+	heldThrottle, throttleHeld := s.stabilizeDriveCommand(
+		rawLongitudinalDemand,
+		speedError,
+		driveHoldEligible,
+		now,
+		tuning,
+	)
 
 	s.brakeLatched = false
 	s.brakeRequestedAt = time.Time{}
@@ -381,7 +390,7 @@ func (s *Service) translate(sample Sample, now time.Time) (Trace, error) {
 		reasons = append(reasons, "throttle_ramp")
 	}
 	s.lastLongitudinalAt = now
-	s.lastDriveCommand = clamp(math.Max(signedLongitudinal, 0), 0, 1)
+	s.lastDriveCommand = clamp(rawLongitudinalDemand, 0, 1)
 	s.lastThrottleOutput = throttle
 
 	command := actuator.CommandRequest{
@@ -429,21 +438,45 @@ func (s *Service) longitudinalDeltaSeconds(now time.Time) float64 {
 	return clamp(delta, 1.0/60.0, 1.0)
 }
 
-func (s *Service) stabilizeDriveCommand(rawDrive float64, speedError float64, eligible bool, deltaSeconds float64, tuning Tuning) (float64, bool) {
+func (s *Service) stabilizeDriveCommand(rawDrive float64, speedError float64, eligible bool, now time.Time, tuning Tuning) (float64, bool) {
 	rawDrive = clamp(rawDrive, 0, 1)
 	if !eligible {
+		s.throttleHoldUntil = time.Time{}
+		s.throttleHoldValue = rawDrive
 		return rawDrive, false
 	}
 
-	decayed := math.Max(s.lastDriveCommand-(tuning.ThrottleDecayPerSecond*deltaSeconds), 0)
-	stabilized := rawDrive
-	if decayed > stabilized {
-		stabilized = decayed
+	if rawDrive <= 0 {
+		s.throttleHoldUntil = time.Time{}
+		s.throttleHoldValue = 0
+		return 0, false
 	}
+
+	holdWindow := time.Duration(tuning.ThrottleHoldSeconds * float64(time.Second))
+	if !s.throttleHoldUntil.IsZero() && now.Before(s.throttleHoldUntil) {
+		if rawDrive >= s.throttleHoldValue {
+			s.throttleHoldUntil = time.Time{}
+			s.throttleHoldValue = rawDrive
+		} else {
+			return clamp(s.throttleHoldValue, 0, 1), true
+		}
+	} else {
+		s.throttleHoldUntil = time.Time{}
+	}
+
+	lastDemand := clamp(s.lastDriveCommand, 0, 1)
+	if lastDemand > rawDrive && holdWindow > 0 {
+		s.throttleHoldValue = lastDemand
+		s.throttleHoldUntil = now.Add(holdWindow)
+		return s.throttleHoldValue, true
+	}
+
+	stabilized := rawDrive
 	if speedError > tuning.LongitudinalDeadband && stabilized > 0 && stabilized < tuning.ThrottleHoldMin {
 		stabilized = tuning.ThrottleHoldMin
 	}
-	return clamp(stabilized, 0, 1), stabilized > rawDrive
+
+	return clamp(stabilized, 0, 1), false
 }
 
 func (s *Service) smoothThrottleOutput(desired float64, deltaSeconds float64, tuning Tuning) (float64, bool) {

@@ -8,7 +8,7 @@ except ImportError:
     from control_client import INPUT_MODE_MODEL_RAW, INPUT_MODE_NORMALIZED
 
 CONTROL_SEMANTICS_CONTROLLER_INPUT = "controller_input"
-CONTROL_SEMANTICS_SPEED_DELTA = "speed_delta"
+CONTROL_SEMANTICS_SPEED_CHANGE = "speed_change"
 CONTROL_SEMANTICS_TARGET_SPEED = "target_speed"
 CONTROL_SEMANTICS_VEHICLE_STATE = "vehicle_state"
 
@@ -17,8 +17,8 @@ DEFAULT_VEHICLE_STATE_STEER_DEADBAND = 0.02
 DEFAULT_VEHICLE_STATE_ACCEL_CENTER = 0.5
 DEFAULT_VEHICLE_STATE_ACCEL_GAIN = 2.0
 DEFAULT_VEHICLE_STATE_ACCEL_DEADBAND = 0.05
-DEFAULT_SPEED_DELTA_GAIN = 1.0
-DEFAULT_SPEED_DELTA_DEADBAND = 0.02
+DEFAULT_SPEED_CHANGE_GAIN = 1.0
+DEFAULT_SPEED_CHANGE_DEADBAND = 0.02
 DEFAULT_TARGET_SPEED_ERROR_GAIN = 0.5
 DEFAULT_TARGET_SPEED_ERROR_DEADBAND = 0.05
 
@@ -38,10 +38,10 @@ def translate_control_prediction(
     raw_steer = float(steering)
     raw_accel = float(acceleration)
 
-    if semantics == CONTROL_SEMANTICS_SPEED_DELTA:
+    if semantics == CONTROL_SEMANTICS_SPEED_CHANGE:
         translated_steer = clamp(raw_steer, -1.0, 1.0)
-        signed_accel = clamp(raw_accel * DEFAULT_SPEED_DELTA_GAIN, -1.0, 1.0)
-        if abs(signed_accel) < DEFAULT_SPEED_DELTA_DEADBAND:
+        signed_accel = clamp(raw_accel * DEFAULT_SPEED_CHANGE_GAIN, -1.0, 1.0)
+        if abs(signed_accel) < DEFAULT_SPEED_CHANGE_DEADBAND:
             signed_accel = 0.0
 
         return {
@@ -51,9 +51,9 @@ def translate_control_prediction(
             "throttle": max(signed_accel, 0.0),
             "brake": max(-signed_accel, 0.0),
             "translation": {
-                "mode": CONTROL_SEMANTICS_SPEED_DELTA,
-                "delta_speed_gain": DEFAULT_SPEED_DELTA_GAIN,
-                "delta_speed_deadband": DEFAULT_SPEED_DELTA_DEADBAND,
+                "mode": CONTROL_SEMANTICS_SPEED_CHANGE,
+                "speed_change_gain": DEFAULT_SPEED_CHANGE_GAIN,
+                "speed_change_deadband": DEFAULT_SPEED_CHANGE_DEADBAND,
             },
         }
 

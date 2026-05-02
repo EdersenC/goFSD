@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import math
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -11,41 +10,31 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import torch
 
-from control_translation import (
-    CONTROL_SEMANTICS_CONTROLLER_INPUT,
-    CONTROL_SEMANTICS_SPEED_DELTA,
-    CONTROL_SEMANTICS_TARGET_SPEED,
-)
-from heads import (
-    FUTURE_YAW_DELTA_HEAD_NAME,
-    HeadSpec,
-    control_head_specs,
-    head_layout_metadata,
-    head_specs_metadata,
-    resolve_checkpoint_head_specs,
-)
 from image_io import load_rgb_tensor_from_bytes, load_rgb_tensor_from_path
 from inference import (
     DEFAULT_CONFIG_PATH,
+    LEGACY_SCALAR_HEAD_ERROR,
+    PLANNER_FORMAT,
     build_model,
     load_checkpoint,
     load_config,
     normalize_windows_drive_path,
     resolve_checkpoint_control_target_names,
+    resolve_checkpoint_aux_target_names,
     resolve_checkpoint_width_multiplier,
     resolve_checkpoint_frame_count,
     resolve_checkpoint_frame_stride,
     resolve_existing_path,
     select_device,
 )
-from model_output import single_control_prediction_from_output, single_prediction_from_output
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
+    resolve_route_direction_defaults,
     STATE_INPUT_DEFINITIONS,
     StateInputConfig,
     default_inference_state_input_config,
@@ -55,9 +44,10 @@ from state_inputs import (
     state_inputs_metadata,
 )
 from target_transforms import (
-    DeltaSpeedTargetTransform,
-    legacy_delta_speed_target_transform,
-    resolve_checkpoint_delta_speed_target_transform,
+    TargetTransform,
+    denormalize_target_tensor,
+    resolve_checkpoint_target_transforms,
+    target_transform_metadata,
 )
 from training_runtime import (
     TrainingJobError,
@@ -69,14 +59,6 @@ from training_runtime import (
     TrainingJobRequestError,
     TrainingManager,
 )
-
-
-def sigmoid_probability(value: float) -> float:
-    if value >= 0:
-        exponent = math.exp(-value)
-        return 1.0 / (1.0 + exponent)
-    exponent = math.exp(value)
-    return exponent / (1.0 + exponent)
 
 
 @dataclass(frozen=True)
@@ -184,91 +166,6 @@ def discover_models(config_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def control_target_sources(head_specs: list[dict[str, Any]] | None) -> dict[str, str]:
-    if not isinstance(head_specs, list):
-        return {}
-
-    sources: dict[str, str] = {}
-    for item in head_specs:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip()
-        if not name:
-            continue
-        if not bool(item.get("used_for_control", False)):
-            continue
-        target_source = str(item.get("target_source", "")).strip()
-        if target_source:
-            sources[name] = target_source
-    return sources
-
-
-def control_semantics_from_sources(sources: Mapping[str, str]) -> str:
-    lateral_source = str(sources.get(FUTURE_YAW_DELTA_HEAD_NAME, "")).lower()
-    future_speed_source = str(sources.get("future_speed", "")).lower()
-    delta_speed_source = str(sources.get("delta_speed", "")).lower()
-    accel_source = str(sources.get("accel", "")).lower()
-    if "steerinput" in lateral_source and ("accelinput" in accel_source or "deltaspeedinput" in delta_speed_source):
-        return CONTROL_SEMANTICS_CONTROLLER_INPUT
-    if "label.future_speed" in future_speed_source or "future_speed" in future_speed_source:
-        return CONTROL_SEMANTICS_TARGET_SPEED
-    if "label.delta_speed" in delta_speed_source or "delta_speed" in delta_speed_source:
-        return CONTROL_SEMANTICS_SPEED_DELTA
-    if lateral_source or accel_source or delta_speed_source or future_speed_source:
-        return "vehicle_state"
-    return CONTROL_SEMANTICS_CONTROLLER_INPUT
-
-
-def clamp(value: float, minimum: float, maximum: float) -> float:
-    return max(minimum, min(maximum, float(value)))
-
-
-def build_semantic_intent(
-    outputs: Mapping[str, Any],
-    *,
-    current_speed: float | None,
-) -> dict[str, Any]:
-    heading_error = float(outputs.get("future_yaw_delta", 0.0) or 0.0)
-    future_speed = outputs.get("future_speed")
-    delta_speed = outputs.get("delta_speed")
-    move_intent_prob = float(outputs.get("move_intent_prob", 0.0) or 0.0)
-
-    target_speed = 0.0
-    if future_speed is not None:
-        target_speed = max(float(future_speed), 0.0)
-    elif delta_speed is not None and current_speed is not None:
-        target_speed = max(float(current_speed) + float(delta_speed), 0.0)
-
-    target_accel = 0.0
-    if delta_speed is not None:
-        target_accel = float(delta_speed)
-    elif future_speed is not None and current_speed is not None:
-        target_accel = float(future_speed) - float(current_speed)
-
-    if move_intent_prob >= 0.55 or target_speed > 0.35:
-        motion_intent = "move"
-    elif target_speed <= 0.15 and target_accel <= 0.0:
-        motion_intent = "stop"
-    else:
-        motion_intent = "hold"
-
-    return {
-        "lateral": {
-            "heading_error_deg": heading_error,
-            "confidence": 1.0,
-        },
-        "longitudinal": {
-            "target_speed_mps": max(target_speed, 0.0),
-            "target_accel_mps2": clamp(target_accel, -4.0, 4.0),
-            "confidence": 1.0,
-        },
-        "motion": {
-            "intent": motion_intent,
-            "confidence": clamp(move_intent_prob if move_intent_prob > 0 else 1.0, 0.0, 1.0),
-        },
-    }
-
-
 @dataclass(frozen=True)
 class ServerArgs:
     host: str
@@ -283,12 +180,7 @@ class ModelRuntime:
         self._device: torch.device | None = None
         self._checkpoint_path: Path | None = None
         self._planner_format = ""
-        self._head_specs: tuple[HeadSpec, ...] = resolve_checkpoint_head_specs({
-            "head_specs": head_specs_metadata(),
-        })
-        self._head_specs_metadata: list[dict[str, Any]] = head_specs_metadata(self._head_specs)
         self._state_input_config = default_inference_state_input_config()
-        self._delta_speed_transform: DeltaSpeedTargetTransform = legacy_delta_speed_target_transform()
         self._image_size = (224, 224)
         self._frame_count = 3
         self._frame_stride = 2
@@ -299,41 +191,16 @@ class ModelRuntime:
         self._telemetry_feature_names: list[str] = []
         self._control_target_names: list[str] = []
         self._aux_target_names: list[str] = []
+        self._target_transforms: dict[str, TargetTransform] = {}
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             loaded = self._model is not None
-            head_specs = self._head_specs
-            target_sources = control_target_sources(self._head_specs_metadata)
-            if self._planner_format == "temporal_telemetry_gru_v1":
-                return {
-                    "loaded": loaded,
-                    "device": None if self._device is None else str(self._device),
-                    "checkpoint": None if self._checkpoint_path is None else str(self._checkpoint_path),
-                    "planner_format": self._planner_format,
-                    "image_size": {
-                        "width": self._image_size[0],
-                        "height": self._image_size[1],
-                    },
-                    "frame_window": {
-                        "size": self._frame_count,
-                        "frame_stride": self._frame_stride,
-                        "input_channels": self._frame_count * 3,
-                    },
-                    "model": {
-                        "width_multiplier": self._width_multiplier,
-                    },
-                    "image_offsets": list(self._image_offsets),
-                    "telemetry_offsets": list(self._telemetry_offsets),
-                    "future_offsets": list(self._future_offsets),
-                    "telemetry_feature_names": list(self._telemetry_feature_names),
-                    "control_target_names": list(self._control_target_names),
-                    "aux_target_names": list(self._aux_target_names),
-                }
             return {
                 "loaded": loaded,
                 "device": None if self._device is None else str(self._device),
                 "checkpoint": None if self._checkpoint_path is None else str(self._checkpoint_path),
+                "planner_format": self._planner_format or PLANNER_FORMAT,
                 "image_size": {
                     "width": self._image_size[0],
                     "height": self._image_size[1],
@@ -346,12 +213,14 @@ class ModelRuntime:
                 "model": {
                     "width_multiplier": self._width_multiplier,
                 },
+                "image_offsets": list(self._image_offsets),
+                "telemetry_offsets": list(self._telemetry_offsets),
+                "future_offsets": list(self._future_offsets),
+                "telemetry_feature_names": list(self._telemetry_feature_names),
+                "control_target_names": list(self._control_target_names),
+                "aux_target_names": list(self._aux_target_names),
+                "target_transforms": target_transform_metadata(self._target_transforms),
                 "state_inputs": state_inputs_metadata(self._state_input_config),
-                "delta_speed_target_transform": self._delta_speed_transform.metadata(),
-                "head_specs": self._head_specs_metadata,
-                "head_layout": head_layout_metadata(head_specs),
-                "control_target_sources": target_sources,
-                "control_semantics": control_semantics_from_sources(target_sources),
             }
 
     def load_model(
@@ -366,79 +235,47 @@ class ModelRuntime:
         checkpoint = load_checkpoint(checkpoint_path, device)
         model = build_model(checkpoint, device, frame_count)
         planner_format = str(checkpoint.get("planner_format", "")).strip()
+        if planner_format != PLANNER_FORMAT:
+            raise ValueError(LEGACY_SCALAR_HEAD_ERROR)
         width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
-        state_input_config = default_inference_state_input_config()
-        head_specs = resolve_checkpoint_head_specs({
-            "head_specs": head_specs_metadata(),
-        })
-        head_specs_metadata_payload = head_specs_metadata(head_specs)
-        delta_speed_transform = legacy_delta_speed_target_transform()
-        if planner_format != "temporal_telemetry_gru_v1":
-            state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
-            head_specs = resolve_checkpoint_head_specs(checkpoint)
-            head_specs_metadata_payload = checkpoint.get("head_specs", head_specs_metadata(head_specs))
-            delta_speed_transform = resolve_checkpoint_delta_speed_target_transform(checkpoint)
+        state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
+        future_offsets = list(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+        control_target_names = resolve_checkpoint_control_target_names(
+            checkpoint,
+            future_steps=len(future_offsets),
+        )
+        aux_target_names = resolve_checkpoint_aux_target_names(
+            checkpoint,
+            future_steps=len(future_offsets),
+        )
+        target_transforms = resolve_checkpoint_target_transforms(
+            checkpoint,
+            tuple(control_target_names) + tuple(aux_target_names),
+        )
 
         with self._lock:
             self._model = model
             self._device = device
             self._checkpoint_path = checkpoint_path
             self._planner_format = planner_format
-            self._head_specs = head_specs
-            self._head_specs_metadata = head_specs_metadata_payload
             self._state_input_config = state_input_config
-            self._delta_speed_transform = delta_speed_transform
             self._image_size = image_size
             self._frame_count = frame_count
             self._frame_stride = frame_stride
             self._width_multiplier = width_multiplier
             self._image_offsets = list(checkpoint.get("image_offsets", []))
             self._telemetry_offsets = list(checkpoint.get("telemetry_offsets", []))
-            self._future_offsets = list(checkpoint.get("future_offsets", []))
+            self._future_offsets = future_offsets
             self._telemetry_feature_names = list(checkpoint.get("telemetry_feature_names", []))
-            self._control_target_names = resolve_checkpoint_control_target_names(
-                checkpoint,
-                future_steps=len(self._future_offsets) or 6,
-            )
-            self._aux_target_names = list(checkpoint.get("aux_target_names", []))
+            self._control_target_names = control_target_names
+            self._aux_target_names = aux_target_names
+            self._target_transforms = target_transforms
 
-        target_sources = control_target_sources(head_specs_metadata_payload)
-        if planner_format == "temporal_telemetry_gru_v1":
-            return {
-                "status": "loaded",
-                "checkpoint": str(checkpoint_path),
-                "device": str(device),
-                "planner_format": planner_format,
-                "image_size": {
-                    "width": image_size[0],
-                    "height": image_size[1],
-                },
-                "frame_window": {
-                    "size": frame_count,
-                    "frame_stride": frame_stride,
-                    "input_channels": frame_count * 3,
-                },
-                "model": {
-                    "width_multiplier": width_multiplier,
-                    "telemetry_hidden_dim": (checkpoint.get("model", {}) or {}).get("telemetry_hidden_dim"),
-                },
-                "image_offsets": checkpoint.get("image_offsets", []),
-                "telemetry_offsets": checkpoint.get("telemetry_offsets", []),
-                "future_offsets": checkpoint.get("future_offsets", []),
-                "telemetry_feature_names": checkpoint.get("telemetry_feature_names", []),
-                "control_target_names": resolve_checkpoint_control_target_names(
-                    checkpoint,
-                    future_steps=len(checkpoint.get("future_offsets", [])) or 6,
-                ),
-                "aux_target_names": checkpoint.get("aux_target_names", []),
-                "epoch": int(checkpoint.get("epoch", 0)),
-                "train_metrics": checkpoint.get("train_metrics"),
-                "val_metrics": checkpoint.get("val_metrics"),
-            }
         return {
             "status": "loaded",
             "checkpoint": str(checkpoint_path),
             "device": str(device),
+            "planner_format": planner_format,
             "image_size": {
                 "width": image_size[0],
                 "height": image_size[1],
@@ -450,13 +287,16 @@ class ModelRuntime:
             },
             "model": {
                 "width_multiplier": width_multiplier,
+                "telemetry_hidden_dim": (checkpoint.get("model", {}) or {}).get("telemetry_hidden_dim"),
             },
+            "image_offsets": checkpoint.get("image_offsets", []),
+            "telemetry_offsets": checkpoint.get("telemetry_offsets", []),
+            "future_offsets": checkpoint.get("future_offsets", []),
+            "telemetry_feature_names": checkpoint.get("telemetry_feature_names", []),
+            "control_target_names": control_target_names,
+            "aux_target_names": aux_target_names,
             "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config)),
-            "delta_speed_target_transform": delta_speed_transform.metadata(),
-            "head_specs": head_specs_metadata_payload,
-            "head_layout": checkpoint.get("head_layout", head_layout_metadata(head_specs)),
-            "control_target_sources": target_sources,
-            "control_semantics": control_semantics_from_sources(target_sources),
+            "target_transforms": target_transform_metadata(target_transforms),
             "epoch": int(checkpoint.get("epoch", 0)),
             "train_metrics": checkpoint.get("train_metrics"),
             "val_metrics": checkpoint.get("val_metrics"),
@@ -469,12 +309,7 @@ class ModelRuntime:
             self._device = None
             self._checkpoint_path = None
             self._planner_format = ""
-            self._head_specs = resolve_checkpoint_head_specs({
-                "head_specs": head_specs_metadata(),
-            })
-            self._head_specs_metadata = head_specs_metadata(self._head_specs)
             self._state_input_config = default_inference_state_input_config()
-            self._delta_speed_transform = legacy_delta_speed_target_transform()
             self._width_multiplier = DEFAULT_WIDTH_MULTIPLIER
             self._image_offsets = []
             self._telemetry_offsets = []
@@ -482,6 +317,7 @@ class ModelRuntime:
             self._telemetry_feature_names = []
             self._control_target_names = []
             self._aux_target_names = []
+            self._target_transforms = {}
         return {
             "status": "unloaded",
             "checkpoint": None if previous is None else str(previous),
@@ -495,12 +331,8 @@ class ModelRuntime:
             device = self._device
             checkpoint_path = self._checkpoint_path
             planner_format = self._planner_format
-            head_specs = self._head_specs
-            head_specs_metadata_payload = self._head_specs_metadata
             state_input_config = self._state_input_config
-            delta_speed_transform = self._delta_speed_transform
-            frame_count = self._frame_count
-            frame_stride = self._frame_stride
+            target_transforms = self._target_transforms
             telemetry_offsets = list(self._telemetry_offsets)
             future_offsets = list(self._future_offsets)
             telemetry_feature_names = list(self._telemetry_feature_names)
@@ -509,87 +341,65 @@ class ModelRuntime:
             image_offsets = list(self._image_offsets)
 
         frames = self._extract_frames(payload)
-        if planner_format == "temporal_telemetry_gru_v1":
-            images = torch.stack(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
-            telemetry = self._extract_planner_telemetry(payload).to(device, non_blocking=device.type == "cuda")
-            with torch.no_grad():
-                output = model(images, telemetry)
-            pred_controls = output["pred_controls"].detach().cpu()
-            pred_aux = output["pred_aux"].detach().cpu()
-            return {
-                "checkpoint": str(checkpoint_path),
-                "device": str(device),
-                "planner_format": planner_format,
-                "pred_controls": pred_controls.tolist(),
-                "pred_aux": pred_aux.tolist(),
-                "image_shape": list(images.shape),
-                "telemetry_shape": list(telemetry.shape),
-                "pred_controls_shape": list(pred_controls.shape),
-                "pred_aux_shape": list(pred_aux.shape),
-                "image_offsets": image_offsets,
-                "telemetry_offsets": telemetry_offsets,
-                "future_offsets": future_offsets,
-                "telemetry_feature_names": telemetry_feature_names,
-                "control_target_names": control_target_names,
-                "aux_target_names": aux_target_names,
-            }
+        if planner_format != PLANNER_FORMAT:
+            raise RuntimeError(LEGACY_SCALAR_HEAD_ERROR)
 
-        x = torch.cat(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+        images = torch.stack(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
+        telemetry = self._extract_planner_telemetry(payload).to(device, non_blocking=device.type == "cuda")
         raw_state_inputs, model_state_inputs = self._extract_state_inputs(payload, state_input_config)
-        model_state_inputs = {
-            key: value.to(device, non_blocking=device.type == "cuda")
-            for key, value in model_state_inputs.items()
-        }
-
+        planner_state_inputs = None
+        if model_state_inputs:
+            ordered = [
+                model_state_inputs[definition.key]
+                for definition in STATE_INPUT_DEFINITIONS
+                if state_input_config.is_enabled(definition.key)
+            ]
+            planner_state_inputs = torch.cat(ordered, dim=0).unsqueeze(0).to(
+                device,
+                non_blocking=device.type == "cuda",
+            )
         with torch.no_grad():
-            output = model(x, state_inputs=model_state_inputs)
-
-        outputs = single_prediction_from_output(
-            output,
-            head_specs=head_specs,
-            delta_speed_transform=delta_speed_transform,
+            output = model(images, telemetry, planner_state_inputs)
+        pred_controls = output["pred_controls"].detach().cpu()
+        pred_aux = output["pred_aux"].detach().cpu()
+        pred_controls_denorm = denormalize_target_tensor(
+            pred_controls,
+            control_target_names,
+            target_transforms,
         )
-        control_outputs = single_control_prediction_from_output(
-            output,
-            head_specs=head_specs,
-            delta_speed_transform=delta_speed_transform,
+        pred_aux_denorm = denormalize_target_tensor(
+            pred_aux,
+            aux_target_names,
+            target_transforms,
         )
-        for spec in control_head_specs(head_specs):
-            if spec.name in outputs:
-                control_outputs[spec.name] = outputs[spec.name]
-        if "delta_speed" in outputs:
-            control_outputs["delta_speed"] = outputs["delta_speed"]
-        if "move_intent" in outputs:
-            move_intent_logit = float(outputs["move_intent"])
-            control_outputs["move_intent_prob"] = sigmoid_probability(move_intent_logit)
-
-        target_sources = control_target_sources(head_specs_metadata_payload)
         response = {
             "checkpoint": str(checkpoint_path),
             "device": str(device),
-            "intent": build_semantic_intent(control_outputs, current_speed=raw_state_inputs.get("current_speed")),
-            "outputs": outputs,
-            "control_outputs": control_outputs,
-            "model": {
-                "width_multiplier": self._width_multiplier,
-            },
+            "planner_format": planner_format,
+            "pred_controls": pred_controls_denorm.tolist(),
+            "pred_aux": pred_aux_denorm.tolist(),
+            "pred_controls_normalized": pred_controls.tolist(),
+            "pred_aux_normalized": pred_aux.tolist(),
+            "target_transforms": target_transform_metadata(target_transforms),
+            "image_shape": list(images.shape),
+            "telemetry_shape": list(telemetry.shape),
+            "pred_controls_shape": list(pred_controls.shape),
+            "pred_aux_shape": list(pred_aux.shape),
+            "image_offsets": image_offsets,
+            "telemetry_offsets": telemetry_offsets,
+            "future_offsets": future_offsets,
+            "telemetry_feature_names": telemetry_feature_names,
+            "control_target_names": control_target_names,
+            "aux_target_names": aux_target_names,
             "state_inputs": state_inputs_metadata(state_input_config),
-            "delta_speed_target_transform": delta_speed_transform.metadata(),
-            "control_target_sources": target_sources,
-            "control_semantics": control_semantics_from_sources(target_sources),
-            "frame_window": {
-                "size": frame_count,
-                "frame_stride": frame_stride,
-                "input_channels": frame_count * 3,
-            },
-        }
-        normalized_state_inputs = {
-            key: float(value.squeeze(0).item())
-            for key, value in model_state_inputs.items()
         }
         if raw_state_inputs:
             response["raw_state_inputs"] = raw_state_inputs
-            response["normalized_state_inputs"] = normalized_state_inputs
+            response["normalized_state_inputs"] = {
+                definition.camel_key: float(model_state_inputs[definition.key].item())
+                for definition in STATE_INPUT_DEFINITIONS
+                if definition.key in model_state_inputs
+            }
         return response
 
     def _extract_planner_telemetry(self, payload: dict[str, Any]) -> torch.Tensor:
@@ -654,21 +464,28 @@ class ModelRuntime:
     ) -> tuple[dict[str, float | bool], dict[str, torch.Tensor]]:
         raw_state_inputs: dict[str, float | bool] = {}
         normalized_state_inputs: dict[str, torch.Tensor] = {}
+        route_direction_defaults = resolve_route_direction_defaults(payload)
         for definition in STATE_INPUT_DEFINITIONS:
             if not config.is_enabled(definition.key):
                 continue
-            if definition.key == "lead_vehicle_distance" and definition.key not in payload:
-                has_lead = payload.get("has_lead_vehicle")
+            raw_value = None
+            if definition.key in payload:
+                raw_value = payload[definition.key]
+            elif definition.camel_key in payload:
+                raw_value = payload[definition.camel_key]
+            elif route_direction_defaults is not None and definition.key in route_direction_defaults:
+                raw_value = route_direction_defaults[definition.key]
+            if definition.key == "lead_vehicle_distance" and raw_value is None:
+                has_lead = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
                 if has_lead in (False, 0, 0.0):
                     raw_value = resolve_state_input_cap(config, definition.key)
                 else:
                     raise ValueError(f"request must include {definition.key} for this checkpoint")
             else:
-                if definition.key not in payload:
+                if raw_value is None:
                     raise ValueError(f"request must include {definition.key} for this checkpoint")
-                raw_value = payload[definition.key]
             if definition.key == "lead_vehicle_distance":
-                has_lead_raw = payload.get("has_lead_vehicle")
+                has_lead_raw = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
                 if has_lead_raw in (False, 0, 0.0):
                     raw_value = resolve_state_input_cap(config, definition.key)
             normalized = normalize_state_input_value(definition.key, raw_value, config)

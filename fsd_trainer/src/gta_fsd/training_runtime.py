@@ -15,29 +15,46 @@ from pathlib import Path
 from typing import Any
 
 from state_inputs import (
-    ACTIVE_HEAD_NAMES,
     DEFAULT_WIDTH_MULTIPLIER,
     STATE_INPUT_DEFINITIONS,
     STATE_INPUT_DEFINITIONS_BY_CAMEL,
+    state_input_config_from_metadata,
+    state_input_definitions_metadata,
 )
 
 
 ALLOWED_LOSS_WEIGHT_KEYS = [
-    "future_yaw_delta",
+    "steering",
+    "acceleration",
+    "brakePressureAvg",
     "future_speed",
-    "move_intent",
-    "delta_speed",
-    "yaw_rate",
+    "future_speed_delta",
+    "future_yaw_delta",
+    "future_yaw_rate",
 ]
 
-ALLOWED_CONSISTENCY_KEYS = [
-    "yaw_delta_vs_yaw_rate_weight",
-    "yaw_rate_scale_to_degrees",
-    "future_speed_vs_delta_speed_weight",
+ALLOWED_EARLY_STOPPING_METRICS = [
+    "drive_score",
+    "val_loss",
+    "control_loss",
+    "aux_loss",
+    "control_mae_overall",
+    "aux_mae_overall",
+    "steering_loss",
+    "acceleration_loss",
+    "brakePressureAvg_loss",
+    "future_speed_loss",
+    "future_speed_delta_loss",
+    "future_yaw_delta_loss",
+    "future_yaw_rate_loss",
+    "steering_mae",
+    "acceleration_mae",
+    "brakePressureAvg_mae",
+    "future_speed_mae",
+    "future_speed_delta_mae",
+    "future_yaw_delta_mae",
+    "future_yaw_rate_mae",
 ]
-
-ALLOWED_STATE_INPUT_HEADS = list(ACTIVE_HEAD_NAMES)
-
 
 class TrainingJobError(RuntimeError):
     pass
@@ -152,20 +169,46 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
     loader_raw = raw.get("loader", {})
     training_raw = raw.get("training", {})
     model_raw = raw.get("model", {})
-    loss_weights = training_raw.get("loss_weights", {})
-    consistency = training_raw.get("consistency", {})
+    loss_weights = training_raw.get("target_loss_weights")
+    if not isinstance(loss_weights, dict):
+        loss_weights = training_raw.get("loss_weights", {})
     turn_oversampling = loader_raw.get("turn_oversampling", {})
-    yaw_loss_weighting = training_raw.get("yaw_loss_weighting", {})
+    optimizer_raw = training_raw.get("optimizer", {}) if isinstance(training_raw.get("optimizer"), dict) else {}
+    scheduler_raw = training_raw.get("scheduler", {}) if isinstance(training_raw.get("scheduler"), dict) else {}
+    ema_raw = training_raw.get("ema", {}) if isinstance(training_raw.get("ema"), dict) else {}
+    has_optimizer_config = isinstance(training_raw.get("optimizer"), dict)
+    has_scheduler_config = isinstance(training_raw.get("scheduler"), dict)
+    has_ema_config = isinstance(training_raw.get("ema"), dict)
+    learning_rate = float(optimizer_raw.get("lr", training_raw.get("learning_rate", 0.0)) or 0.0)
+    optimizer_name = str(optimizer_raw.get("name", "adamw" if has_optimizer_config else "adam") or "").strip().lower() or "adam"
+    optimizer_weight_decay = float(optimizer_raw.get("weight_decay", 0.0001 if has_optimizer_config else 0.0) or 0.0)
+    grad_clip_default = 1.0 if has_optimizer_config else None
+    grad_clip_raw = optimizer_raw.get("grad_clip_norm", grad_clip_default)
+    scheduler_name = str(scheduler_raw.get("name", "cosine" if has_scheduler_config else "none") or "none").strip().lower()
+    if scheduler_name in {"off", "disabled"}:
+        scheduler_name = "none"
+    warmup_fraction = float(scheduler_raw.get("warmup_fraction", 0.05 if has_scheduler_config else 0.0) or 0.0)
+    min_lr_ratio = float(scheduler_raw.get("min_lr_ratio", 0.05 if has_scheduler_config else 0.0) or 0.0)
+    ema_enabled = bool(ema_raw.get("enabled", True if has_ema_config else False))
+    ema_decay = float(ema_raw.get("decay", 0.999) or 0.999)
     state_inputs = raw.get("state_inputs", {})
+    state_input_config = state_input_config_from_metadata(state_inputs)
     state_inputs_payload: dict[str, Any] = {}
+
+    def float_from_map(source: dict[str, Any], key: str, default: float) -> float:
+        if key not in source:
+            return default
+        value = source.get(key)
+        return float(default if value is None else value)
+
     for definition in STATE_INPUT_DEFINITIONS:
-        item = state_inputs.get(definition.key, {})
+        spec = state_input_config.spec(definition.key)
         payload = {
-            "enabled": bool(item.get("enabled", definition.default_enabled)),
-            "heads": [str(value) for value in item.get("heads", definition.default_heads) if str(value).strip()],
+            "enabled": bool(spec.enabled),
         }
         if definition.default_cap is not None:
-            payload["cap"] = float(item.get("cap", definition.default_cap) or definition.default_cap)
+            payload["cap"] = float(spec.cap if spec.cap is not None else definition.default_cap)
+        payload["plannerFusedOnly"] = bool(definition.planner_fused_only)
         state_inputs_payload[definition.camel_key] = payload
     return {
         "configPath": str(config_path),
@@ -173,12 +216,29 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
         "trainScript": str((Path(__file__).resolve().parent / "train.py").resolve()),
         "jobsDir": str(jobs_dir),
         "epochs": int(training_raw.get("epochs", 0) or 0),
-        "learningRate": float(training_raw.get("learning_rate", 0.0) or 0.0),
+        "learningRate": learning_rate,
+        "lossFunction": str(training_raw.get("loss_function", "smooth_l1") or "smooth_l1"),
+        "smoothL1Beta": float(training_raw.get("smooth_l1_beta", 0.1) or 0.1),
+        "earlyStoppingMetric": str(training_raw.get("early_stopping_metric", "drive_score") or "drive_score"),
+        "optimizer": {
+            "name": optimizer_name,
+            "weightDecay": optimizer_weight_decay,
+            "gradClipNorm": grad_clip_raw,
+        },
+        "scheduler": {
+            "name": scheduler_name,
+            "warmupFraction": warmup_fraction,
+            "minLrRatio": min_lr_ratio,
+            "stepFrequency": "per_step" if scheduler_name == "cosine" else "none",
+        },
+        "ema": {
+            "enabled": ema_enabled,
+            "decay": ema_decay,
+        },
         "widthMultiplier": float(model_raw.get("width_multiplier", DEFAULT_WIDTH_MULTIPLIER) or DEFAULT_WIDTH_MULTIPLIER),
         "trainRunIds": [str(value) for value in dataset_raw.get("train_run_ids", []) if str(value).strip()],
         "valRunIds": [str(value) for value in dataset_raw.get("val_run_ids", []) if str(value).strip()],
-        "lossWeights": {key: float(loss_weights.get(key, 0.0) or 0.0) for key in ALLOWED_LOSS_WEIGHT_KEYS},
-        "consistency": {key: float(consistency.get(key, 0.0) or 0.0) for key in ALLOWED_CONSISTENCY_KEYS},
+        "lossWeights": {key: float_from_map(loss_weights, key, 1.0) for key in ALLOWED_LOSS_WEIGHT_KEYS},
         "turnOversampling": {
             "enabled": bool(turn_oversampling.get("enabled", False)),
             "straight_weight": float(turn_oversampling.get("straight_weight", 1.0) or 1.0),
@@ -189,17 +249,10 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
             "medium_turn_threshold": float(turn_oversampling.get("medium_turn_threshold", 0.15) or 0.15),
             "sharp_turn_threshold": float(turn_oversampling.get("sharp_turn_threshold", 0.30) or 0.30),
         },
-        "yawLossWeighting": {
-            "enabled": bool(yaw_loss_weighting.get("enabled", False)),
-            "base_weight": float(yaw_loss_weighting.get("base_weight", 1.0) or 1.0),
-            "alpha": float(yaw_loss_weighting.get("alpha", 2.0) or 2.0),
-            "tau": float(yaw_loss_weighting.get("tau", 0.25) or 0.25),
-            "max_scale": float(yaw_loss_weighting.get("max_scale", 3.0) or 3.0),
-        },
         "stateInputs": state_inputs_payload,
+        "stateInputDefinitions": state_input_definitions_metadata(),
         "allowedLossWeightKeys": list(ALLOWED_LOSS_WEIGHT_KEYS),
-        "allowedConsistencyKeys": list(ALLOWED_CONSISTENCY_KEYS),
-        "allowedStateInputHeads": list(ALLOWED_STATE_INPUT_HEADS),
+        "allowedEarlyStoppingMetrics": list(ALLOWED_EARLY_STOPPING_METRICS),
     }
 
 
@@ -220,6 +273,12 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
     for spec in specs:
         if not isinstance(spec, dict):
             raise TrainingJobRequestError("each training job must be a JSON object")
+        removed_keys = sorted(set(spec) & {"consistency", "yawLossWeighting", "yaw_loss_weighting"})
+        if removed_keys:
+            raise TrainingJobRequestError(
+                "removed training job field(s): "
+                f"{', '.join(removed_keys)}. Configure only supported trainer fields."
+            )
         name = str(spec.get("name", "") or "").strip()
         notes = str(spec.get("notes", "") or "").strip()
         learning_rate = spec.get("learningRate")
@@ -237,6 +296,20 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
             if not _is_finite_number(width_multiplier) or float(width_multiplier) <= 0:
                 raise TrainingJobRequestError("widthMultiplier must be a positive finite number")
             width_multiplier = float(width_multiplier)
+        smooth_l1_beta = spec.get("smoothL1Beta")
+        if smooth_l1_beta is not None:
+            if not _is_finite_number(smooth_l1_beta) or float(smooth_l1_beta) <= 0:
+                raise TrainingJobRequestError("smoothL1Beta must be a positive finite number")
+            smooth_l1_beta = float(smooth_l1_beta)
+        early_stopping_metric = spec.get("earlyStoppingMetric")
+        if early_stopping_metric is not None:
+            early_stopping_metric = str(early_stopping_metric).strip()
+            if not early_stopping_metric:
+                raise TrainingJobRequestError("earlyStoppingMetric must be a non-empty string")
+            if early_stopping_metric not in ALLOWED_EARLY_STOPPING_METRICS:
+                raise TrainingJobRequestError(
+                    f"earlyStoppingMetric must be one of {', '.join(ALLOWED_EARLY_STOPPING_METRICS)}"
+                )
 
         def normalize_float_map(raw_map: Any, field_name: str) -> dict[str, float]:
             if raw_map is None:
@@ -316,22 +389,22 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
                         raise TrainingJobRequestError(f"stateInputs.{source_name}.cap is not supported for boolean inputs")
                     source_config["cap"] = normalize_optional_positive_float(value["cap"], f"stateInputs.{source_name}.cap")
                 if "heads" in value:
-                    if not isinstance(value["heads"], list):
-                        raise TrainingJobRequestError(f"stateInputs.{source_name}.heads must be an array")
-                    heads: list[str] = []
-                    for raw_head in value["heads"]:
-                        head = str(raw_head).strip()
-                        if not head:
-                            continue
-                        if head not in ALLOWED_STATE_INPUT_HEADS:
-                            raise TrainingJobRequestError(
-                                f"stateInputs.{source_name}.heads must only use {', '.join(ALLOWED_STATE_INPUT_HEADS)}"
-                            )
-                        if head not in heads:
-                            heads.append(head)
-                    source_config["heads"] = heads
+                    raise TrainingJobRequestError(
+                        "stateInputs.*.heads has been removed; state inputs are fused into the temporal planner"
+                    )
                 normalized[source_name] = source_config
             return normalized
+
+        loss_weight_overrides = normalize_float_map(spec.get("lossWeights"), "lossWeights")
+        unknown_loss_weights = sorted(set(loss_weight_overrides) - set(ALLOWED_LOSS_WEIGHT_KEYS))
+        if unknown_loss_weights:
+            raise TrainingJobRequestError(
+                f"lossWeights only supports {', '.join(ALLOWED_LOSS_WEIGHT_KEYS)}; "
+                f"unknown: {', '.join(unknown_loss_weights)}"
+            )
+        negative_loss_weights = sorted(key for key, value in loss_weight_overrides.items() if value < 0.0)
+        if negative_loss_weights:
+            raise TrainingJobRequestError(f"lossWeights must be >= 0 for {', '.join(negative_loss_weights)}")
 
         normalized_specs.append({
             "name": name,
@@ -339,12 +412,12 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
             "epochs": epochs,
             "learningRate": learning_rate,
             "widthMultiplier": width_multiplier,
+            "smoothL1Beta": smooth_l1_beta,
+            "earlyStoppingMetric": early_stopping_metric,
             "trainRunIds": normalize_string_list(spec.get("trainRunIds"), "trainRunIds"),
             "valRunIds": normalize_string_list(spec.get("valRunIds"), "valRunIds"),
-            "lossWeights": normalize_float_map(spec.get("lossWeights"), "lossWeights"),
-            "consistency": normalize_float_map(spec.get("consistency"), "consistency"),
+            "lossWeights": loss_weight_overrides,
             "turnOversampling": normalize_turn_oversampling(spec.get("turnOversampling")),
-            "yawLossWeighting": normalize_toggle_map(spec.get("yawLossWeighting"), "yawLossWeighting"),
             "stateInputs": normalize_state_inputs(spec.get("stateInputs")),
         })
     return normalized_specs
@@ -402,7 +475,7 @@ def _dump_toml(data: dict[str, Any]) -> str:
 
 
 class TrainingManager:
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, start_worker: bool = True) -> None:
         self._config_path = config_path.resolve()
         self._project_root = self._config_path.parent.parent.resolve()
         self._train_script = (Path(__file__).resolve().parent / "train.py").resolve()
@@ -419,8 +492,10 @@ class TrainingManager:
 
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
         self._load_existing_jobs()
-        self._thread = threading.Thread(target=self._run_loop, name="training-queue", daemon=True)
-        self._thread.start()
+        self._thread: threading.Thread | None = None
+        if start_worker:
+            self._thread = threading.Thread(target=self._run_loop, name="training-queue", daemon=True)
+            self._thread.start()
 
     def page_config(self) -> dict[str, Any]:
         payload = copy.deepcopy(self._page_config)
@@ -513,12 +588,12 @@ class TrainingManager:
             "epochs": spec["epochs"],
             "learningRate": spec["learningRate"],
             "widthMultiplier": spec["widthMultiplier"],
+            "smoothL1Beta": spec["smoothL1Beta"],
+            "earlyStoppingMetric": spec["earlyStoppingMetric"],
             "trainRunIds": list(spec["trainRunIds"]) if spec["trainRunIds"] is not None else None,
             "valRunIds": list(spec["valRunIds"]) if spec["valRunIds"] is not None else None,
             "lossWeights": dict(spec["lossWeights"]),
-            "consistency": dict(spec["consistency"]),
             "turnOversampling": dict(spec["turnOversampling"]),
-            "yawLossWeighting": dict(spec["yawLossWeighting"]),
             "stateInputs": copy.deepcopy(spec["stateInputs"]),
             "createdAt": created_at,
             "lastUpdatedAt": created_at,
@@ -541,12 +616,12 @@ class TrainingManager:
             "epochs": int(job["epochs"]) if job.get("epochs") is not None else None,
             "learningRate": float(job["learningRate"]) if job.get("learningRate") is not None else None,
             "widthMultiplier": float(job["widthMultiplier"]) if job.get("widthMultiplier") is not None else None,
+            "smoothL1Beta": float(job["smoothL1Beta"]) if job.get("smoothL1Beta") is not None else None,
+            "earlyStoppingMetric": str(job.get("earlyStoppingMetric") or "") or None,
             "trainRunIds": list(job["trainRunIds"]) if job.get("trainRunIds") is not None else None,
             "valRunIds": list(job["valRunIds"]) if job.get("valRunIds") is not None else None,
             "lossWeights": dict(job.get("lossWeights") or {}),
-            "consistency": dict(job.get("consistency") or {}),
             "turnOversampling": dict(job.get("turnOversampling") or {}),
-            "yawLossWeighting": dict(job.get("yawLossWeighting") or {}),
             "stateInputs": copy.deepcopy(job.get("stateInputs") or {}),
         }
 
@@ -754,27 +829,34 @@ class TrainingManager:
         if job.get("epochs") is not None:
             training_raw["epochs"] = int(job["epochs"])
         if job.get("learningRate") is not None:
-            training_raw["learning_rate"] = float(job["learningRate"])
+            resolved_lr = float(job["learningRate"])
+            training_raw["learning_rate"] = resolved_lr
+            optimizer_raw = training_raw.get("optimizer")
+            if isinstance(optimizer_raw, dict):
+                optimizer_raw["lr"] = resolved_lr
         if job.get("widthMultiplier") is not None:
             model_raw["width_multiplier"] = float(job["widthMultiplier"])
+        if job.get("smoothL1Beta") is not None:
+            training_raw["smooth_l1_beta"] = float(job["smoothL1Beta"])
+        if job.get("earlyStoppingMetric"):
+            training_raw["early_stopping_metric"] = str(job["earlyStoppingMetric"])
         if job.get("trainRunIds") is not None:
             dataset_raw["train_run_ids"] = [str(value) for value in job["trainRunIds"]]
         if job.get("valRunIds") is not None:
             dataset_raw["val_run_ids"] = [str(value) for value in job["valRunIds"]]
         if job.get("lossWeights"):
-            training_raw["loss_weights"] = {key: float(value) for key, value in dict(job["lossWeights"]).items()}
-        if job.get("consistency"):
-            training_raw["consistency"] = {key: float(value) for key, value in dict(job["consistency"]).items()}
+            training_raw["target_loss_weights"] = {
+                key: float(value)
+                for key, value in dict(job["lossWeights"]).items()
+            }
+            training_raw.pop("loss_weights", None)
+        training_raw.pop("consistency", None)
+        training_raw.pop("yaw_loss_weighting", None)
         if job.get("turnOversampling"):
             turn_oversampling = _normalize_turn_oversampling_thresholds(dict(job["turnOversampling"]))
             loader_raw["turn_oversampling"] = {
                 key: (bool(value) if key == "enabled" else float(value))
                 for key, value in turn_oversampling.items()
-            }
-        if job.get("yawLossWeighting"):
-            training_raw["yaw_loss_weighting"] = {
-                key: (bool(value) if key == "enabled" else float(value))
-                for key, value in dict(job["yawLossWeighting"]).items()
             }
         if job.get("stateInputs"):
             state_input_overrides = dict(job["stateInputs"])
@@ -785,8 +867,6 @@ class TrainingManager:
                 serialized: dict[str, Any] = {}
                 if "enabled" in item:
                     serialized["enabled"] = bool(item["enabled"])
-                if "heads" in item:
-                    serialized["heads"] = [str(value) for value in item["heads"]]
                 if definition.default_cap is not None and "cap" in item:
                     serialized["cap"] = float(item["cap"])
                 state_inputs_raw[definition.key] = serialized

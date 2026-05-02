@@ -284,6 +284,7 @@ export class SceneManager {
         try {
             envService.execute(clonedScene.environment);
             await egoService.executeEgo(clonedScene.ego, "ego-control", runId);
+            egoService.configureManualRouteContext(clonedScene.ego);
         } catch (error) {
             this.egoControlActive = false;
             this.activeSceneName = null;
@@ -323,6 +324,28 @@ export class SceneManager {
         steering: number
         acceleration: number
         brakePressureAvg: number
+        vehicleExists: boolean
+        isInVehicle: boolean
+        positionX?: number
+        positionY?: number
+        positionZ?: number
+        velocityX?: number
+        velocityY?: number
+        velocityZ?: number
+        pitchDeg?: number
+        rollDeg?: number
+        gear?: number
+        rpm?: number
+        wheelAngle?: number
+        onGround?: boolean
+        collisionState?: string
+        routeDirectionCode: number
+        routeDirectionDistanceM: number
+        routeDirectionUnknown: number
+        routeDirectionKeepStraight: number
+        routeDirectionTurnLeft: number
+        routeDirectionTurnRight: number
+        routeDirectionRerouteWrongWay: number
         routeForwardDelta: number | null
         routeHeadingError: number | null
         routeDistance: number | null

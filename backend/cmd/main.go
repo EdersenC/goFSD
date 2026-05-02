@@ -71,7 +71,7 @@ func main() {
 
 	svc := capture.NewService()
 	controlStore := control.NewStore()
-	actuatorService := actuator.NewService(actuatorConfig, configPath)
+	actuatorService := actuator.NewService(actuatorConfig, configPath, controlStore)
 	translationService := translation.NewService(translationConfig, configPath, actuatorService)
 	inferencer := capture.NewInferencer(inferenceConfig, actuatorConfig, controlStore, actuatorService)
 	trainingProxyBaseURL := strings.TrimRight(strings.TrimSpace(inferenceConfig.ModelServerURL), "/")
@@ -88,7 +88,7 @@ func main() {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
-		datasetproc.WithDeltaSpeedTargetConfig(datasetConfig.DeltaSpeedClip, datasetConfig.DeltaSpeedNormalize),
+		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)
 	mux := http.NewServeMux()
@@ -770,7 +770,7 @@ func runProcessRuns(args []string) error {
 	}
 
 	fmt.Printf(
-		"Processing %d trip folders from %s with workers=%d force=%t dataset_only=%t image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s delta_speed_clip=%.3f delta_speed_normalize=%t\n",
+		"Processing %d trip folders from %s with workers=%d force=%t dataset_only=%t image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
 		len(tripDirs),
 		*root,
 		*workers,
@@ -782,8 +782,8 @@ func runProcessRuns(args []string) error {
 		datasetConfig.FrameStride,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
-		datasetConfig.DeltaSpeedClip,
-		datasetConfig.DeltaSpeedNormalize,
+		datasetConfig.FutureSpeedDeltaClip,
+		datasetConfig.FutureSpeedDeltaNormalize,
 	)
 
 	var completed int
@@ -862,7 +862,7 @@ func runProcessRuns(args []string) error {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
-		datasetproc.WithDeltaSpeedTargetConfig(datasetConfig.DeltaSpeedClip, datasetConfig.DeltaSpeedNormalize),
+		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)
 
@@ -923,7 +923,7 @@ func runReportRuns(args []string) error {
 	}
 
 	fmt.Printf(
-		"Reporting %d trip folders from %s image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s delta_speed_clip=%.3f delta_speed_normalize=%t\n",
+		"Reporting %d trip folders from %s image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
 		len(tripDirs),
 		*root,
 		datasetConfig.ImageWidth,
@@ -932,8 +932,8 @@ func runReportRuns(args []string) error {
 		datasetConfig.FrameStride,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
-		datasetConfig.DeltaSpeedClip,
-		datasetConfig.DeltaSpeedNormalize,
+		datasetConfig.FutureSpeedDeltaClip,
+		datasetConfig.FutureSpeedDeltaNormalize,
 	)
 
 	reports, reportErr := datasetproc.WriteRunDatasetReports(tripDirs, buildDatasetReportConfig(datasetConfig))
@@ -954,14 +954,14 @@ func loadDatasetConfigForCLI() (capture.DatasetConfig, error) {
 
 func buildDatasetReportConfig(datasetConfig capture.DatasetConfig) datasetproc.DatasetReportConfig {
 	return datasetproc.DatasetReportConfig{
-		ImageWidth:          datasetConfig.ImageWidth,
-		ImageHeight:         datasetConfig.ImageHeight,
-		WindowSize:          datasetConfig.WindowSize,
-		FrameStride:         datasetConfig.FrameStride,
-		SampleStride:        datasetConfig.SampleStride,
-		LabelTolerance:      datasetConfig.LabelTolerance.String(),
-		DeltaSpeedClip:      datasetConfig.DeltaSpeedClip,
-		DeltaSpeedNormalize: datasetConfig.DeltaSpeedNormalize,
+		ImageWidth:                datasetConfig.ImageWidth,
+		ImageHeight:               datasetConfig.ImageHeight,
+		WindowSize:                datasetConfig.WindowSize,
+		FrameStride:               datasetConfig.FrameStride,
+		SampleStride:              datasetConfig.SampleStride,
+		LabelTolerance:            datasetConfig.LabelTolerance.String(),
+		FutureSpeedDeltaClip:      datasetConfig.FutureSpeedDeltaClip,
+		FutureSpeedDeltaNormalize: datasetConfig.FutureSpeedDeltaNormalize,
 	}
 }
 
@@ -969,12 +969,12 @@ func printRunDatasetReportSummaries(reports []datasetproc.GeneratedRunDatasetRep
 	for _, generated := range reports {
 		summary := generated.Report.Summary
 		fmt.Printf(
-			"Report: run=%s trips=%d samples=%d stopped_share=%.3f delta_speed_clip_rate=%.3f path=%s\n",
+			"Report: run=%s trips=%d samples=%d stopped_share=%.3f future_speed_delta_clip_rate=%.3f path=%s\n",
 			generated.RunID,
 			summary.TripCount,
 			summary.SampleCount,
 			summary.StoppedSampleShare,
-			summary.DeltaSpeedClip.AnyClipRate,
+			summary.FutureSpeedDeltaClip.AnyClipRate,
 			generated.ReportPath,
 		)
 	}

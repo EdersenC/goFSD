@@ -1,6 +1,7 @@
 package control
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -139,6 +140,154 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 	if latest := store.LatestTelemetry(); latest == nil || latest.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected latest telemetry: %+v", latest)
+	}
+}
+
+func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
+	now := time.UnixMilli(1000).UTC()
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+	store.UpdateAppliedControls(AppliedControls{Steer: 0.25, Throttle: 0.50, Brake: 0.10, TimestampS: 0.9})
+	positionX, positionY, positionZ := 10.0, 20.0, 3.0
+	velocityX, velocityY, velocityZ := 1.0, 2.0, 0.0
+	pitchDeg, rollDeg := 5.0, -2.0
+	gear := 3
+	rpm := 0.45
+	onGround := true
+
+	store.UpdateTelemetry(TelemetryUpdate{
+		CurrentSpeed:     12.5,
+		CurrentYaw:       90.0,
+		YawRate:          0.4,
+		Steering:         17.5,
+		BrakePressureAvg: 0.3,
+		VehicleExists:    true,
+		IsInVehicle:      true,
+		PositionX:        &positionX,
+		PositionY:        &positionY,
+		PositionZ:        &positionZ,
+		VelocityX:        &velocityX,
+		VelocityY:        &velocityY,
+		VelocityZ:        &velocityZ,
+		PitchDeg:         &pitchDeg,
+		RollDeg:          &rollDeg,
+		Gear:             &gear,
+		RPM:              &rpm,
+		OnGround:         &onGround,
+		TimestampMs:      1000,
+		GameTimeMs:       5000,
+	})
+
+	snapshot, _ := store.LatestEgoTelemetrySnapshot()
+	if snapshot == nil || !snapshot.Valid {
+		t.Fatalf("expected valid ego telemetry snapshot, got=%+v", snapshot)
+	}
+	if snapshot.SpeedMPS != 12.5 {
+		t.Fatalf("unexpected speed normalization: %+v", snapshot)
+	}
+	if snapshot.HeadingRad == nil || math.Abs(*snapshot.HeadingRad-math.Pi/2) > 1e-9 {
+		t.Fatalf("expected heading in radians, got=%+v", snapshot.HeadingRad)
+	}
+	if snapshot.SteeringActual == nil || math.Abs(*snapshot.SteeringActual-0.5) > 1e-9 {
+		t.Fatalf("expected wheel angle to normalize to steering_actual=0.5, got=%+v", snapshot.SteeringActual)
+	}
+	if snapshot.BrakeActual == nil || math.Abs(*snapshot.BrakeActual-0.3) > 1e-9 {
+		t.Fatalf("expected brake pressure to normalize into brake_actual, got=%+v", snapshot.BrakeActual)
+	}
+	if snapshot.SteeringApplied == nil || *snapshot.SteeringApplied != 0.25 {
+		t.Fatalf("expected applied controls in snapshot, got=%+v", snapshot)
+	}
+
+	ego, _ := store.LatestActuatorEgoStateSnapshot()
+	if ego == nil || !ego.Valid || ego.Position == nil || ego.Velocity == nil {
+		t.Fatalf("expected actuator ego state with position/velocity, got=%+v", ego)
+	}
+	if ego.LastAppliedSteer != 0.25 || ego.LastAppliedThrottle != 0.50 || ego.LastAppliedBrake != 0.10 {
+		t.Fatalf("unexpected applied controls in ego state: %+v", ego)
+	}
+}
+
+func TestTelemetryTimestampMonotonicityInvalidatesBackwardUpdates(t *testing.T) {
+	adapter := NewFiveMTelemetryAdapter(DefaultFiveMTelemetryAdapterConfig())
+	first := adapter.Snapshot(TelemetryUpdate{
+		CurrentSpeed:  5,
+		VehicleExists: true,
+		IsInVehicle:   true,
+		TimestampMs:   2000,
+	}, time.UnixMilli(2000), AppliedControls{})
+	if !first.Valid {
+		t.Fatalf("expected first snapshot to be valid, got=%+v", first)
+	}
+
+	second := adapter.Snapshot(TelemetryUpdate{
+		CurrentSpeed:  5,
+		VehicleExists: true,
+		IsInVehicle:   true,
+		TimestampMs:   1900,
+	}, time.UnixMilli(1900), AppliedControls{})
+	if second.Valid || second.InvalidReason != "timestamp moved backward" {
+		t.Fatalf("expected backward timestamp invalidation, got=%+v", second)
+	}
+}
+
+func TestActuatorStateAdapterConvertsSnapshot(t *testing.T) {
+	adapter := NewFiveMTelemetryAdapter(DefaultFiveMTelemetryAdapterConfig())
+	x, y, z := 1.0, 2.0, 3.0
+	vx, vy, vz := 4.0, 5.0, 0.0
+	snapshot := adapter.Snapshot(TelemetryUpdate{
+		CurrentSpeed:    6.0,
+		CurrentYaw:      180.0,
+		YawRate:         0.25,
+		VehicleExists:   true,
+		IsInVehicle:     true,
+		PositionX:       &x,
+		PositionY:       &y,
+		PositionZ:       &z,
+		VelocityX:       &vx,
+		VelocityY:       &vy,
+		VelocityZ:       &vz,
+		SteeringApplied: floatPtr(0.2),
+		ThrottleApplied: floatPtr(0.3),
+		BrakeApplied:    floatPtr(0.4),
+		TimestampMs:     1000,
+	}, time.UnixMilli(1000), AppliedControls{})
+
+	state := adapter.ToActuatorEgoState(snapshot)
+	if !state.Valid || state.Position == nil || state.Velocity == nil {
+		t.Fatalf("expected valid actuator ego state, got=%+v", state)
+	}
+	if state.SpeedMPS != 6.0 || state.LastAppliedSteer != 0.2 || state.LastAppliedThrottle != 0.3 || state.LastAppliedBrake != 0.4 {
+		t.Fatalf("unexpected actuator ego state values: %+v", state)
+	}
+	if state.HeadingRad == nil || math.Abs(*state.HeadingRad-math.Pi) > 1e-9 {
+		t.Fatalf("expected heading conversion to radians, got=%+v", state.HeadingRad)
+	}
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
+}
+
+func TestAppliedControlsHistoryUsesAppliedControls(t *testing.T) {
+	now := time.UnixMilli(1000).UTC()
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+	store.UpdateAppliedControls(AppliedControls{Steer: 0.70, Throttle: 0.20, Brake: 0.05, TimestampS: 0.95})
+	store.UpdateTelemetry(TelemetryUpdate{
+		CurrentSpeed:  3,
+		Steering:      3.5,
+		VehicleExists: true,
+		IsInVehicle:   true,
+		TimestampMs:   1000,
+	})
+
+	history := store.TemporalHistorySnapshot(1)
+	if len(history) != 1 {
+		t.Fatalf("expected one history entry, got=%d", len(history))
+	}
+	if history[0].Applied.Steer != 0.70 || history[0].Applied.Throttle != 0.20 || history[0].Applied.Brake != 0.05 {
+		t.Fatalf("expected history to keep applied controls, got=%+v", history[0])
+	}
+	if history[0].Telemetry.SteeringActual == nil || *history[0].Telemetry.SteeringActual == history[0].Applied.Steer {
+		t.Fatalf("expected actual wheel telemetry to remain distinct from applied controls, got=%+v", history[0])
 	}
 }
 
