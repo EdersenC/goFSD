@@ -9,6 +9,28 @@ import (
 	datasetproc "awesomeProject/internal/dataset"
 )
 
+func TestBackendListenAddressDefaultsToLoopback(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		port string
+		want string
+	}{
+		{name: "defaults", want: "127.0.0.1:8080"},
+		{name: "custom port", port: "9090", want: "127.0.0.1:9090"},
+		{name: "explicit remote host", host: "0.0.0.0", port: "8081", want: "0.0.0.0:8081"},
+		{name: "IPv6", host: "::1", want: "[::1]:8080"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := backendListenAddress(test.host, test.port); got != test.want {
+				t.Fatalf("unexpected listen address: got=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunReportRunsWritesDatasetReport(t *testing.T) {
 	root := t.TempDir()
 	runDir := filepath.Join(root, "run-001")

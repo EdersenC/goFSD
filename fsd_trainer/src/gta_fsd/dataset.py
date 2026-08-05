@@ -150,6 +150,31 @@ class Trip:
         return samples
 
 
+def _load_trip_metadata_for_filtering(trip_dir: Path) -> dict[str, Any] | None:
+    metadata_path = trip_dir / "metadata.json"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"failed to read trip metadata: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"trip metadata must be a JSON object: {metadata_path}")
+    return metadata
+
+
+def _is_successful_parking_attempt(trip_dir: Path) -> bool:
+    metadata = _load_trip_metadata_for_filtering(trip_dir)
+    if metadata is None:
+        return True
+    parking_goal = metadata.get("parkingGoal")
+    outcome = metadata.get("parkingOutcome")
+    is_parking_attempt = parking_goal is not None or outcome is not None
+    if not is_parking_attempt:
+        return True
+    return isinstance(outcome, dict) and outcome.get("success") is True
+
+
 def _coerce_float(mapping: TelemetryMap, key: str) -> float:
     if key not in mapping:
         raise KeyError(f"missing telemetry key '{key}'")
@@ -249,6 +274,7 @@ class FsdDataset(Dataset[DatasetItem]):
         aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
         target_transforms: Mapping[str, TargetTransform] | None = None,
         state_input_config: Any | None = None,
+        include_failed_parking_attempts: bool = False,
     ):
         if expected_window_size is not None and expected_window_size != len(image_offsets):
             raise ValueError(
@@ -267,6 +293,8 @@ class FsdDataset(Dataset[DatasetItem]):
             target_transforms,
         )
         self.state_input_config = state_input_config_from_metadata(state_input_config)
+        self.include_failed_parking_attempts = bool(include_failed_parking_attempts)
+        self.excluded_failed_parking_trip_count = 0
         self.image_size = image_size
         self.data_root = None if data_root is None else Path(data_root)
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
@@ -326,6 +354,12 @@ class FsdDataset(Dataset[DatasetItem]):
                     if path.is_dir() and path.name.startswith("trip-")
                 )
                 for trip_dir in trip_dirs:
+                    if (
+                        not self.include_failed_parking_attempts
+                        and not _is_successful_parking_attempt(trip_dir)
+                    ):
+                        self.excluded_failed_parking_trip_count += 1
+                        continue
                     trips.append(Trip(trip_dir, run_path=run_path))
         return trips
 

@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from config import environment_data_root, resolve_data_root_child
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
     STATE_INPUT_DEFINITIONS,
@@ -150,6 +151,8 @@ def _resolve_jobs_dir(config_path: Path) -> Path:
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     backend_training = raw.get("backend", {}).get("training", {})
     jobs_dir_raw = str(backend_training.get("jobs_dir", "")).strip()
+    if environment_data_root():
+        return Path(resolve_data_root_child(jobs_dir_raw, "training_jobs"))
     if jobs_dir_raw:
         jobs_dir = _normalize_runtime_path(jobs_dir_raw)
         if jobs_dir.is_absolute():

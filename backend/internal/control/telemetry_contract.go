@@ -13,7 +13,6 @@ const (
 	defaultMaxReasonableSpeedMPS            = 120.0
 	defaultMaxReasonableAbsPosition         = 1000000.0
 	defaultMaxReasonableAbsVelocityMPS      = 180.0
-	defaultWheelSteeringFullLockDegrees     = 35.0
 	NormalizedControlRangeDescription       = "steer [-1,1], throttle [0,1], brake [0,1]"
 	FiveMWorldCoordinateConvention          = "GTA/FiveM world coordinates: X east/west, Y north/south, Z up"
 	EgoRelativeWaypointCoordinateConvention = "ego-relative waypoint coordinates: x lateral right positive, y forward positive"
@@ -33,37 +32,38 @@ type AppliedControls struct {
 }
 
 type EgoTelemetrySnapshot struct {
-	TimestampS      float64  `json:"timestamp_s"`
-	FrameID         *int64   `json:"frame_id,omitempty"`
-	GameTimeS       *float64 `json:"game_time_s,omitempty"`
-	WallTimeS       *float64 `json:"wall_time_s,omitempty"`
-	VehicleExists   bool     `json:"vehicle_exists"`
-	IsInVehicle     bool     `json:"is_in_vehicle"`
-	PositionX       *float64 `json:"position_x,omitempty"`
-	PositionY       *float64 `json:"position_y,omitempty"`
-	PositionZ       *float64 `json:"position_z,omitempty"`
-	VelocityX       *float64 `json:"velocity_x,omitempty"`
-	VelocityY       *float64 `json:"velocity_y,omitempty"`
-	VelocityZ       *float64 `json:"velocity_z,omitempty"`
-	SpeedMPS        float64  `json:"speed_mps"`
-	HeadingRad      *float64 `json:"heading_rad,omitempty"`
-	YawRad          *float64 `json:"yaw_rad,omitempty"`
-	YawRateRadS     *float64 `json:"yaw_rate_rad_s,omitempty"`
-	PitchRad        *float64 `json:"pitch_rad,omitempty"`
-	RollRad         *float64 `json:"roll_rad,omitempty"`
-	SteeringActual  *float64 `json:"steering_actual,omitempty"`
-	ThrottleActual  *float64 `json:"throttle_actual,omitempty"`
-	BrakeActual     *float64 `json:"brake_actual,omitempty"`
-	SteeringApplied *float64 `json:"steering_applied,omitempty"`
-	ThrottleApplied *float64 `json:"throttle_applied,omitempty"`
-	BrakeApplied    *float64 `json:"brake_applied,omitempty"`
-	Gear            *int     `json:"gear,omitempty"`
-	RPM             *float64 `json:"rpm,omitempty"`
-	WheelAngle      *float64 `json:"wheel_angle,omitempty"`
-	OnGround        *bool    `json:"on_ground,omitempty"`
-	CollisionState  string   `json:"collision_state,omitempty"`
-	Valid           bool     `json:"valid"`
-	InvalidReason   string   `json:"invalid_reason,omitempty"`
+	TimestampS            float64  `json:"timestamp_s"`
+	FrameID               *int64   `json:"frame_id,omitempty"`
+	GameTimeS             *float64 `json:"game_time_s,omitempty"`
+	WallTimeS             *float64 `json:"wall_time_s,omitempty"`
+	VehicleExists         bool     `json:"vehicle_exists"`
+	IsInVehicle           bool     `json:"is_in_vehicle"`
+	PositionX             *float64 `json:"position_x,omitempty"`
+	PositionY             *float64 `json:"position_y,omitempty"`
+	PositionZ             *float64 `json:"position_z,omitempty"`
+	VelocityX             *float64 `json:"velocity_x,omitempty"`
+	VelocityY             *float64 `json:"velocity_y,omitempty"`
+	VelocityZ             *float64 `json:"velocity_z,omitempty"`
+	SpeedMPS              float64  `json:"speed_mps"`
+	HeadingRad            *float64 `json:"heading_rad,omitempty"`
+	YawRad                *float64 `json:"yaw_rad,omitempty"`
+	YawRateRadS           *float64 `json:"yaw_rate_rad_s,omitempty"`
+	PitchRad              *float64 `json:"pitch_rad,omitempty"`
+	RollRad               *float64 `json:"roll_rad,omitempty"`
+	SteeringActual        *float64 `json:"steering_actual,omitempty"`
+	ThrottleActual        *float64 `json:"throttle_actual,omitempty"`
+	BrakeActual           *float64 `json:"brake_actual,omitempty"`
+	SteeringApplied       *float64 `json:"steering_applied,omitempty"`
+	ThrottleApplied       *float64 `json:"throttle_applied,omitempty"`
+	BrakeApplied          *float64 `json:"brake_applied,omitempty"`
+	Gear                  *int     `json:"gear,omitempty"`
+	RPM                   *float64 `json:"rpm,omitempty"`
+	WheelAngle            *float64 `json:"wheel_angle,omitempty"`              // Raw physical wheel angle in radians.
+	WheelSteeringFullLock *float64 `json:"wheel_steering_full_lock,omitempty"` // Physical full-lock angle in radians.
+	OnGround              *bool    `json:"on_ground,omitempty"`
+	CollisionState        string   `json:"collision_state,omitempty"`
+	Valid                 bool     `json:"valid"`
+	InvalidReason         string   `json:"invalid_reason,omitempty"`
 }
 
 type ActuatorEgoState struct {
@@ -82,7 +82,6 @@ type ActuatorEgoState struct {
 
 type FiveMTelemetryAdapterConfig struct {
 	MaxFrameTelemetrySkew       time.Duration
-	WheelSteeringFullLockDeg    float64
 	MaxReasonableSpeedMPS       float64
 	MaxReasonableAbsPosition    float64
 	MaxReasonableAbsVelocityMPS float64
@@ -120,7 +119,6 @@ func (u TelemetryUpdate) AppliedBrakeOr(fallback float64) float64 {
 func DefaultFiveMTelemetryAdapterConfig() FiveMTelemetryAdapterConfig {
 	return FiveMTelemetryAdapterConfig{
 		MaxFrameTelemetrySkew:       defaultMaxFrameTelemetrySkew,
-		WheelSteeringFullLockDeg:    defaultWheelSteeringFullLockDegrees,
 		MaxReasonableSpeedMPS:       defaultMaxReasonableSpeedMPS,
 		MaxReasonableAbsPosition:    defaultMaxReasonableAbsPosition,
 		MaxReasonableAbsVelocityMPS: defaultMaxReasonableAbsVelocityMPS,
@@ -133,9 +131,6 @@ func DefaultFiveMTelemetryAdapterConfig() FiveMTelemetryAdapterConfig {
 func NewFiveMTelemetryAdapter(cfg FiveMTelemetryAdapterConfig) *FiveMTelemetryAdapter {
 	if cfg.MaxFrameTelemetrySkew <= 0 {
 		cfg.MaxFrameTelemetrySkew = defaultMaxFrameTelemetrySkew
-	}
-	if cfg.WheelSteeringFullLockDeg <= 0 {
-		cfg.WheelSteeringFullLockDeg = defaultWheelSteeringFullLockDegrees
 	}
 	if cfg.MaxReasonableSpeedMPS <= 0 {
 		cfg.MaxReasonableSpeedMPS = defaultMaxReasonableSpeedMPS
@@ -167,25 +162,26 @@ func (a *FiveMTelemetryAdapter) Snapshot(update TelemetryUpdate, receivedAt time
 		timestampS = float64(update.TimestampMs) / 1000.0
 	}
 	snapshot := EgoTelemetrySnapshot{
-		TimestampS:      timestampS,
-		VehicleExists:   update.VehicleExists,
-		IsInVehicle:     update.IsInVehicle,
-		PositionX:       cloneFloatPtr(update.PositionX),
-		PositionY:       cloneFloatPtr(update.PositionY),
-		PositionZ:       cloneFloatPtr(update.PositionZ),
-		VelocityX:       cloneFloatPtr(update.VelocityX),
-		VelocityY:       cloneFloatPtr(update.VelocityY),
-		VelocityZ:       cloneFloatPtr(update.VelocityZ),
-		SpeedMPS:        update.CurrentSpeed,
-		YawRateRadS:     finiteFloatPtr(update.YawRate),
-		Gear:            cloneIntPtr(update.Gear),
-		RPM:             cloneFloatPtr(update.RPM),
-		WheelAngle:      cloneFloatPtr(update.WheelAngle),
-		OnGround:        cloneBoolPtr(update.OnGround),
-		CollisionState:  strings.TrimSpace(update.CollisionState),
-		SteeringApplied: finiteFloatPtr(clamp(update.AppliedSteerOr(applied.Steer), -1, 1)),
-		ThrottleApplied: finiteFloatPtr(clamp(update.AppliedThrottleOr(applied.Throttle), 0, 1)),
-		BrakeApplied:    finiteFloatPtr(clamp(update.AppliedBrakeOr(applied.Brake), 0, 1)),
+		TimestampS:            timestampS,
+		VehicleExists:         update.VehicleExists,
+		IsInVehicle:           update.IsInVehicle,
+		PositionX:             cloneFloatPtr(update.PositionX),
+		PositionY:             cloneFloatPtr(update.PositionY),
+		PositionZ:             cloneFloatPtr(update.PositionZ),
+		VelocityX:             cloneFloatPtr(update.VelocityX),
+		VelocityY:             cloneFloatPtr(update.VelocityY),
+		VelocityZ:             cloneFloatPtr(update.VelocityZ),
+		SpeedMPS:              update.CurrentSpeed,
+		YawRateRadS:           finiteFloatPtr(update.YawRate),
+		Gear:                  cloneIntPtr(update.Gear),
+		RPM:                   cloneFloatPtr(update.RPM),
+		WheelAngle:            cloneFloatPtr(update.WheelAngle),
+		WheelSteeringFullLock: cloneFloatPtr(update.WheelSteeringFullLock),
+		OnGround:              cloneBoolPtr(update.OnGround),
+		CollisionState:        strings.TrimSpace(update.CollisionState),
+		SteeringApplied:       finiteFloatPtr(clamp(update.AppliedSteerOr(applied.Steer), -1, 1)),
+		ThrottleApplied:       finiteFloatPtr(clamp(update.AppliedThrottleOr(applied.Throttle), 0, 1)),
+		BrakeApplied:          finiteFloatPtr(clamp(update.AppliedBrakeOr(applied.Brake), 0, 1)),
 	}
 	if timestampS > 0 {
 		wallTime := timestampS
@@ -212,10 +208,10 @@ func (a *FiveMTelemetryAdapter) Snapshot(update TelemetryUpdate, receivedAt time
 		snapshot.RollRad = &roll
 	}
 
-	// GetVehicleWheelSteeringAngle is a physical wheel angle in degrees, not
-	// a requested control. Normalize it as an actual steering proxy.
+	// FiveM publishes Steering in the same normalized [-1, 1] contract used by
+	// the model and virtual controller. WheelAngle remains raw diagnostics.
 	if finite(update.Steering) {
-		steeringActual := clamp(update.Steering/a.cfg.WheelSteeringFullLockDeg, -1, 1)
+		steeringActual := clamp(update.Steering, -1, 1)
 		snapshot.SteeringActual = &steeringActual
 	}
 	if finite(update.BrakePressureAvg) {
@@ -439,6 +435,7 @@ func cloneEgoTelemetrySnapshot(snapshot EgoTelemetrySnapshot) EgoTelemetrySnapsh
 	out.Gear = cloneIntPtr(snapshot.Gear)
 	out.RPM = cloneFloatPtr(snapshot.RPM)
 	out.WheelAngle = cloneFloatPtr(snapshot.WheelAngle)
+	out.WheelSteeringFullLock = cloneFloatPtr(snapshot.WheelSteeringFullLock)
 	out.OnGround = cloneBoolPtr(snapshot.OnGround)
 	return out
 }

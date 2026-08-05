@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import torch
 
+from config import resolve_data_root_child
 from image_io import load_rgb_tensor_from_bytes, load_rgb_tensor_from_path
 from inference import (
     DEFAULT_CONFIG_PATH,
@@ -34,6 +35,7 @@ from inference import (
 )
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
+    PARKING_TARGET_CONFIGURED_KEY,
     resolve_route_direction_defaults,
     STATE_INPUT_DEFINITIONS,
     StateInputConfig,
@@ -74,7 +76,7 @@ class ModelOption:
 def load_training_runs_dir(config_path: Path) -> Path:
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     output_raw = raw.get("output", {})
-    base_dir_raw = str(output_raw.get("base_dir", "")).strip()
+    base_dir_raw = resolve_data_root_child(output_raw.get("base_dir"), "training_runs")
     if not base_dir_raw:
         raise ValueError(f"Missing output.base_dir in {config_path}")
 
@@ -110,12 +112,15 @@ def load_training_runs_dir(config_path: Path) -> Path:
         if resolved.is_dir():
             return resolved
 
-    tried = "\n".join(f"- {path}" for path in ordered_candidates)
-    raise FileNotFoundError(f"Training runs directory does not exist: {base_dir_raw}\nTried:\n{tried}")
+    if ordered_candidates:
+        return ordered_candidates[0]
+    raise ValueError(f"Unable to resolve output.base_dir from {config_path}")
 
 
 def discover_models(config_path: Path) -> list[dict[str, Any]]:
     runs_dir = load_training_runs_dir(config_path)
+    if not runs_dir.is_dir():
+        return []
     models: list[ModelOption] = []
 
     for run_dir in sorted((path for path in runs_dir.iterdir() if path.is_dir()), reverse=True):
@@ -489,6 +494,8 @@ class ModelRuntime:
                 if has_lead_raw in (False, 0, 0.0):
                     raw_value = resolve_state_input_cap(config, definition.key)
             normalized = normalize_state_input_value(definition.key, raw_value, config)
+            if definition.key == PARKING_TARGET_CONFIGURED_KEY and normalized < 0.5:
+                raise ValueError("parking target must be configured before parking-model inference")
             raw_state_inputs[definition.key] = (normalized >= 0.5) if definition.key == "has_lead_vehicle" else float(raw_value)
             normalized_state_inputs[definition.key] = torch.tensor([normalized], dtype=torch.float32)
         return raw_state_inputs, normalized_state_inputs
@@ -592,7 +599,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("config must be a non-empty string when provided")
             config_path = Path(raw_config)
 
-        file_config = load_config(config_path)
+        file_config = load_config(config_path, require_checkpoint=False)
         raw_checkpoint = payload.get("checkpoint", file_config.checkpoint)
         raw_device = payload.get("device") or file_config.device or "cuda"
 

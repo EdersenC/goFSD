@@ -146,11 +146,28 @@ func TestStepAppliesSpeedLimitBrakeThresholdAndReverseLockout(t *testing.T) {
 	if err := svc.step(now.Add(10 * time.Millisecond)); err != nil {
 		t.Fatalf("second step returned error: %v", err)
 	}
-	if svc.applied.Brake != 0 {
-		t.Fatalf("expected reverse lockout to suppress brake near stop, got=%+v", svc.applied)
+	if svc.applied.Brake != 0 || !svc.applied.Handbrake {
+		t.Fatalf("expected reverse lockout to translate brake into a handbrake hold near stop, got=%+v", svc.applied)
 	}
-	if !svc.target.Safety.ReverseLockoutApplied {
+	if !svc.target.Safety.ReverseLockoutApplied || !svc.target.Safety.LowSpeedBrakeHold {
 		t.Fatalf("expected reverse lockout debug flag, got=%+v", svc.target.Safety)
+	}
+
+	now = now.Add(100 * time.Millisecond)
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 0.1, TimestampMs: now.UnixMilli()})
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{
+			Throttle: 0.8,
+		},
+		Enabled:    true,
+		InputMode:  InputModeNormalized,
+		ReceivedAt: now.Format(time.RFC3339Nano),
+	}
+	if err := svc.step(now.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("forward release step returned error: %v", err)
+	}
+	if svc.applied.Handbrake || svc.applied.Brake != 0 || svc.applied.Throttle <= 0 {
+		t.Fatalf("expected forward throttle to release the automatic handbrake hold, got=%+v", svc.applied)
 	}
 }
 
@@ -168,6 +185,39 @@ func TestResolveTargetTimesOutToNeutralByDefault(t *testing.T) {
 	}
 	if !stale || enabled || !timedOut {
 		t.Fatalf("unexpected timeout flags stale=%v enabled=%v timedOut=%v", stale, enabled, timedOut)
+	}
+}
+
+func TestDisabledSafetyHoldPersistsUntilExplicitRelease(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.StaleTimeout = 250 * time.Millisecond
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	svc := NewService(cfg, "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.nowFunc = func() time.Time { return now }
+	enabled := false
+
+	if _, err := svc.Submit(CommandRequest{Enabled: &enabled, Handbrake: true}); err != nil {
+		t.Fatalf("submit safety hold: %v", err)
+	}
+	if err := svc.step(now.Add(cfg.StaleTimeout + time.Second)); err != nil {
+		t.Fatalf("step beyond stale timeout: %v", err)
+	}
+	if !svc.applied.Handbrake || svc.applied.TimedOut || svc.applied.Enabled {
+		t.Fatalf("expected disabled safety hold to remain latched, got=%+v", svc.applied)
+	}
+
+	now = now.Add(cfg.StaleTimeout + time.Second)
+	if _, err := svc.Submit(CommandRequest{Enabled: &enabled, Handbrake: false}); err != nil {
+		t.Fatalf("submit explicit release: %v", err)
+	}
+	if err := svc.step(now.Add(cfg.StaleTimeout + time.Second)); err != nil {
+		t.Fatalf("step after explicit release: %v", err)
+	}
+	if svc.applied.Handbrake || svc.applied.TimedOut || svc.applied.Enabled {
+		t.Fatalf("expected disabled neutral command to remain neutral, got=%+v", svc.applied)
 	}
 }
 
@@ -189,6 +239,60 @@ func TestSubmitDefaultsToNormalizedInputMode(t *testing.T) {
 	}
 	if state.LastCommand.Brake != 0.3 {
 		t.Fatalf("expected brake to be stored on command, got=%+v", state.LastCommand)
+	}
+}
+
+func TestAppliedStateCarriesExactSubmittedCommandID(t *testing.T) {
+	cfg := DefaultConfig()
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	svc := NewService(cfg, "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.nowFunc = func() time.Time { return now }
+	enabled := false
+
+	queued, err := svc.Submit(CommandRequest{Enabled: &enabled, Handbrake: true})
+	if err != nil {
+		t.Fatalf("Submit returned error: %v", err)
+	}
+	if queued.LastCommandID <= 0 || queued.Applied.CommandID == queued.LastCommandID {
+		t.Fatalf("expected Submit receipt before controller apply, got=%+v", queued)
+	}
+	if err := svc.step(now.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("step returned error: %v", err)
+	}
+	applied := svc.State()
+	if applied.Applied.CommandID != queued.LastCommandID || applied.LastApplyAttemptedCommandID != queued.LastCommandID {
+		t.Fatalf("expected exact command receipt to reach controller apply state, queued=%d state=%+v", queued.LastCommandID, applied)
+	}
+	if !applied.Applied.Handbrake || applied.LastApplySucceededAt == "" || applied.LastApplyError != "" {
+		t.Fatalf("expected successful applied safety hold, got=%+v", applied)
+	}
+}
+
+func TestCloseClearsLastCommandSoRestartCannotReplayDrive(t *testing.T) {
+	svc := NewService(DefaultConfig(), "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.lastCmd = &commandEnvelope{
+		controlState: controlState{Steer: 0.5, Throttle: 0.8},
+		CommandID:    7,
+		Enabled:      true,
+		ReceivedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	svc.nextCommandID = 7
+
+	if err := svc.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	state := svc.State()
+	if state.LastCommand != nil || state.LastCommandID != 0 || state.Applied.CommandID != 0 || state.Target.CommandID != 0 {
+		t.Fatalf("expected close to clear replayable command and applied receipts, got=%+v", state)
+	}
+	if svc.nextCommandID != 7 {
+		t.Fatalf("expected command IDs to remain monotonic across restart, got=%d", svc.nextCommandID)
 	}
 }
 
@@ -238,6 +342,69 @@ func TestTemporalSubmitAdaptsLegacyCommandWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestTemporalActuatorAppliesDisabledParkingSafetyHold(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TemporalHorizonActuatorEnabled = true
+	cfg.StaleTimeout = 250 * time.Millisecond
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	svc := NewService(cfg, "")
+	svc.controller = &fakeController{}
+	svc.ready = true
+	svc.supported = true
+	svc.nowFunc = func() time.Time { return base }
+	enabled := false
+
+	state, err := svc.Submit(CommandRequest{
+		InputMode: InputModeNormalized,
+		Handbrake: true,
+		Enabled:   &enabled,
+	})
+	if err != nil {
+		t.Fatalf("Submit returned error: %v", err)
+	}
+	if state.LastCommand == nil || state.LastCommand.Enabled || !state.LastCommand.Handbrake {
+		t.Fatalf("expected disabled safety-hold command, got=%+v", state.LastCommand)
+	}
+	if err := svc.step(base.Add(10 * time.Millisecond)); err != nil {
+		t.Fatalf("step returned error: %v", err)
+	}
+	if !svc.applied.Handbrake || svc.applied.Throttle != 0 || svc.applied.Brake != 0 || svc.applied.Enabled {
+		t.Fatalf("expected handbrake-only safety hold, got=%+v", svc.applied)
+	}
+	if err := svc.step(base.Add(cfg.StaleTimeout + time.Millisecond)); err != nil {
+		t.Fatalf("stale step returned error: %v", err)
+	}
+	if !svc.applied.Handbrake || svc.applied.TimedOut {
+		t.Fatalf("expected temporal safety hold to remain latched beyond stale timeout, got=%+v", svc.applied)
+	}
+
+	svc.nowFunc = func() time.Time { return base.Add(cfg.StaleTimeout + 2*time.Millisecond) }
+	if _, err := svc.Submit(CommandRequest{InputMode: InputModeNormalized, Enabled: &enabled}); err != nil {
+		t.Fatalf("submit explicit neutral release: %v", err)
+	}
+	if err := svc.step(base.Add(2*cfg.StaleTimeout + time.Second)); err != nil {
+		t.Fatalf("release step returned error: %v", err)
+	}
+	if svc.applied.Handbrake || svc.applied.TimedOut || svc.applied.Enabled {
+		t.Fatalf("expected explicit disabled neutral to release temporal safety hold, got=%+v", svc.applied)
+	}
+
+	armed := true
+	armedAt := base.Add(2*cfg.StaleTimeout + 2*time.Second)
+	svc.nowFunc = func() time.Time { return armedAt }
+	if _, err := svc.Submit(CommandRequest{InputMode: InputModeNormalized, Enabled: &armed}); err != nil {
+		t.Fatalf("arm temporal inference: %v", err)
+	}
+	plan := LegacyPredictionAdapter(ControlCommand{Throttle: 0.4}, timeToSeconds(armedAt), timeToSeconds(armedAt), nil, "restart-test")
+	if _, err := svc.SubmitPredictionHorizon(plan); err != nil {
+		t.Fatalf("submit horizon after arming: %v", err)
+	}
+	target := svc.targetLocked(armedAt.Add(10 * time.Millisecond))
+	if target.Temporal == nil {
+		t.Fatalf("expected an authorized enabled-neutral arm to clear the disabled temporal override, got=%+v", target)
+	}
+}
+
 func TestSubmitRejectsInvalidInputMode(t *testing.T) {
 	svc := NewService(DefaultConfig(), "")
 	svc.controller = &fakeController{}
@@ -257,11 +424,14 @@ func TestStepReportsControllerError(t *testing.T) {
 	svc.ready = true
 	svc.supported = true
 	base := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
-	svc.lastCmd = &commandEnvelope{
-		controlState: controlState{Steer: 0.2, Brake: 0.1},
-		Enabled:      true,
-		InputMode:    InputModeNormalized,
-		ReceivedAt:   base.Format(time.RFC3339Nano),
+	svc.nowFunc = func() time.Time { return base }
+	queued, submitErr := svc.Submit(CommandRequest{
+		Steer:            0.2,
+		BrakePressureAvg: 0.1,
+		InputMode:        InputModeNormalized,
+	})
+	if submitErr != nil {
+		t.Fatalf("Submit returned error: %v", submitErr)
 	}
 
 	err := svc.step(base.Add(10 * time.Millisecond))
@@ -270,6 +440,13 @@ func TestStepReportsControllerError(t *testing.T) {
 	}
 	if svc.lastApplyError == "" {
 		t.Fatal("expected last apply error to be recorded")
+	}
+	state := svc.State()
+	if state.LastApplyAttemptedCommandID != queued.LastCommandID {
+		t.Fatalf("expected failed apply to identify command %d, got=%+v", queued.LastCommandID, state)
+	}
+	if state.Applied.CommandID == queued.LastCommandID {
+		t.Fatalf("failed controller apply must not advance applied command ID, got=%+v", state.Applied)
 	}
 }
 
@@ -283,6 +460,20 @@ func TestResolveServiceThrottleBrakeConflictLetsBrakeWin(t *testing.T) {
 		t.Fatalf("expected conflict resolution to trigger")
 	}
 	if resolved.Throttle != 0 || resolved.Brake != 0.60 {
+		t.Fatalf("unexpected resolved state: %+v", resolved)
+	}
+}
+
+func TestResolveServiceThrottleBrakeConflictAlwaysLetsBrakeWin(t *testing.T) {
+	resolved, changed := resolveServiceThrottleBrakeConflict(controlState{
+		Steer:    0.1,
+		Throttle: 0.80,
+		Brake:    0.30,
+	})
+	if !changed {
+		t.Fatalf("expected conflict resolution to trigger")
+	}
+	if resolved.Throttle != 0 || resolved.Brake != 0.30 {
 		t.Fatalf("unexpected resolved state: %+v", resolved)
 	}
 }

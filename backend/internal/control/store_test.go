@@ -1,6 +1,8 @@
 package control
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -11,6 +13,82 @@ func TestEnqueueValidatesStartSceneRequiresName(t *testing.T) {
 
 	if _, err := store.Enqueue(CommandRequest{Type: CommandStartScene}); err == nil {
 		t.Fatal("expected validation error for empty sceneName")
+	}
+}
+
+func TestEnqueueAcceptsParkingTargetCommands(t *testing.T) {
+	store := NewStore()
+
+	for _, commandType := range []CommandType{CommandSetParkingTarget, CommandClearParkingTarget} {
+		command, err := store.Enqueue(CommandRequest{Type: commandType})
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", commandType, err)
+		}
+		if command.Type != commandType {
+			t.Fatalf("unexpected command: got=%s want=%s", command.Type, commandType)
+		}
+	}
+}
+
+func TestEnqueuePrepareParkingEvaluationCarriesSeed(t *testing.T) {
+	store := NewStore()
+
+	command, err := store.Enqueue(CommandRequest{
+		Type: CommandPrepareParkingEvaluation,
+		Seed: "  evaluation-seed-7  ",
+	})
+	if err != nil {
+		t.Fatalf("enqueue parking evaluation: %v", err)
+	}
+	if command.Type != CommandPrepareParkingEvaluation {
+		t.Fatalf("unexpected command type: %s", command.Type)
+	}
+	if command.Seed != "evaluation-seed-7" {
+		t.Fatalf("expected normalized evaluation seed, got=%q", command.Seed)
+	}
+}
+
+func TestEnqueueStartParkingRunCarriesAttemptOptions(t *testing.T) {
+	store := NewStore()
+
+	command, err := store.Enqueue(CommandRequest{
+		Type:         CommandStartParkingRun,
+		AttemptCount: 12,
+		Seed:         "  training-seed-42  ",
+	})
+	if err != nil {
+		t.Fatalf("enqueue parking run: %v", err)
+	}
+	if command.AttemptCount != 12 {
+		t.Fatalf("unexpected attempt count: %+v", command)
+	}
+	if command.Seed != "training-seed-42" {
+		t.Fatalf("expected normalized seed, got=%q", command.Seed)
+	}
+}
+
+func TestEnqueueStartParkingRunValidatesAttemptCount(t *testing.T) {
+	for _, attemptCount := range []int{-1, 0, maximumParkingAttemptCount + 1} {
+		t.Run(fmt.Sprintf("attempts_%d", attemptCount), func(t *testing.T) {
+			store := NewStore()
+			_, err := store.Enqueue(CommandRequest{
+				Type:         CommandStartParkingRun,
+				AttemptCount: attemptCount,
+			})
+			if !errors.Is(err, ErrInvalidCommand) {
+				t.Fatalf("expected invalid command error, got=%v", err)
+			}
+		})
+	}
+
+	for _, attemptCount := range []int{1, maximumParkingAttemptCount} {
+		store := NewStore()
+		if _, err := store.Enqueue(CommandRequest{
+			Type:         CommandStartParkingRun,
+			AttemptCount: attemptCount,
+		}); err != nil {
+			t.Fatalf("expected attempt count %d to be valid: %v", attemptCount, err)
+		}
 	}
 }
 
@@ -143,6 +221,80 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 }
 
+func TestUpdateTelemetryCopiesParkingStateAcrossSnapshots(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	store := NewStore(WithNowFunc(func() time.Time { return now }))
+	positionX := 42.5
+
+	updated := store.UpdateTelemetry(TelemetryUpdate{
+		PositionX:                &positionX,
+		ParkingTargetConfigured:  true,
+		ParkingLongitudinalError: -1.25,
+		ParkingLateralError:      0.45,
+		ParkingHeadingError:      -7.5,
+		ParkingDistance:          1.33,
+		ParkingInsideBay:         true,
+		ParkingAligned:           true,
+		ParkingParked:            true,
+		ParkingAttemptIndex:      3,
+		ParkingAttemptCount:      10,
+		ParkingPhase:             "  parked  ",
+	})
+	assertParkingTelemetry(t, updated)
+	if updated.PositionX == nil || *updated.PositionX != 42.5 {
+		t.Fatalf("unexpected copied position: %+v", updated.PositionX)
+	}
+
+	*updated.PositionX = -99
+	updated.ParkingPhase = "mutated"
+	assertParkingTelemetry(t, store.State().Telemetry)
+	assertParkingTelemetry(t, store.LatestTelemetry())
+
+	history := store.TelemetryHistorySnapshot(1)
+	if len(history) != 1 {
+		t.Fatalf("expected one telemetry history entry, got=%d", len(history))
+	}
+	assertParkingTelemetry(t, &history[0])
+	*history[0].PositionX = -100
+	if freshHistory := store.TelemetryHistorySnapshot(1); freshHistory[0].PositionX == nil || *freshHistory[0].PositionX != 42.5 {
+		t.Fatalf("expected history snapshots to be independent copies, got=%+v", freshHistory[0].PositionX)
+	}
+}
+
+func TestUpdateTelemetryDefaultsEmptyParkingPhaseToIdle(t *testing.T) {
+	store := NewStore()
+
+	telemetry := store.UpdateTelemetry(TelemetryUpdate{ParkingPhase: "  "})
+	if telemetry.ParkingPhase != parkingPhaseIdle {
+		t.Fatalf("unexpected default parking phase: got=%q want=%q", telemetry.ParkingPhase, parkingPhaseIdle)
+	}
+}
+
+func assertParkingTelemetry(t *testing.T, telemetry *RuntimeTelemetry) {
+	t.Helper()
+	if telemetry == nil {
+		t.Fatal("expected parking telemetry")
+	}
+	if !telemetry.ParkingTargetConfigured {
+		t.Fatalf("expected configured parking target: %+v", telemetry)
+	}
+	if telemetry.ParkingLongitudinalError != -1.25 || telemetry.ParkingLateralError != 0.45 {
+		t.Fatalf("unexpected parking position error: %+v", telemetry)
+	}
+	if telemetry.ParkingHeadingError != -7.5 || telemetry.ParkingDistance != 1.33 {
+		t.Fatalf("unexpected parking heading/distance: %+v", telemetry)
+	}
+	if !telemetry.ParkingInsideBay || !telemetry.ParkingAligned || !telemetry.ParkingParked {
+		t.Fatalf("unexpected parking completion flags: %+v", telemetry)
+	}
+	if telemetry.ParkingAttemptIndex != 3 || telemetry.ParkingAttemptCount != 10 {
+		t.Fatalf("unexpected parking attempt state: %+v", telemetry)
+	}
+	if telemetry.ParkingPhase != "parked" {
+		t.Fatalf("unexpected parking phase: got=%q", telemetry.ParkingPhase)
+	}
+}
+
 func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 	now := time.UnixMilli(1000).UTC()
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
@@ -153,28 +305,32 @@ func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 	gear := 3
 	rpm := 0.45
 	onGround := true
+	wheelAngle := 0.366519153
+	wheelSteeringFullLock := 0.733038306
 
 	store.UpdateTelemetry(TelemetryUpdate{
-		CurrentSpeed:     12.5,
-		CurrentYaw:       90.0,
-		YawRate:          0.4,
-		Steering:         17.5,
-		BrakePressureAvg: 0.3,
-		VehicleExists:    true,
-		IsInVehicle:      true,
-		PositionX:        &positionX,
-		PositionY:        &positionY,
-		PositionZ:        &positionZ,
-		VelocityX:        &velocityX,
-		VelocityY:        &velocityY,
-		VelocityZ:        &velocityZ,
-		PitchDeg:         &pitchDeg,
-		RollDeg:          &rollDeg,
-		Gear:             &gear,
-		RPM:              &rpm,
-		OnGround:         &onGround,
-		TimestampMs:      1000,
-		GameTimeMs:       5000,
+		CurrentSpeed:          12.5,
+		CurrentYaw:            90.0,
+		YawRate:               0.4,
+		Steering:              0.5,
+		BrakePressureAvg:      0.3,
+		VehicleExists:         true,
+		IsInVehicle:           true,
+		PositionX:             &positionX,
+		PositionY:             &positionY,
+		PositionZ:             &positionZ,
+		VelocityX:             &velocityX,
+		VelocityY:             &velocityY,
+		VelocityZ:             &velocityZ,
+		PitchDeg:              &pitchDeg,
+		RollDeg:               &rollDeg,
+		Gear:                  &gear,
+		RPM:                   &rpm,
+		WheelAngle:            &wheelAngle,
+		WheelSteeringFullLock: &wheelSteeringFullLock,
+		OnGround:              &onGround,
+		TimestampMs:           1000,
+		GameTimeMs:            5000,
 	})
 
 	snapshot, _ := store.LatestEgoTelemetrySnapshot()
@@ -188,7 +344,13 @@ func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 		t.Fatalf("expected heading in radians, got=%+v", snapshot.HeadingRad)
 	}
 	if snapshot.SteeringActual == nil || math.Abs(*snapshot.SteeringActual-0.5) > 1e-9 {
-		t.Fatalf("expected wheel angle to normalize to steering_actual=0.5, got=%+v", snapshot.SteeringActual)
+		t.Fatalf("expected normalized steering_actual=0.5, got=%+v", snapshot.SteeringActual)
+	}
+	if snapshot.WheelAngle == nil || *snapshot.WheelAngle != wheelAngle {
+		t.Fatalf("expected raw wheel angle diagnostics, got=%+v", snapshot.WheelAngle)
+	}
+	if snapshot.WheelSteeringFullLock == nil || *snapshot.WheelSteeringFullLock != wheelSteeringFullLock {
+		t.Fatalf("expected raw steering full-lock diagnostics, got=%+v", snapshot.WheelSteeringFullLock)
 	}
 	if snapshot.BrakeActual == nil || math.Abs(*snapshot.BrakeActual-0.3) > 1e-9 {
 		t.Fatalf("expected brake pressure to normalize into brake_actual, got=%+v", snapshot.BrakeActual)
@@ -273,7 +435,7 @@ func TestAppliedControlsHistoryUsesAppliedControls(t *testing.T) {
 	store.UpdateAppliedControls(AppliedControls{Steer: 0.70, Throttle: 0.20, Brake: 0.05, TimestampS: 0.95})
 	store.UpdateTelemetry(TelemetryUpdate{
 		CurrentSpeed:  3,
-		Steering:      3.5,
+		Steering:      0.1,
 		VehicleExists: true,
 		IsInVehicle:   true,
 		TimestampMs:   1000,

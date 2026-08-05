@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 DEFAULT_IMAGE_WIDTH = 480
@@ -27,6 +28,7 @@ DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
 DEFAULT_LOSS_FUNCTION = "smooth_l1"
 DEFAULT_SMOOTH_L1_BETA = 0.1
 DEFAULT_TELEMETRY_HIDDEN_DIM = 128
+DATA_ROOT_ENV = "FSD_DATA_ROOT"
 
 
 def normalize_windows_drive_path(value: str) -> str:
@@ -41,6 +43,42 @@ def normalize_windows_drive_path(value: str) -> str:
         rest = cleaned[2:].replace("\\", "/")
         return f"/mnt/{drive}{rest}"
     return cleaned
+
+
+def environment_data_root() -> str | None:
+    raw_value = os.environ.get(DATA_ROOT_ENV, "").strip()
+    if not raw_value:
+        return None
+    return normalize_windows_drive_path(raw_value)
+
+
+def resolve_optional_data_root(configured_value: Any = None) -> str | None:
+    override = environment_data_root()
+    if override:
+        return override
+    if configured_value is None:
+        return None
+    resolved = normalize_windows_drive_path(str(configured_value))
+    return resolved or None
+
+
+def resolve_data_root(configured_value: Any) -> str:
+    resolved = resolve_optional_data_root(configured_value)
+    if not resolved:
+        raise ValueError("dataset.data_root must be configured or FSD_DATA_ROOT must be set")
+    return resolved
+
+
+def resolve_data_root_child(configured_value: Any, child_name: str) -> str:
+    override = environment_data_root()
+    if override:
+        return str(Path(override) / child_name)
+    if configured_value is None:
+        raise ValueError(f"path must be configured or FSD_DATA_ROOT must be set for {child_name}")
+    resolved = normalize_windows_drive_path(str(configured_value))
+    if not resolved:
+        raise ValueError(f"path must be configured or FSD_DATA_ROOT must be set for {child_name}")
+    return resolved
 
 
 def validate_frame_window(window_size: int, frame_stride: int, sample_stride: int, *, prefix: str = "dataset") -> None:
@@ -149,4 +187,3 @@ def parse_temporal_dataset_config(
         control_target_names,
         aux_target_names,
     )
-

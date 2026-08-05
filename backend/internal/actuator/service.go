@@ -50,11 +50,13 @@ type SafetyDebug struct {
 	SpeedLimitActive       bool    `json:"speedLimitActive"`
 	OverspeedBrakeApplied  bool    `json:"overspeedBrakeApplied"`
 	ReverseLockoutApplied  bool    `json:"reverseLockoutApplied"`
+	LowSpeedBrakeHold      bool    `json:"lowSpeedBrakeHold"`
 	TelemetryAvailable     bool    `json:"telemetryAvailable"`
 }
 
 type commandEnvelope struct {
 	controlState
+	CommandID   int64  `json:"commandId"`
 	Enabled     bool   `json:"enabled"`
 	InputMode   string `json:"inputMode"`
 	Sequence    int64  `json:"sequence,omitempty"`
@@ -64,6 +66,7 @@ type commandEnvelope struct {
 
 type controllerSnapshot struct {
 	controlState
+	CommandID int64          `json:"commandId,omitempty"`
 	Enabled   bool           `json:"enabled"`
 	Stale     bool           `json:"stale"`
 	Holding   bool           `json:"holding"`
@@ -76,46 +79,50 @@ type controllerSnapshot struct {
 type AppliedState = controllerSnapshot
 
 type State struct {
-	Supported            bool               `json:"supported"`
-	Ready                bool               `json:"ready"`
-	Platform             string             `json:"platform"`
-	ControllerType       string             `json:"controllerType"`
-	TickHz               int                `json:"tickHz"`
-	StaleTimeoutMs       int64              `json:"staleTimeoutMs"`
-	LastError            string             `json:"lastError,omitempty"`
-	LastCommand          *commandEnvelope   `json:"lastCommand,omitempty"`
-	Target               controllerSnapshot `json:"target"`
-	Applied              AppliedState       `json:"applied"`
-	LastApplyError       string             `json:"lastApplyError,omitempty"`
-	LastApplyAttemptedAt string             `json:"lastApplyAttemptedAt,omitempty"`
-	LastApplySucceededAt string             `json:"lastApplySucceededAt,omitempty"`
+	Supported                   bool               `json:"supported"`
+	Ready                       bool               `json:"ready"`
+	Platform                    string             `json:"platform"`
+	ControllerType              string             `json:"controllerType"`
+	TickHz                      int                `json:"tickHz"`
+	StaleTimeoutMs              int64              `json:"staleTimeoutMs"`
+	LastError                   string             `json:"lastError,omitempty"`
+	LastCommand                 *commandEnvelope   `json:"lastCommand,omitempty"`
+	LastCommandID               int64              `json:"lastCommandId,omitempty"`
+	Target                      controllerSnapshot `json:"target"`
+	Applied                     AppliedState       `json:"applied"`
+	LastApplyError              string             `json:"lastApplyError,omitempty"`
+	LastApplyAttemptedAt        string             `json:"lastApplyAttemptedAt,omitempty"`
+	LastApplyAttemptedCommandID int64              `json:"lastApplyAttemptedCommandId,omitempty"`
+	LastApplySucceededAt        string             `json:"lastApplySucceededAt,omitempty"`
 }
 
 type Service struct {
 	cfg Config
 
-	mu                    sync.Mutex
-	nowFunc               func() time.Time
-	controller            controller
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	started               bool
-	ready                 bool
-	supported             bool
-	lastError             string
-	lastCmd               *commandEnvelope
-	target                controllerSnapshot
-	applied               AppliedState
-	lastApplyError        string
-	lastApplyAttemptedAt  string
-	lastApplySucceededAt  string
-	configPath            string
-	liveTuning            Tuning
-	savedTuning           Tuning
-	telemetry             telemetryProvider
-	temporalBuffer        TemporalPlanBuffer
-	lastTemporalLogAt     time.Time
-	lastTemporalPlanState string
+	mu                          sync.Mutex
+	nowFunc                     func() time.Time
+	controller                  controller
+	cancel                      context.CancelFunc
+	done                        chan struct{}
+	started                     bool
+	ready                       bool
+	supported                   bool
+	lastError                   string
+	lastCmd                     *commandEnvelope
+	nextCommandID               int64
+	target                      controllerSnapshot
+	applied                     AppliedState
+	lastApplyError              string
+	lastApplyAttemptedAt        string
+	lastApplyAttemptedCommandID int64
+	lastApplySucceededAt        string
+	configPath                  string
+	liveTuning                  Tuning
+	savedTuning                 Tuning
+	telemetry                   telemetryProvider
+	temporalBuffer              TemporalPlanBuffer
+	lastTemporalLogAt           time.Time
+	lastTemporalPlanState       string
 }
 
 func NewService(cfg Config, configPath string, telemetry ...telemetryProvider) *Service {
@@ -189,6 +196,7 @@ func (s *Service) Close() error {
 	s.controller = nil
 	s.ready = false
 	s.started = false
+	s.lastCmd = nil
 	s.applied = AppliedState{Enabled: false, Stale: true}
 	s.target = controllerSnapshot{Enabled: false, Stale: true}
 	s.temporalBuffer = TemporalPlanBuffer{}
@@ -196,6 +204,7 @@ func (s *Service) Close() error {
 	s.lastTemporalPlanState = ""
 	s.lastApplyError = ""
 	s.lastApplyAttemptedAt = ""
+	s.lastApplyAttemptedCommandID = 0
 	s.lastApplySucceededAt = ""
 	s.mu.Unlock()
 
@@ -225,6 +234,8 @@ func (s *Service) Submit(req CommandRequest) (State, error) {
 	if err != nil {
 		return s.stateLocked(), err
 	}
+	s.nextCommandID++
+	cmd.CommandID = s.nextCommandID
 	s.lastCmd = &cmd
 	if s.cfg.TemporalHorizonActuatorEnabled {
 		if !cmd.Enabled {
@@ -299,6 +310,7 @@ func (s *Service) step(now time.Time) error {
 	s.target = target
 	nextApplied := AppliedState{
 		controlState: target.controlState,
+		CommandID:    target.CommandID,
 		Enabled:      target.Enabled,
 		Stale:        target.Stale,
 		Holding:      target.Enabled && !target.TimedOut,
@@ -311,6 +323,7 @@ func (s *Service) step(now time.Time) error {
 	}
 
 	s.lastApplyAttemptedAt = now.Format(time.RFC3339Nano)
+	s.lastApplyAttemptedCommandID = nextApplied.CommandID
 	if err := s.controller.Apply(nextApplied.controlState); err != nil {
 		s.lastApplyError = err.Error()
 		return err
@@ -331,6 +344,7 @@ func (s *Service) targetLocked(now time.Time) controllerSnapshot {
 	target, safety = s.applyLiveTuningLocked(target)
 	return controllerSnapshot{
 		controlState: target,
+		CommandID:    commandID(s.lastCmd),
 		Enabled:      enabled,
 		Stale:        stale,
 		Holding:      enabled && !timedOut,
@@ -344,12 +358,12 @@ func resolveTarget(cmd *commandEnvelope, staleTimeout time.Duration, now time.Ti
 	if cmd == nil {
 		return controlState{}, true, false, false
 	}
+	if !cmd.Enabled {
+		return controlState{Handbrake: cmd.Handbrake}, false, false, false
+	}
 	receivedAt, err := time.Parse(time.RFC3339Nano, cmd.ReceivedAt)
 	if err != nil {
 		return controlState{}, true, false, false
-	}
-	if !cmd.Enabled {
-		return controlState{}, false, false, false
 	}
 	isStale := now.Sub(receivedAt) > staleTimeout
 	if isStale {
@@ -368,7 +382,26 @@ func commandToControlState(cmd *commandEnvelope) controlState {
 	}
 }
 
+func commandID(cmd *commandEnvelope) int64 {
+	if cmd == nil {
+		return 0
+	}
+	return cmd.CommandID
+}
+
 func (s *Service) temporalTargetLocked(now time.Time) controllerSnapshot {
+	if s.lastCmd != nil && !s.lastCmd.Enabled {
+		target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.cfg.StaleTimeout, now)
+		return controllerSnapshot{
+			controlState: target,
+			CommandID:    commandID(s.lastCmd),
+			Enabled:      enabled,
+			Stale:        stale,
+			Holding:      target.Handbrake && !timedOut,
+			TimedOut:     timedOut,
+			UpdatedAt:    now.Format(time.RFC3339Nano),
+		}
+	}
 	egoState := control.ActuatorEgoState{
 		TimestampS:    timeToSeconds(now),
 		SpeedMPS:      0,
@@ -396,6 +429,7 @@ func (s *Service) temporalTargetLocked(now time.Time) controllerSnapshot {
 	traceCopy := trace
 	return controllerSnapshot{
 		controlState: target,
+		CommandID:    commandID(s.lastCmd),
 		Enabled:      enabled,
 		Stale:        stale,
 		Holding:      enabled && trace.PlanState != PlanStateExpired,
@@ -502,9 +536,12 @@ func (s *Service) applyLiveTuningLocked(input controlState) (controlState, Safet
 		}
 		brake = 0
 	}
+	currentSpeedKPH := 0.0
+	hasTelemetry := false
 	if latest := s.latestTelemetryLocked(); latest != nil {
 		currentSpeedMPS := math.Max(latest.CurrentSpeed, 0)
-		currentSpeedKPH := currentSpeedMPS * 3.6
+		currentSpeedKPH = currentSpeedMPS * 3.6
+		hasTelemetry = true
 		debug.TelemetryAvailable = true
 		debug.CurrentSpeedMPS = currentSpeedMPS
 		debug.CurrentSpeedKPH = currentSpeedKPH
@@ -517,10 +554,6 @@ func (s *Service) applyLiveTuningLocked(input controlState) (controlState, Safet
 				debug.OverspeedBrakeApplied = true
 			}
 		}
-		if currentSpeedKPH <= tuning.ReverseLockoutSpeedKPH && brake > 0 {
-			brake = 0
-			debug.ReverseLockoutApplied = true
-		}
 	}
 	resolved, _ := resolveServiceThrottleBrakeConflict(controlState{
 		Steer:     steer,
@@ -528,6 +561,12 @@ func (s *Service) applyLiveTuningLocked(input controlState) (controlState, Safet
 		Brake:     brake,
 		Handbrake: input.Handbrake,
 	})
+	if hasTelemetry && currentSpeedKPH <= tuning.ReverseLockoutSpeedKPH && resolved.Brake > 0 {
+		resolved.Brake = 0
+		resolved.Handbrake = true
+		debug.ReverseLockoutApplied = true
+		debug.LowSpeedBrakeHold = true
+	}
 	debug.ThrottleAfter = resolved.Throttle
 	debug.BrakeAfter = resolved.Brake
 	return resolved, debug
@@ -563,18 +602,20 @@ func (s *Service) recordAppliedControlsLocked(now time.Time, applied controlStat
 
 func (s *Service) stateLocked() State {
 	state := State{
-		Supported:            s.supported,
-		Ready:                s.ready,
-		Platform:             runtime.GOOS,
-		ControllerType:       "xbox360",
-		TickHz:               s.cfg.TickHz,
-		StaleTimeoutMs:       s.cfg.StaleTimeout.Milliseconds(),
-		LastError:            s.lastError,
-		Target:               s.target,
-		Applied:              s.applied,
-		LastApplyError:       s.lastApplyError,
-		LastApplyAttemptedAt: s.lastApplyAttemptedAt,
-		LastApplySucceededAt: s.lastApplySucceededAt,
+		Supported:                   s.supported,
+		Ready:                       s.ready,
+		Platform:                    runtime.GOOS,
+		ControllerType:              "xbox360",
+		TickHz:                      s.cfg.TickHz,
+		StaleTimeoutMs:              s.cfg.StaleTimeout.Milliseconds(),
+		LastError:                   s.lastError,
+		LastCommandID:               commandID(s.lastCmd),
+		Target:                      s.target,
+		Applied:                     s.applied,
+		LastApplyError:              s.lastApplyError,
+		LastApplyAttemptedAt:        s.lastApplyAttemptedAt,
+		LastApplyAttemptedCommandID: s.lastApplyAttemptedCommandID,
+		LastApplySucceededAt:        s.lastApplySucceededAt,
 	}
 	if s.lastCmd != nil {
 		copyCmd := *s.lastCmd
@@ -641,12 +682,8 @@ func resolveServiceThrottleBrakeConflict(input controlState) (controlState, bool
 	if output.Brake <= 0.05 || output.Throttle <= 0.05 {
 		return output, false
 	}
-	if output.Brake >= output.Throttle {
-		output.Throttle = 0
-		return output, true
-	}
-	output.Throttle = clamp(output.Throttle-output.Brake, 0, 1)
-	return output, output != input
+	output.Throttle = 0
+	return output, true
 }
 
 func (s *Service) Unsupported() bool {

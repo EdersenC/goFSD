@@ -11,9 +11,20 @@ import {
     VehicleModel
 } from "./egoService";
 import {defaultScene} from "./datasets";
+import {
+    PARKING_EVALUATION_SCENE_NAME,
+    ParkingRunner,
+    PARKING_SCENE_NAME,
+} from "./parking/runner";
+import {ParkingGoal, ParkingTarget, ParkingTelemetry} from "./parking/types";
+import {resolveParkingAttemptCount} from "./parking/curriculum";
+import {createNoEgoControlTelemetry, EgoControlTelemetry} from "./controlTelemetry";
+
+export {syncFlash} from "./syncFlash";
 
 const egoService = new EgoService();
 const envService = new EnvironmentService();
+const parkingRunner = new ParkingRunner(egoService);
 export const newScene = defaultScene;
 const canonicalInnerCitySceneName = "inner-city-driving:default";
 
@@ -144,7 +155,8 @@ export function normalizeScenePayload(raw: unknown): SceneType {
             Time: {
                 hour: toNumber(scene?.environment?.Time?.hour) ?? 12,
                 minute: toNumber(scene?.environment?.Time?.minute) ?? 0,
-                second: toNumber(scene?.environment?.Time?.second) ?? 0
+                second: toNumber(scene?.environment?.Time?.second) ?? 0,
+                persistent: Boolean(scene?.environment?.Time?.persistent)
             }
         },
         ego: {
@@ -242,32 +254,58 @@ export class SceneManager {
         }
     }
 
-    public endScene() {
+    public endScene(): boolean {
         if (!this.activeSceneName) {
             log("No active scene to end.");
-            return;
+            return !this.runningAllScenes;
+        }
+
+        if (parkingRunner.isRunning()) {
+            this.stopCurrentSceneRequested = true;
+            parkingRunner.requestStop();
+            console.log(`Stopping parking run "${this.activeSceneName}"...`);
+            return false;
+        }
+
+        if (this.egoControlActive) {
+            this.stopEgoControl();
+            return true;
         }
 
         this.stopCurrentSceneRequested = true;
         egoService.requestStop(`endScene requested for "${this.activeSceneName}"`);
         log(`Stopping scene "${this.activeSceneName}"...`);
+        return false;
     }
 
-    public endAllScenes() {
+    public endAllScenes(): boolean {
         this.stopAllScenesRequested = true;
+        if (parkingRunner.isRunning()) {
+            this.stopCurrentSceneRequested = true;
+            parkingRunner.requestStop();
+            console.log("Stopping active parking run...");
+            return false;
+        }
+        if (this.egoControlActive) {
+            this.stopEgoControl();
+            this.stopAllScenesRequested = false;
+            return true;
+        }
         if (this.activeSceneName) {
             this.stopCurrentSceneRequested = true;
             egoService.requestStop(`endAllScenes requested for "${this.activeSceneName}"`);
             log(`Stopping scene "${this.activeSceneName}" and remaining queue...`);
-            return;
+            return false;
         }
 
         if (this.runningAllScenes) {
             log("Stopping remaining queued scenes...");
-            return;
+            return false;
         }
 
+        this.stopAllScenesRequested = false;
         log("No active scenes to end.");
+        return true;
     }
 
     public async startEgoControl() {
@@ -276,7 +314,12 @@ export class SceneManager {
         }
 
         const runId = createRunId();
+        if (!defaultScene) {
+            throw new Error("default scene invariant violated: inner-city-driving dataset is missing");
+        }
         const clonedScene = cloneScene(defaultScene);
+        clonedScene.ego.vehicle.model = VehicleModel.Sultan;
+        clonedScene.ego.vehicle.color = VehicleColor.Blue;
         this.activeSceneName = "ego-control";
         this.egoControlActive = true;
         this.stopCurrentSceneRequested = false;
@@ -298,11 +341,69 @@ export class SceneManager {
             return;
         }
 
+        parkingRunner.stopEvaluation();
         egoService.disposeCurrentEgo();
         this.egoControlActive = false;
         this.activeSceneName = null;
         this.stopCurrentSceneRequested = false;
         log("Stopped ego control.");
+    }
+
+    public setParkingTarget(): ParkingTarget {
+        if (!this.egoControlActive) {
+            throw new Error("Parking calibration requires an active ego-control vehicle");
+        }
+        return parkingRunner.calibrateTargetFromCurrentEgo();
+    }
+
+    public clearParkingTarget() {
+        parkingRunner.clearTarget();
+    }
+
+    public async startParkingRun(attemptCount: unknown, seed?: string) {
+        if (this.activeSceneName && !this.egoControlActive) {
+            throw new Error(`Scene "${this.activeSceneName}" is already running`);
+        }
+        if (!parkingRunner.hasTarget()) {
+            throw new Error("Parking target is not configured; run setParkingTarget first");
+        }
+        const validatedAttemptCount = resolveParkingAttemptCount(attemptCount);
+
+        if (this.egoControlActive) {
+            this.egoControlActive = false;
+            this.activeSceneName = null;
+        }
+        this.activeSceneName = PARKING_SCENE_NAME;
+        this.stopCurrentSceneRequested = false;
+        try {
+            await parkingRunner.run(validatedAttemptCount, seed);
+        } finally {
+            this.activeSceneName = null;
+            this.stopCurrentSceneRequested = false;
+        }
+    }
+
+    public async prepareParkingEvaluation(seed?: string): Promise<ParkingGoal> {
+        if (this.activeSceneName && !this.egoControlActive) {
+            throw new Error(`Scene "${this.activeSceneName}" is already running`);
+        }
+        if (!parkingRunner.hasTarget()) {
+            throw new Error("Parking target is not configured; run setParkingTarget first");
+        }
+
+        this.egoControlActive = false;
+        this.activeSceneName = PARKING_EVALUATION_SCENE_NAME;
+        this.stopCurrentSceneRequested = false;
+        try {
+            const goal = await parkingRunner.prepareEvaluation(seed);
+            this.egoControlActive = true;
+            return goal;
+        } catch (error) {
+            this.activeSceneName = null;
+            throw error;
+        } finally {
+            this.stopCurrentSceneRequested = false;
+        }
     }
 
     public currentEgoSpeed(): number | null {
@@ -317,43 +418,13 @@ export class SceneManager {
         return egoService.currentRouteForwardDelta();
     }
 
-    public currentEgoControlTelemetry(): {
-        currentSpeed: number
-        currentYaw: number
-        yawRate: number
-        steering: number
-        acceleration: number
-        brakePressureAvg: number
-        vehicleExists: boolean
-        isInVehicle: boolean
-        positionX?: number
-        positionY?: number
-        positionZ?: number
-        velocityX?: number
-        velocityY?: number
-        velocityZ?: number
-        pitchDeg?: number
-        rollDeg?: number
-        gear?: number
-        rpm?: number
-        wheelAngle?: number
-        onGround?: boolean
-        collisionState?: string
-        routeDirectionCode: number
-        routeDirectionDistanceM: number
-        routeDirectionUnknown: number
-        routeDirectionKeepStraight: number
-        routeDirectionTurnLeft: number
-        routeDirectionTurnRight: number
-        routeDirectionRerouteWrongWay: number
-        routeForwardDelta: number | null
-        routeHeadingError: number | null
-        routeDistance: number | null
-        hasLeadVehicle: boolean
-        leadVehicleDistance: number | null
-        gameTimeMs: number
-    } | null {
-        return egoService.currentControlTelemetry();
+    public currentEgoControlTelemetry(): EgoControlTelemetry & ParkingTelemetry {
+        const telemetry = egoService.currentControlTelemetry()
+            ?? createNoEgoControlTelemetry(GetGameTimer());
+        return {
+            ...telemetry,
+            ...parkingRunner.currentTelemetry(),
+        };
     }
 
     public addScene(name: string, scene: SceneType) {
@@ -404,21 +475,4 @@ export class SceneManager {
 
 function cloneScene(scene: SceneType): SceneType {
     return JSON.parse(JSON.stringify(scene)) as SceneType;
-}
-
-export async function syncFlash(durationMs = 250) :Promise<number> {
-    const startTime = GetGameTimer();
-    const flashUntilGameMs = startTime + durationMs;
-
-    setTick(() => {
-        if (GetGameTimer() < flashUntilGameMs) {
-            // Full screen white rectangle
-            DrawRect(
-                0.5, 0.5,   // center
-                1.0, 1.0,   // full width/height
-                255, 255, 255, 255 // RGBA white
-            );
-        }
-    });
-    return  startTime
 }

@@ -72,7 +72,7 @@ export class EnvironmentService {
         const hour = GetClockHours();
         const minute = GetClockMinutes();
         const second = GetClockSeconds();
-        return { hour, minute, second };
+        return {hour, minute, second, persistent: false};
      }
 
 }
@@ -87,5 +87,4 @@ export function configurePopulation(environment: Environment|undefined) {
     // SetRandomVehicleDensityMultiplierThisFrame(0.0);
     SetParkedVehicleDensityMultiplierThisFrame(3);
 }
-
 

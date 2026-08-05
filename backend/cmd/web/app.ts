@@ -115,9 +115,40 @@ const actuatorSavedModelBrakeThreshold = document.getElementById("actuator-saved
 const actuatorSavedReverseLockout = document.getElementById("actuator-saved-reverse-lockout");
 
 const pageTabs = Array.from(document.querySelectorAll("[data-page-tab]"));
+const pageParking = document.getElementById("page-parking");
 const pageControl = document.getElementById("page-control");
 const pageInspector = document.getElementById("page-inspector");
 const pageTraining = document.getElementById("page-training");
+const parkingStartSetupButton = document.getElementById("parking-start-setup");
+const parkingCalibrateTargetButton = document.getElementById("parking-calibrate-target");
+const parkingClearTargetButton = document.getElementById("parking-clear-target");
+const parkingStartRunButton = document.getElementById("parking-start-run");
+const parkingPrepareEvaluationButton = document.getElementById("parking-prepare-evaluation");
+const parkingStopButton = document.getElementById("parking-stop");
+const parkingAttemptCountInput = document.getElementById("parking-attempt-count");
+const parkingSeedInput = document.getElementById("parking-seed");
+const parkingBanner = document.getElementById("parking-banner");
+const parkingReadinessFivem = document.getElementById("parking-readiness-fivem");
+const parkingReadinessFivemNote = document.getElementById("parking-readiness-fivem-note");
+const parkingReadinessCar = document.getElementById("parking-readiness-car");
+const parkingReadinessCarNote = document.getElementById("parking-readiness-car-note");
+const parkingReadinessTarget = document.getElementById("parking-readiness-target");
+const parkingReadinessTargetNote = document.getElementById("parking-readiness-target-note");
+const parkingReadinessCollection = document.getElementById("parking-readiness-collection");
+const parkingReadinessCollectionNote = document.getElementById("parking-readiness-collection-note");
+const parkingReadinessTraining = document.getElementById("parking-readiness-training");
+const parkingReadinessTrainingNote = document.getElementById("parking-readiness-training-note");
+const parkingScoreResult = document.getElementById("parking-score-result");
+const parkingScoreResultNote = document.getElementById("parking-score-result-note");
+const parkingScorePhase = document.getElementById("parking-score-phase");
+const parkingScoreAttempt = document.getElementById("parking-score-attempt");
+const parkingScoreInside = document.getElementById("parking-score-inside");
+const parkingScoreAligned = document.getElementById("parking-score-aligned");
+const parkingScoreDistance = document.getElementById("parking-score-distance");
+const parkingScoreLongitudinal = document.getElementById("parking-score-longitudinal");
+const parkingScoreLateral = document.getElementById("parking-score-lateral");
+const parkingScoreHeading = document.getElementById("parking-score-heading");
+const parkingScoreTarget = document.getElementById("parking-score-target");
 const inspectorRunSelect = document.getElementById("data-run-select");
 const inspectorSceneSelect = document.getElementById("data-scene-select");
 const inspectorTripSelect = document.getElementById("data-trip-select");
@@ -226,7 +257,11 @@ let translationTuningState = null;
 let translationTuningDraft = null;
 let translationTuningDirty = false;
 
-let activePage = "control";
+let activePage = "parking";
+let parkingRefreshInFlight = false;
+let parkingTrainingRefreshInFlight = false;
+let parkingTrainingSnapshot = null;
+let parkingTrainingAvailable = false;
 let inspectorRuns = [];
 let inspectorAvailableFields = [];
 let inspectorSelectedFields = new Set();
@@ -241,6 +276,11 @@ let trainingSelectedJobId = "";
 let trainingSelectedJob = null;
 const TRAINING_STATE_INPUT_ORDER = [
     "currentSpeed",
+    "parkingTargetConfigured",
+    "parkingLongitudinalError",
+    "parkingLateralError",
+    "parkingHeadingError",
+    "parkingDistance",
     "routeForwardDelta",
     "routeHeadingError",
     "routeDistance",
@@ -357,6 +397,11 @@ function setBusy(nextBusy) {
         actuatorTuningApplyButton,
         actuatorTuningResetButton,
         actuatorTuningSaveButton,
+        parkingStartSetupButton,
+        parkingCalibrateTargetButton,
+        parkingClearTargetButton,
+        parkingStartRunButton,
+        parkingStopButton,
         trainingQueueJobButton,
         trainingResetDefaultsButton,
         trainingUseLastButton,
@@ -413,6 +458,15 @@ function setTrainingBanner(message, tone) {
     }
 }
 
+function setParkingBanner(message, tone, source = "feedback") {
+    parkingBanner.textContent = message || "";
+    parkingBanner.className = "banner";
+    parkingBanner.dataset.source = source;
+    if (tone) {
+        parkingBanner.classList.add(tone);
+    }
+}
+
 function formatCommand(command) {
     if (!command) {
         return "Nothing queued yet";
@@ -426,6 +480,254 @@ function formatRuntimeStatus(status) {
         return "idle";
     }
     return status.replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
+}
+
+function formatParkingPhase(phase) {
+    const value = String(phase || "idle").trim();
+    if (!value) {
+        return "Idle";
+    }
+    const spaced = value
+        .replace(/[-_]+/g, " ")
+        .replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`)
+        .trim();
+    return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
+}
+
+function formatParkingMetric(value, suffix) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return "--";
+    }
+    return `${number.toFixed(2)}${suffix}`;
+}
+
+function setParkingReadiness(valueElement, noteElement, label, note, tone = "") {
+    setLiveValue(valueElement, label);
+    valueElement.classList.remove("ok", "warn", "bad");
+    if (tone) {
+        valueElement.classList.add(tone);
+    }
+    noteElement.textContent = note;
+}
+
+function setParkingScore(element, value, tone = "") {
+    setLiveValue(element, value);
+    element.classList.remove("good", "pending", "bad");
+    if (tone) {
+        element.classList.add(tone);
+    }
+}
+
+function renderParkingTrainingReadiness(snapshot, available) {
+    if (!available) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            "Optional / offline",
+            "Start the model server when you are ready to train collected data.",
+            "warn",
+        );
+        return;
+    }
+
+    const activeJob = snapshot && snapshot.activeJob ? snapshot.activeJob : null;
+    const queuedJobs = snapshot && Array.isArray(snapshot.queuedJobs) ? snapshot.queuedJobs : [];
+    if (activeJob) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            "Training",
+            activeJob.name || activeJob.id || "A model job is running.",
+            "ok",
+        );
+        return;
+    }
+    if (queuedJobs.length > 0) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            `${queuedJobs.length} queued`,
+            "Open Models to inspect or manage the queue.",
+            "warn",
+        );
+        return;
+    }
+    setParkingReadiness(
+        parkingReadinessTraining,
+        parkingReadinessTrainingNote,
+        "Ready",
+        "The model server is available when the dataset is ready.",
+        "ok",
+    );
+}
+
+function renderParkingReadiness(state, trainingSnapshot, trainingAvailable) {
+    const runtime = state && state.runtime ? state.runtime : {};
+    const telemetry = state && state.telemetry ? state.telemetry : null;
+    const fivemConnected = Boolean(runtime.fivemConnected);
+    const vehicleExists = Boolean(telemetry && telemetry.vehicleExists);
+    const inVehicle = Boolean(telemetry && telemetry.isInVehicle);
+    const targetConfigured = Boolean(telemetry && telemetry.parkingTargetConfigured);
+    const phase = String(telemetry && telemetry.parkingPhase || "idle");
+    const normalizedPhase = phase.trim().toLowerCase();
+    const attemptIndex = Number(telemetry && telemetry.parkingAttemptIndex);
+    const attemptCount = Number(telemetry && telemetry.parkingAttemptCount);
+
+    setParkingReadiness(
+        parkingReadinessFivem,
+        parkingReadinessFivemNote,
+        fivemConnected ? "Connected" : "Waiting for FiveM",
+        fivemConnected ? "The FSD resource is polling this control server." : "Start FiveM and the FSD resource.",
+        fivemConnected ? "ok" : "bad",
+    );
+
+    if (!fivemConnected) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Not available",
+            "Connect FiveM before preparing the setup car.",
+            "warn",
+        );
+    } else if (vehicleExists && inVehicle) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Ready",
+            "Vehicle telemetry is live; place the car in the final parked pose.",
+            "ok",
+        );
+    } else if (vehicleExists) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Car found",
+            "Enter the setup car before calibrating the bay.",
+            "warn",
+        );
+    } else {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Not ready",
+            "Use Start Setup Car, then position it manually.",
+            "warn",
+        );
+    }
+
+    setParkingReadiness(
+        parkingReadinessTarget,
+        parkingReadinessTargetNote,
+        targetConfigured ? "Calibrated" : "Not calibrated",
+        targetConfigured
+            ? "Current target pose is ready for forward-parking attempts."
+            : "Park the setup car in the desired final pose, then calibrate.",
+        targetConfigured ? "ok" : "warn",
+    );
+
+    const collectionIsIdle = !normalizedPhase || normalizedPhase === "idle" || normalizedPhase === "ready";
+    const collectionSucceeded = normalizedPhase === "succeeded";
+    const collectionFailed = normalizedPhase === "failed" || normalizedPhase === "stopping";
+    const collectionLabel = collectionIsIdle ? "Idle" : formatParkingPhase(phase);
+    const collectionNote = Number.isFinite(attemptCount) && attemptCount > 0
+        ? `Attempt ${Number.isFinite(attemptIndex) ? attemptIndex + 1 : "--"} of ${attemptCount}.`
+        : "No parking run is active.";
+    setParkingReadiness(
+        parkingReadinessCollection,
+        parkingReadinessCollectionNote,
+        collectionLabel,
+        collectionNote,
+        collectionSucceeded ? "ok" : (collectionFailed ? "bad" : (collectionIsIdle ? "" : "warn")),
+    );
+
+    renderParkingTrainingReadiness(trainingSnapshot, trainingAvailable);
+}
+
+function renderParkingScore(state) {
+    const telemetry = state && state.telemetry ? state.telemetry : null;
+    const targetConfigured = Boolean(telemetry && telemetry.parkingTargetConfigured);
+    const parked = Boolean(telemetry && telemetry.parkingParked);
+    const insideBay = Boolean(telemetry && telemetry.parkingInsideBay);
+    const aligned = Boolean(telemetry && telemetry.parkingAligned);
+    const phase = telemetry && telemetry.parkingPhase ? telemetry.parkingPhase : "idle";
+    const normalizedPhase = String(phase).trim().toLowerCase();
+    const attemptIndex = Number(telemetry && telemetry.parkingAttemptIndex);
+    const attemptCount = Number(telemetry && telemetry.parkingAttemptCount);
+
+    let result = "Waiting";
+    let resultNote = "Calibrate a target to begin.";
+    let resultTone = "pending";
+    if (normalizedPhase === "failed") {
+        result = "Failed";
+        resultNote = "The attempt ended without a valid parked outcome; inspect its metadata before retrying.";
+        resultTone = "bad";
+    } else if (normalizedPhase === "stopping") {
+        result = "Stopping";
+        resultNote = "The current attempt is being stopped and finalized.";
+        resultTone = "pending";
+    } else if (normalizedPhase === "succeeded") {
+        result = "Parked";
+        resultNote = "Inside the bay, aligned, stopped, and settled.";
+        resultTone = "good";
+    } else if (targetConfigured && parked) {
+        result = "Parked";
+        resultNote = "Inside the bay, aligned, and stopped.";
+        resultTone = "good";
+    } else if (targetConfigured && insideBay && aligned) {
+        result = "Settling";
+        resultNote = "Pose is good; bring the car to a complete stop.";
+    } else if (targetConfigured && insideBay) {
+        result = "Straighten";
+        resultNote = "Inside the bay; reduce the remaining heading error.";
+    } else if (targetConfigured) {
+        result = "Approaching";
+        resultNote = "Move toward the center of the calibrated bay.";
+    }
+
+    setParkingScore(parkingScoreResult, result, resultTone);
+    parkingScoreResultNote.textContent = resultNote;
+    setParkingScore(parkingScorePhase, formatParkingPhase(phase));
+    parkingScoreAttempt.textContent = Number.isFinite(attemptCount) && attemptCount > 0
+        ? `Attempt ${Number.isFinite(attemptIndex) ? attemptIndex + 1 : "--"} / ${attemptCount}`
+        : "Attempt -- / --";
+    setParkingScore(
+        parkingScoreInside,
+        targetConfigured ? (insideBay ? "Yes" : "No") : "--",
+        targetConfigured && insideBay ? "good" : "",
+    );
+    parkingScoreAligned.textContent = targetConfigured
+        ? (aligned ? "Heading aligned" : "Heading not aligned")
+        : "Waiting for calibration";
+    setParkingScore(
+        parkingScoreDistance,
+        targetConfigured ? formatParkingMetric(telemetry.parkingDistance, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreLongitudinal,
+        targetConfigured ? formatParkingMetric(telemetry.parkingLongitudinalError, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreLateral,
+        targetConfigured ? formatParkingMetric(telemetry.parkingLateralError, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreHeading,
+        targetConfigured ? formatParkingMetric(telemetry.parkingHeadingError, "°") : "--",
+    );
+    setParkingScore(parkingScoreTarget, targetConfigured ? "Calibrated" : "Not set", targetConfigured ? "good" : "pending");
+}
+
+function renderParkingWorkspace(state, trainingSnapshot, trainingAvailable) {
+    const runtime = state && state.runtime ? state.runtime : {};
+    setConnectionPill(fivemStatus, Boolean(runtime.fivemConnected));
+    renderParkingReadiness(state, trainingSnapshot, trainingAvailable);
+    renderParkingScore(state);
+    if (runtime.lastError) {
+        setParkingBanner(runtime.lastError, "error", "health");
+    } else if (!busy && (!parkingBanner.textContent || parkingBanner.dataset.source === "health")) {
+        setParkingBanner("Parking workspace ready. Start with the setup car.", "success", "status");
+    }
 }
 
 function setConnectionPill(element, connected) {
@@ -530,20 +832,6 @@ async function fetchState() {
         throw new Error("failed to load control state");
     }
     return response.json();
-}
-
-async function waitForTelemetry(timeoutMs = 8000) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-        const state = await fetchState();
-        const telemetry = state && state.telemetry ? state.telemetry : null;
-        const runtime = state && state.runtime ? state.runtime : null;
-        if (telemetry && runtime && runtime.activeSceneName === "ego-control") {
-            return state;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    throw new Error("ego control did not start producing telemetry");
 }
 
 async function fetchInferenceStatus() {
@@ -669,8 +957,8 @@ async function fetchTripSeries(runId, sceneKey, tripName, source, fields) {
     return result;
 }
 
-async function sendCommand(type) {
-    const payload = { type };
+async function sendCommand(type, extraPayload = {}) {
+    const payload = { ...extraPayload, type };
     if (type === "startScene") {
         payload.sceneName = sceneSelect.value;
     }
@@ -1376,6 +1664,87 @@ async function refresh(forceModels = false) {
     }
 }
 
+async function refreshParking() {
+    if (parkingRefreshInFlight || document.hidden) {
+        return;
+    }
+    parkingRefreshInFlight = true;
+    try {
+        const state = await fetchState();
+        renderParkingWorkspace(
+            state,
+            parkingTrainingSnapshot,
+            parkingTrainingAvailable,
+        );
+    } catch (error) {
+        setConnectionPill(fivemStatus, false);
+        setParkingReadiness(
+            parkingReadinessFivem,
+            parkingReadinessFivemNote,
+            "Control server unavailable",
+            "Start the Go backend, then reload this workspace.",
+            "bad",
+        );
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Unavailable",
+            "Setup-car status will return with the control server.",
+            "warn",
+        );
+        setParkingReadiness(
+            parkingReadinessTarget,
+            parkingReadinessTargetNote,
+            "Unavailable",
+            "Target status will return with the control server.",
+            "warn",
+        );
+        setParkingReadiness(
+            parkingReadinessCollection,
+            parkingReadinessCollectionNote,
+            "Unavailable",
+            "Collection status will return with the control server.",
+            "warn",
+        );
+        setParkingScore(parkingScoreResult, "Unavailable", "pending");
+        parkingScoreResultNote.textContent = "Waiting for live parking telemetry.";
+        setParkingScore(parkingScorePhase, "--");
+        parkingScoreAttempt.textContent = "Attempt -- / --";
+        setParkingScore(parkingScoreInside, "--");
+        parkingScoreAligned.textContent = "Waiting for live parking telemetry";
+        setParkingScore(parkingScoreDistance, "--");
+        setParkingScore(parkingScoreLongitudinal, "--");
+        setParkingScore(parkingScoreLateral, "--");
+        setParkingScore(parkingScoreHeading, "--");
+        setParkingScore(parkingScoreTarget, "--", "pending");
+        setParkingBanner(
+            error instanceof Error ? error.message : "failed to refresh parking state",
+            "error",
+            "health",
+        );
+    } finally {
+        parkingRefreshInFlight = false;
+    }
+}
+
+async function refreshParkingTraining() {
+    if (parkingTrainingRefreshInFlight || document.hidden) {
+        return;
+    }
+    parkingTrainingRefreshInFlight = true;
+    try {
+        parkingTrainingSnapshot = await fetchTrainingState();
+        parkingTrainingAvailable = true;
+        trainingState = parkingTrainingSnapshot;
+    } catch {
+        parkingTrainingSnapshot = null;
+        parkingTrainingAvailable = false;
+    } finally {
+        renderParkingTrainingReadiness(parkingTrainingSnapshot, parkingTrainingAvailable);
+        parkingTrainingRefreshInFlight = false;
+    }
+}
+
 async function refreshActuator() {
     if (actuatorRefreshInFlight || document.hidden) {
         return;
@@ -1405,6 +1774,51 @@ async function handleCommand(type, successMessage) {
     }
 }
 
+function readParkingRunPayload() {
+    const attemptCount = Number(parkingAttemptCountInput.value);
+    if (!Number.isInteger(attemptCount) || attemptCount < 1 || attemptCount > 50) {
+        throw new Error("attempt count must be a whole number from 1 to 50");
+    }
+    const seed = parkingSeedInput.value.trim();
+    return seed ? { attemptCount, seed } : { attemptCount };
+}
+
+async function handleParkingCommand(type, payload, pendingMessage, successMessage) {
+    try {
+        setBusy(true);
+        setParkingBanner(pendingMessage, "");
+        await sendCommand(type, payload);
+        setParkingBanner(successMessage, "success");
+        await refreshParking();
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "parking command failed", "error");
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function stopParkingOperation() {
+    const failures = [];
+    try {
+        const inferenceStatus = await fetchInferenceStatus();
+        if (inferenceStatus && inferenceStatus.active) {
+            await postInference("/inference/stop");
+        }
+    } catch (error) {
+        failures.push(error instanceof Error ? error.message : "failed to stop parking inference");
+    }
+
+    try {
+        await sendCommand("endScene");
+    } catch (error) {
+        failures.push(error instanceof Error ? error.message : "failed to stop the FiveM parking operation");
+    }
+
+    if (failures.length > 0) {
+        throw new Error(failures.join("; "));
+    }
+}
+
 function setActivePage(pageName) {
     activePage = pageName;
     for (const tab of pageTabs) {
@@ -1412,9 +1826,14 @@ function setActivePage(pageName) {
         tab.classList.toggle("active", isActive);
         tab.setAttribute("aria-pressed", isActive ? "true" : "false");
     }
+    pageParking.hidden = pageName !== "parking";
     pageControl.hidden = pageName !== "control";
     pageInspector.hidden = pageName !== "inspector";
     pageTraining.hidden = pageName !== "training";
+    if (pageName === "parking") {
+        refreshParking();
+        refreshParkingTraining();
+    }
     if (pageName === "inspector" && inspectorRuns.length === 0) {
         refreshInspectorRuns().catch((error) => {
             setInspectorBanner(error instanceof Error ? error.message : "failed to load runs", "error");
@@ -3095,6 +3514,78 @@ for (const field of TRANSLATION_TUNING_FIELDS) {
     });
 }
 
+parkingStartSetupButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "startEgo",
+        {},
+        "Starting the setup car...",
+        "Setup car queued. Position it in the bay, then calibrate the current pose.",
+    );
+});
+
+parkingCalibrateTargetButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "setParkingTarget",
+        {},
+        "Saving the car's current pose as the parking target...",
+        "Parking target queued. Keep this bay clear before collecting attempts.",
+    );
+});
+
+parkingClearTargetButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "clearParkingTarget",
+        {},
+        "Clearing the parking target...",
+        "Parking target cleared. Reposition the setup car before recalibrating.",
+    );
+});
+
+parkingStartRunButton.addEventListener("click", async () => {
+    try {
+        const payload = readParkingRunPayload();
+        await handleParkingCommand(
+            "startParkingRun",
+            payload,
+            "Queueing focused forward-parking attempts...",
+            "Parking collection queued. Watch the live phase and goal errors.",
+        );
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "invalid parking run settings", "error");
+    }
+});
+
+parkingPrepareEvaluationButton.addEventListener("click", async () => {
+    const seed = parkingSeedInput.value.trim();
+    await handleParkingCommand(
+        "prepareParkingEvaluation",
+        seed ? { seed } : {},
+        "Preparing a parking-model evaluation start...",
+        "Evaluation car queued. Load a parking checkpoint in Advanced, then start inference.",
+    );
+});
+
+parkingStopButton.addEventListener("click", async () => {
+    try {
+        setBusy(true);
+        setParkingBanner("Stopping model control and the current parking operation...", "");
+        await stopParkingOperation();
+        setParkingBanner("Parking operation stopped and held safely.", "success");
+        await refreshParking();
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "failed to stop parking operation", "error");
+    } finally {
+        setBusy(false);
+    }
+});
+
+parkingAttemptCountInput.addEventListener("change", () => {
+    const value = Number(parkingAttemptCountInput.value);
+    parkingAttemptCountInput.value = String(
+        Number.isFinite(value) ? Math.min(50, Math.max(1, Math.trunc(value))) : 10,
+    );
+});
+
 actuatorTuningApplyButton.addEventListener("click", async () => {
     try {
         setBusy(true);
@@ -3427,13 +3918,13 @@ startInferenceButton.addEventListener("click", async () => {
         setBusy(true);
         const state = await fetchState();
         const telemetry = state && state.telemetry ? state.telemetry : null;
-        const egoActive = Boolean(state && state.runtime && state.runtime.activeSceneName === "ego-control");
-        if (!egoActive || !telemetry) {
-            setBanner("Starting ego control for telemetry...", "");
-            await sendCommand("startEgo");
-            await waitForTelemetry();
+        if (!telemetry || !telemetry.vehicleExists || !telemetry.isInVehicle) {
+            throw new Error("prepare a model evaluation start from Parking before starting inference");
         }
-        setBanner("Starting backend inference...", "");
+        if (!telemetry.parkingTargetConfigured) {
+            throw new Error("calibrate a parking target and prepare an evaluation start before starting inference");
+        }
+        setBanner("Checking parking checkpoint and evaluation safety...", "");
         await postInference("/inference/start");
         setBanner("Backend inference started.", "success");
         await refresh();
@@ -3460,7 +3951,7 @@ stopInferenceButton.addEventListener("click", async () => {
 
 setBusy(false);
 setInspectorBusy(false, false);
-setActivePage("control");
+setActivePage("parking");
 
 Promise.all([
     refresh(true),
@@ -3470,6 +3961,20 @@ Promise.all([
     setBanner(message, "error");
     setInspectorBanner(message, "error");
 });
+
+setInterval(() => {
+    if (activePage !== "parking" || document.hidden) {
+        return;
+    }
+    refreshParking();
+}, 750);
+
+setInterval(() => {
+    if (activePage !== "parking" || document.hidden) {
+        return;
+    }
+    refreshParkingTraining();
+}, 10000);
 
 setInterval(() => {
     if (activePage !== "control" || document.hidden) {

@@ -10,7 +10,7 @@ request_timeout = '500ms'
 steering_gain = 1.0
 throttle_gain = 1.0
 throttle_floor = 0.0
-speed_limit_kph = 17.0
+speed_limit_kph = 8.0
 overspeed_brake_margin_kph = 2.0
 overspeed_brake = 0.25
 model_brake_threshold = 0.55
@@ -44,7 +44,7 @@ longitudinal_deadband = 0.05
 launch_throttle_min = 0.22
 launch_speed_threshold = 1.0
 launch_target_speed_margin = 0.75
-max_target_speed_kph = 17.0
+max_target_speed_kph = 8.0
 motion_confidence_on_threshold = 0.6
 motion_confidence_off_threshold = 0.4
 motion_hold_speed_max = 4.0
@@ -52,7 +52,7 @@ min_lateral_confidence = 0.05
 min_longitudinal_confidence = 0.05
 
 [backend.inference]
-auto_load = true
+auto_load = false
 dispatch_stride = 2
 fps = 30
 frame_height = 480
@@ -63,7 +63,7 @@ jpeg_quality = 90
 launch_speed_threshold = 1.0
 launch_target_speed_margin = 0.75
 launch_throttle_min = 0.22
-max_target_speed_kph = 17.0
+max_target_speed_kph = 8.0
 model_device = 'cuda'
 model_server_url = 'http://127.0.0.1:8090'
 request_timeout = '5s'
@@ -91,16 +91,11 @@ telemetry_feature_names = ['current_speed', 'yaw_sin', 'yaw_cos', 'yaw_rate', 's
 control_target_names = ['steering', 'acceleration', 'brakePressureAvg']
 aux_target_names = ['future_speed', 'future_speed_delta', 'future_yaw_delta', 'future_yaw_rate']
 frame_stride = 2
-sample_stride = 10
+sample_stride = 4
 sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
-train_run_ids = [
-    '2026-04-26_02-12-44AM_xajfyj',
-    '2026-04-26_03-19-34AM_j4oafm'
-]
-val_run_ids = [
-    '2026-04-26_01-50-52AM_d6hpum'
-]
+train_run_ids = []
+val_run_ids = []
 
 [dataset.target_transforms]
 [dataset.target_transforms.steering]
@@ -117,7 +112,7 @@ clip = 1.0
 
 [dataset.target_transforms.future_speed]
 type = 'positive_cap'
-clip = 80.0
+clip = 5.0
 
 [dataset.target_transforms.future_speed_delta]
 type = 'signed_cap'
@@ -132,12 +127,12 @@ type = 'signed_cap'
 clip = 10.0
 
 [inference]
-checkpoint = 'fsd_trainer/training_runs/run-20260422-043856/epoch-010.pt'
+checkpoint = ''
 data_root = 'S:\fsd_fivem_data'
 device = 'cuda'
 output_json = false
-run_id = '2026-04-14_08-17-23AM_ym5rls'
-sample_index = 400
+run_id = ''
+sample_index = 0
 
 [loader]
 cpu_batch_size = 34
@@ -155,7 +150,7 @@ val_prefetch_factor = 1
 val_split = 1.0
 
 [loader.turn_oversampling]
-enabled = true
+enabled = false
 straight_weight = 0.4
 light_turn_weight = 2.5
 medium_turn_weight = 1.5
@@ -187,20 +182,28 @@ hidden_dim = 256
 num_layers = 2
 dropout = 0.10
 
-[state_inputs.route_direction_unknown]
+[state_inputs.current_speed]
+enabled = true
+cap = 5.0
+
+[state_inputs.parking_target_configured]
 enabled = true
 
-[state_inputs.route_direction_keep_straight]
+[state_inputs.parking_longitudinal_error]
 enabled = true
+cap = 17.0
 
-[state_inputs.route_direction_turn_left]
+[state_inputs.parking_lateral_error]
 enabled = true
+cap = 3.0
 
-[state_inputs.route_direction_turn_right]
+[state_inputs.parking_heading_error]
 enabled = true
+cap = 20.0
 
-[state_inputs.route_direction_reroute_wrong_way]
-enabled = true
+[state_inputs.parking_distance]
+enabled = false
+cap = 20.0
 
 [training]
 device = 'auto'

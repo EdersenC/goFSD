@@ -50,6 +50,7 @@ type InferenceConfig struct {
 	JPEGQuality                     int
 	ImageOffsets                    []int
 	TelemetryOffsets                []int
+	FutureOffsets                   []int
 	FutureSteps                     int
 	TelemetryFeatureNames           []string
 	ControlOutputNames              []string
@@ -147,6 +148,7 @@ func DefaultInferenceConfig() InferenceConfig {
 		JPEGQuality:             defaultInferenceJPEGQuality,
 		ImageOffsets:            []int{-8, -6, -4, -2, 0},
 		TelemetryOffsets:        []int{-8, -7, -6, -5, -4, -3, -2, -1, 0},
+		FutureOffsets:           []int{1, 2, 3, 4, 5, 6},
 		FutureSteps:             6,
 		TelemetryFeatureNames:   []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
 		ControlOutputNames:      []string{"steering", "acceleration", "brakePressureAvg"},
@@ -251,6 +253,7 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	cfg.FrameStride = datasetConfig.FrameStride
 	cfg.ImageOffsets = append([]int(nil), datasetConfig.ImageOffsets...)
 	cfg.TelemetryOffsets = append([]int(nil), datasetConfig.TelemetryOffsets...)
+	cfg.FutureOffsets = append([]int(nil), datasetConfig.FutureOffsets...)
 	cfg.FutureSteps = len(datasetConfig.FutureOffsets)
 	cfg.TelemetryFeatureNames = append([]string(nil), datasetConfig.TelemetryFeatureNames...)
 	cfg.ControlOutputNames = append([]string(nil), datasetConfig.ControlTargetNames...)
@@ -427,6 +430,9 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	}
 	if cfg.FutureSteps < 1 {
 		return InferenceConfig{}, fmt.Errorf("backend inference future_steps must be > 0")
+	}
+	if len(cfg.FutureOffsets) != cfg.FutureSteps {
+		return InferenceConfig{}, fmt.Errorf("backend inference future_offsets length must match future_steps")
 	}
 	if len(cfg.ControlOutputNames) < 2 || cfg.ControlOutputNames[0] != "steering" || cfg.ControlOutputNames[1] != "acceleration" {
 		return InferenceConfig{}, fmt.Errorf("backend inference control_output_names must start with [steering, acceleration]")

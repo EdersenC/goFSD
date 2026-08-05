@@ -5,8 +5,9 @@ import {
     innerCityDrivingScenes,
     type InnerCityDrivingSceneVariant
 } from "./datasets/inner-city-driving";
+import {CONTROL_TELEMETRY_SAMPLE_INTERVAL_MS} from "./controlTelemetry";
 
-const CLIENT_BUILD_ID = "2026-04-21-capture-failfast-v1";
+const CLIENT_BUILD_ID = "2026-08-04-forward-parking-v1";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -16,13 +17,25 @@ const innerCitySceneNames = Object.keys(innerCityDrivingScenes) as InnerCityDriv
 const canonicalInnerCitySceneName = "inner-city-driving:default";
 const innerCitySceneBaseLabel = "Inner City Driving";
 
-type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes" | "startEgo" | "stopEgo";
+type ControlCommandType =
+    | "startScene"
+    | "runAllScenes"
+    | "endScene"
+    | "endAllScenes"
+    | "startEgo"
+    | "stopEgo"
+    | "setParkingTarget"
+    | "clearParkingTarget"
+    | "prepareParkingEvaluation"
+    | "startParkingRun";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
 
 type ControlCommand = {
     id: string
     type: ControlCommandType
     sceneName?: string
+    attemptCount?: number
+    seed?: string
 }
 
 type AvailableScene = {
@@ -50,6 +63,7 @@ type ControlTelemetryUpdate = {
     gear?: number
     rpm?: number
     wheelAngle?: number
+    wheelSteeringFullLock?: number
     onGround?: boolean
     collisionState?: string
     routeDirectionCode: number
@@ -64,11 +78,21 @@ type ControlTelemetryUpdate = {
     routeDistance: number
     leadVehicleDistance: number
     hasLeadVehicle: boolean
+    parkingTargetConfigured: boolean
+    parkingLongitudinalError: number
+    parkingLateralError: number
+    parkingHeadingError: number
+    parkingDistance: number
+    parkingInsideBay: boolean
+    parkingAligned: boolean
+    parkingParked: boolean
+    parkingAttemptIndex: number
+    parkingAttemptCount: number
+    parkingPhase: string
     timestampMs: number
     gameTimeMs: number
 }
 
-const TELEMETRY_INTERVAL_MS = 67;
 const CONTROL_REGISTER_INTERVAL_MS = 5000;
 
 function registerInnerCityScenes() {
@@ -163,14 +187,58 @@ function stopEgoControl() {
     reportControlStatus("idle");
 }
 
+function setParkingTarget() {
+    const target = sceneManager.setParkingTarget();
+    log(
+        `[parking] target ready heading=${target.pose.heading.toFixed(2)} `
+        + `bay=${target.bay.widthM.toFixed(1)}x${target.bay.lengthM.toFixed(1)}m`
+    );
+}
+
+function clearParkingTarget() {
+    sceneManager.clearParkingTarget();
+}
+
+async function executeParkingRunControl(attemptCount: unknown, seed?: string) {
+    reportControlStatus("runningScene", "parking-forward-bay:default");
+    try {
+        await sceneManager.startParkingRun(attemptCount, seed);
+        reportControlStatus("idle");
+    } catch (error: any) {
+        const message = error?.message ?? "Failed to run forward-bay parking";
+        reportControlStatus("error", "parking-forward-bay:default", message);
+        throw error;
+    }
+}
+
+async function prepareParkingEvaluationControl(seed?: string) {
+    reportControlStatus("runningScene", "parking-evaluation");
+    try {
+        const goal = await sceneManager.prepareParkingEvaluation(seed);
+        reportControlStatus("runningScene", "parking-evaluation");
+        log(
+            `[parking] evaluation ready seed=${goal.seed} `
+            + `start=(${goal.startPose.coords.map((value) => value.toFixed(2)).join(", ")})`
+        );
+    } catch (error: any) {
+        const message = error?.message ?? "Failed to prepare parking evaluation";
+        reportControlStatus("error", "parking-evaluation", message);
+        throw error;
+    }
+}
+
 function requestEndScene() {
     reportControlStatus("stopping");
-    sceneManager.endScene();
+    if (sceneManager.endScene()) {
+        reportControlStatus("idle");
+    }
 }
 
 function requestEndAllScenes() {
     reportControlStatus("stopping");
-    sceneManager.endAllScenes();
+    if (sceneManager.endAllScenes()) {
+        reportControlStatus("idle");
+    }
 }
 
 registerInnerCityScenes();
@@ -187,21 +255,13 @@ let lastRouteForwardDelta = 0;
 let lastRouteHeadingError = 0;
 let lastRouteDistance = 0;
 let lastLeadVehicleDistance = 100;
-let lastTelemetryMissingLogAt = 0;
 let lastTelemetryDebugLogAt = 0;
 setTick(() => {
     const now = GetGameTimer();
-    if (now-lastTelemetrySentAt < TELEMETRY_INTERVAL_MS) {
+    if (now-lastTelemetrySentAt < CONTROL_TELEMETRY_SAMPLE_INTERVAL_MS) {
         return;
     }
     const telemetry = sceneManager.currentEgoControlTelemetry();
-    if (!telemetry) {
-        if (now - lastTelemetryMissingLogAt >= 1000) {
-            lastTelemetryMissingLogAt = now;
-            log(`[client] telemetry unavailable egoActive=${sceneManager.currentEgoSpeed() !== null}`);
-        }
-        return;
-    }
     const routeForwardDelta = telemetry.routeForwardDelta ?? lastRouteForwardDelta;
     const routeHeadingError = telemetry.routeHeadingError ?? lastRouteHeadingError;
     const routeDistance = telemetry.routeDistance ?? lastRouteDistance;
@@ -241,6 +301,7 @@ setTick(() => {
         gear: telemetry.gear,
         rpm: telemetry.rpm,
         wheelAngle: telemetry.wheelAngle,
+        wheelSteeringFullLock: telemetry.wheelSteeringFullLock,
         onGround: telemetry.onGround,
         collisionState: telemetry.collisionState,
         routeDirectionCode: telemetry.routeDirectionCode,
@@ -255,12 +316,23 @@ setTick(() => {
         routeDistance,
         leadVehicleDistance,
         hasLeadVehicle: telemetry.hasLeadVehicle,
+        parkingTargetConfigured: telemetry.parkingTargetConfigured,
+        parkingLongitudinalError: telemetry.parkingLongitudinalError,
+        parkingLateralError: telemetry.parkingLateralError,
+        parkingHeadingError: telemetry.parkingHeadingError,
+        parkingDistance: telemetry.parkingDistance,
+        parkingInsideBay: telemetry.parkingInsideBay,
+        parkingAligned: telemetry.parkingAligned,
+        parkingParked: telemetry.parkingParked,
+        parkingAttemptIndex: telemetry.parkingAttemptIndex,
+        parkingAttemptCount: telemetry.parkingAttemptCount,
+        parkingPhase: telemetry.parkingPhase,
         timestampMs: Date.now(),
         gameTimeMs: telemetry.gameTimeMs,
     });
     if (now - lastTelemetryDebugLogAt >= 2000) {
         lastTelemetryDebugLogAt = now;
-        log(
+        console.log(
             `[client] telemetry publish speed=${telemetry.currentSpeed.toFixed(2)} ` +
             `yawRate=${telemetry.yawRate.toFixed(2)} ` +
             `steer=${telemetry.steering.toFixed(2)} ` +
@@ -313,6 +385,38 @@ RegisterCommand("stopEgo", () => {
     stopEgoControl();
 }, false);
 
+RegisterCommand("setParkingTarget", () => {
+    try {
+        setParkingTarget();
+    } catch (error: any) {
+        log(`[parking] target calibration failed: ${error?.message ?? error}`);
+    }
+}, false);
+
+RegisterCommand("clearParkingTarget", () => {
+    try {
+        clearParkingTarget();
+    } catch (error: any) {
+        log(`[parking] target clear failed: ${error?.message ?? error}`);
+    }
+}, false);
+
+RegisterCommand("startParkingRun", async (_source: number, args: string[]) => {
+    try {
+        await executeParkingRunControl(args[0], args[1]);
+    } catch (error: any) {
+        log(`[parking] run failed: ${error?.message ?? error}`);
+    }
+}, false);
+
+RegisterCommand("prepareParkingEvaluation", async (_source: number, args: string[]) => {
+    try {
+        await prepareParkingEvaluationControl(args[0]);
+    } catch (error: any) {
+        log(`[parking] evaluation setup failed: ${error?.message ?? error}`);
+    }
+}, false);
+
 RegisterCommand("listSceneVariants", () => {
     const variants = innerCitySceneNames.join(", ");
     emit("chat:addMessage", {
@@ -351,6 +455,18 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
                 break;
             case "stopEgo":
                 stopEgoControl();
+                break;
+            case "setParkingTarget":
+                setParkingTarget();
+                break;
+            case "clearParkingTarget":
+                clearParkingTarget();
+                break;
+            case "prepareParkingEvaluation":
+                await prepareParkingEvaluationControl(command.seed);
+                break;
+            case "startParkingRun":
+                await executeParkingRunControl(command.attemptCount, command.seed);
                 break;
             default:
                 throw new Error(`Unsupported control command: ${command?.type ?? "unknown"}`);

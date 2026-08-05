@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
 import unittest
@@ -21,7 +22,11 @@ from config import (
     parse_temporal_dataset_config,
 )
 from dataset import FsdDataset, wrap_degrees_delta
-from inference import load_checkpoint
+from inference import (
+    load_checkpoint,
+    load_config as load_inference_config,
+    resolve_config as resolve_inference_config,
+)
 from models.planner import DrivingCNN
 from train import (
     DatasetConfig,
@@ -84,15 +89,19 @@ def create_temporal_trip_fixture(
     trip_name: str,
     include_invalid_sample: bool = False,
     image_size: tuple[int, int] = (32, 32),
+    metadata_overrides: dict[str, object] | None = None,
 ) -> None:
     trip_dir = root / "runs" / run_name / "inner-city-driving_default" / trip_name
     trip_dir.mkdir(parents=True, exist_ok=True)
-    (trip_dir / "metadata.json").write_text(json.dumps({
+    metadata: dict[str, object] = {
         "runId": run_name,
         "sceneId": "inner-city-driving",
         "sceneVariant": "default",
         "tripIndex": int(trip_name.split("-")[-1]),
-    }), encoding="utf-8")
+    }
+    if metadata_overrides:
+        metadata.update(metadata_overrides)
+    (trip_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     frames_dir = trip_dir / "frames"
     frames_dir.mkdir(exist_ok=True)
@@ -138,6 +147,95 @@ def create_temporal_trip_fixture(
 
 
 class TemporalPlannerUpgradeTests(unittest.TestCase):
+    def test_model_server_can_read_clean_config_without_a_default_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "train_config.toml"
+            config_path.write_text(
+                """
+[dataset]
+window_size = 5
+frame_stride = 2
+sample_stride = 4
+
+[inference]
+checkpoint = ''
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_inference_config(config_path, require_checkpoint=False)
+
+            self.assertEqual(config.checkpoint, "")
+            self.assertIsNone(config.run_id)
+            with self.assertRaisesRegex(ValueError, "Missing inference.checkpoint"):
+                load_inference_config(config_path)
+
+            resolved = resolve_inference_config(argparse.Namespace(
+                config=config_path,
+                checkpoint=Path("fresh-parking-model.pt"),
+                device=None,
+                data_root=None,
+                run_id=None,
+                sample_index=None,
+                output_json=False,
+                metadata_only=False,
+            ))
+            self.assertEqual(resolved.checkpoint, "fresh-parking-model.pt")
+            self.assertIsNone(resolved.run_id)
+
+    def test_dataset_excludes_failed_parking_attempts_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parking_goal = {"task": "parking", "maneuver": "forward-bay"}
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-000",
+                metadata_overrides={
+                    "parkingGoal": parking_goal,
+                    "parkingOutcome": {"success": True, "status": "succeeded"},
+                },
+            )
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-001",
+                metadata_overrides={
+                    "parkingGoal": parking_goal,
+                    "parkingOutcome": {"success": False, "status": "collision"},
+                },
+            )
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-002",
+                metadata_overrides={
+                    "parkingOutcome": {"success": False, "status": "incomplete-metadata"},
+                },
+            )
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-003",
+                metadata_overrides={"parkingGoal": None, "parkingOutcome": None},
+            )
+
+            successful_only = FsdDataset(
+                run_paths=[root / "runs" / "run-a"],
+                image_size=(32, 32),
+            )
+            with_failures = FsdDataset(
+                run_paths=[root / "runs" / "run-a"],
+                image_size=(32, 32),
+                include_failed_parking_attempts=True,
+            )
+
+            self.assertEqual(successful_only.trip_count, 2)
+            self.assertEqual(successful_only.excluded_failed_parking_trip_count, 2)
+            self.assertEqual(with_failures.trip_count, 4)
+            self.assertEqual(with_failures.excluded_failed_parking_trip_count, 0)
+
     def test_parse_temporal_dataset_config_reads_explicit_sequence_fields(self) -> None:
         raw = {
             "dataset": {

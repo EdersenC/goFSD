@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,7 +29,7 @@ import (
 var webAssets embed.FS
 
 func main() {
-	const backendBuildID = "2026-04-21-capture-failfast-v1"
+	const backendBuildID = "2026-08-04-parking-lab-v1"
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "process-runs":
@@ -77,7 +78,7 @@ func main() {
 	trainingProxyBaseURL := strings.TrimRight(strings.TrimSpace(inferenceConfig.ModelServerURL), "/")
 	trainingProxyClient := &http.Client{Timeout: inferenceConfig.RequestTimeout}
 	if err := actuatorService.Start(); err != nil {
-		log.Fatalf("failed to start virtual controller actuator: %v", err)
+		log.Printf("virtual controller actuator unavailable; expert collection remains available: %v", err)
 	}
 	defer func() {
 		if err := actuatorService.Close(); err != nil {
@@ -181,6 +182,10 @@ func main() {
 		}
 		res, err := inferencer.LoadModel(r.Context(), req)
 		if err != nil {
+			if errors.Is(err, capture.ErrInferenceAlreadyRunning) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -680,12 +685,7 @@ func main() {
 		})
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	addr := ":" + port
+	addr := backendListenAddress(os.Getenv("HOST"), os.Getenv("PORT"))
 	log.Printf("capture API listening on %s", addr)
 	server := &http.Server{
 		Addr:    addr,
@@ -1033,4 +1033,16 @@ func defaultBackendDataRoot() string {
 		return `S:\fsd_fivem_data`
 	}
 	return "/mnt/s/fsd_fivem_data"
+}
+
+func backendListenAddress(host string, port string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		port = "8080"
+	}
+	return net.JoinHostPort(host, port)
 }

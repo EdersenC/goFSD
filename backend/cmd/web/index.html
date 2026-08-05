@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Run Control</title>
+    <title>Parking Lab</title>
     <style>
         :root {
             color-scheme: light;
@@ -146,6 +146,168 @@
         .page-panel {
             display: grid;
             gap: 18px;
+        }
+
+        .parking-intro {
+            display: grid;
+            grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+            gap: 18px;
+            align-items: stretch;
+        }
+
+        .parking-intro-copy {
+            display: grid;
+            align-content: center;
+            gap: 12px;
+            min-height: 220px;
+            background:
+                linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(37, 99, 235, 0.06)),
+                var(--panel);
+        }
+
+        .parking-intro-copy h2 {
+            font-size: clamp(26px, 3vw, 36px);
+        }
+
+        .parking-intro-copy p {
+            margin: 0;
+            max-width: 68ch;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .parking-limit-note {
+            padding: 12px 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(217, 119, 6, 0.38);
+            background: rgba(217, 119, 6, 0.09);
+            color: #fed7aa;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .parking-steps {
+            display: grid;
+            gap: 10px;
+            counter-reset: parking-step;
+        }
+
+        .parking-step {
+            display: grid;
+            grid-template-columns: 32px minmax(0, 1fr);
+            gap: 10px;
+            align-items: start;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .parking-step::before {
+            counter-increment: parking-step;
+            content: counter(parking-step);
+            display: grid;
+            place-items: center;
+            width: 30px;
+            height: 30px;
+            border-radius: 10px;
+            border: 1px solid rgba(56, 189, 248, 0.28);
+            background: rgba(56, 189, 248, 0.10);
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .parking-step strong {
+            display: block;
+            margin-bottom: 2px;
+            color: var(--text);
+        }
+
+        .parking-readiness-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .parking-readiness-card,
+        .parking-score-card {
+            min-height: 112px;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid var(--line);
+            background: var(--panel-strong);
+            display: grid;
+            align-content: space-between;
+            gap: 8px;
+        }
+
+        .parking-readiness-value {
+            font-size: 16px;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .parking-readiness-value.ok {
+            color: #86efac;
+        }
+
+        .parking-readiness-value.warn {
+            color: #fdba74;
+        }
+
+        .parking-readiness-value.bad {
+            color: #fca5a5;
+        }
+
+        .parking-work-grid {
+            display: grid;
+            grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+            gap: 18px;
+            align-items: start;
+        }
+
+        .parking-action-group {
+            display: grid;
+            gap: 12px;
+            padding: 14px;
+            border-radius: 16px;
+            border: 1px solid var(--line);
+            background: var(--panel-strong);
+        }
+
+        .parking-action-group h3,
+        .parking-action-group p {
+            margin: 0;
+        }
+
+        .parking-action-group p {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .parking-score-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .parking-score-value {
+            font-size: 21px;
+            line-height: 1.25;
+            font-weight: 600;
+            word-break: break-word;
+        }
+
+        .parking-score-value.good {
+            color: #86efac;
+        }
+
+        .parking-score-value.pending {
+            color: #fdba74;
+        }
+
+        .parking-score-value.bad {
+            color: #fca5a5;
         }
 
         [hidden] {
@@ -982,7 +1144,9 @@
         @media (max-width: 1080px) {
             .grid-2,
             .inspector-grid,
-            .training-grid {
+            .training-grid,
+            .parking-intro,
+            .parking-work-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -998,6 +1162,11 @@
             .runtime-meta-grid,
             .job-detail-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .parking-readiness-grid,
+            .parking-score-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
             .controls-row.controls-row-wide {
@@ -1031,11 +1200,16 @@
             .page-nav {
                 width: 100%;
                 display: grid;
-                grid-template-columns: repeat(3, 1fr);
+                grid-template-columns: repeat(4, 1fr);
             }
 
             .page-tab {
                 min-width: 0;
+            }
+
+            .parking-readiness-grid,
+            .parking-score-grid {
+                grid-template-columns: 1fr;
             }
         }
     </style>
@@ -1045,25 +1219,180 @@
     <section class="topbar">
         <div class="brand">
             <span class="brand-mark"></span>
-            <span>Local Scene Control</span>
+            <span>Local Parking Lab</span>
         </div>
         <div id="fivem-status"></div>
     </section>
 
     <section class="hero">
-        <span class="eyebrow">FiveM Local Control</span>
-        <h1>Run scenes, inspect data, and manage training.</h1>
+        <span class="eyebrow">FiveM Parking Workspace</span>
+        <h1>Teach the car one parking skill at a time.</h1>
         <p class="lead">
-            Keep scene control, inference, translation tuning, run inspection, and backend training jobs in one place without leaving the local control UI.
+            Calibrate a real bay in FiveM, collect focused forward-parking attempts, inspect live goal error, and carry the resulting data into model training.
         </p>
         <nav class="page-nav" aria-label="Primary">
-            <button id="page-tab-control" class="page-tab active" data-page-tab="control" type="button">Control</button>
-            <button id="page-tab-inspector" class="page-tab" data-page-tab="inspector" type="button">Data Inspector</button>
-            <button id="page-tab-training" class="page-tab" data-page-tab="training" type="button">Training</button>
+            <button id="page-tab-parking" class="page-tab active" data-page-tab="parking" type="button">Parking</button>
+            <button id="page-tab-control" class="page-tab" data-page-tab="control" type="button">Advanced</button>
+            <button id="page-tab-inspector" class="page-tab" data-page-tab="inspector" type="button">Data</button>
+            <button id="page-tab-training" class="page-tab" data-page-tab="training" type="button">Models</button>
         </nav>
     </section>
 
-    <section id="page-control" class="page-panel">
+    <section id="page-parking" class="page-panel">
+        <section class="parking-intro">
+            <article class="card parking-intro-copy">
+                <span class="eyebrow">Focused First Milestone</span>
+                <h2>Forward parking, with a target you choose.</h2>
+                <p>
+                    The lab uses the parked car's current position and heading as the goal pose. Choose a clear perpendicular bay, place the setup car exactly where a successful park should finish, then calibrate before collecting attempts.
+                </p>
+                <div class="parking-limit-note">
+                    Forward-only for now. Reverse, back-in, and parallel parking need an explicit drive-direction control path and are intentionally outside this first workspace.
+                </div>
+            </article>
+
+            <article class="card">
+                <div class="card-title-row">
+                    <h2>Quick Start</h2>
+                    <span class="subtle">Calibrate once per bay.</span>
+                </div>
+                <div class="parking-steps">
+                    <div class="parking-step"><div><strong>Start the setup car</strong>Wait for FiveM to spawn the controllable ego vehicle.</div></div>
+                    <div class="parking-step"><div><strong>Place it in the bay</strong>Center the car and point it at the exact final heading you want the model to learn.</div></div>
+                    <div class="parking-step"><div><strong>Calibrate the current bay</strong>The current vehicle pose becomes the target for this local session.</div></div>
+                    <div class="parking-step"><div><strong>Collect focused attempts</strong>Choose a count and optional repeatable seed, then watch the live score converge.</div></div>
+                    <div class="parking-step"><div><strong>Prepare a model evaluation</strong>Spawn the same forward curriculum start without the GTA expert, then start a parking checkpoint from Advanced.</div></div>
+                </div>
+            </article>
+        </section>
+
+        <section class="card">
+            <div class="card-title-row">
+                <h2>Workspace Readiness</h2>
+                <span class="subtle">Resolve each item from left to right before collecting.</span>
+            </div>
+            <div class="parking-readiness-grid">
+                <div class="parking-readiness-card">
+                    <span class="status-label">FiveM Link</span>
+                    <div id="parking-readiness-fivem" class="parking-readiness-value warn">Waiting for FiveM</div>
+                    <span id="parking-readiness-fivem-note" class="field-note">Start FiveM and the FSD resource.</span>
+                </div>
+                <div class="parking-readiness-card">
+                    <span class="status-label">Setup Car</span>
+                    <div id="parking-readiness-car" class="parking-readiness-value warn">Not ready</div>
+                    <span id="parking-readiness-car-note" class="field-note">Start the setup car, then position it manually.</span>
+                </div>
+                <div class="parking-readiness-card">
+                    <span class="status-label">Parking Target</span>
+                    <div id="parking-readiness-target" class="parking-readiness-value warn">Not calibrated</div>
+                    <span id="parking-readiness-target-note" class="field-note">Calibrate from the car's current pose.</span>
+                </div>
+                <div class="parking-readiness-card">
+                    <span class="status-label">Collection</span>
+                    <div id="parking-readiness-collection" class="parking-readiness-value">Idle</div>
+                    <span id="parking-readiness-collection-note" class="field-note">No parking run is active.</span>
+                </div>
+                <div class="parking-readiness-card">
+                    <span class="status-label">Trainer</span>
+                    <div id="parking-readiness-training" class="parking-readiness-value warn">Checking</div>
+                    <span id="parking-readiness-training-note" class="field-note">The model server may be started later.</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="parking-work-grid">
+            <article class="card">
+                <div class="card-title-row">
+                    <h2>Collect Attempts</h2>
+                    <span class="subtle">Setup, calibrate, then collect.</span>
+                </div>
+                <div class="controls">
+                    <div class="parking-action-group">
+                        <h3>1. Prepare the bay</h3>
+                        <p>Spawn the setup car, drive it into the final parked pose, and save that position and heading as the target.</p>
+                        <div class="button-grid">
+                            <button id="parking-start-setup" class="secondary" type="button">Start Setup Car</button>
+                            <button id="parking-calibrate-target" class="primary" type="button">Calibrate Current Bay</button>
+                            <button id="parking-clear-target" class="ghost" type="button">Clear Target</button>
+                            <button id="parking-stop" class="danger" type="button">Stop &amp; Hold</button>
+                        </div>
+                    </div>
+                    <div class="parking-action-group">
+                        <h3>2. Run collection</h3>
+                        <p>Each attempt begins from a forward-only approach to the calibrated bay. A seed makes the same attempt variations repeatable.</p>
+                        <div class="controls-row controls-row-halves">
+                            <label class="field" for="parking-attempt-count">
+                                <span class="status-label">Attempt Count</span>
+                                <input id="parking-attempt-count" type="number" min="1" max="50" step="1" value="10">
+                            </label>
+                            <label class="field" for="parking-seed">
+                                <span class="status-label">Seed (Optional)</span>
+                                <input id="parking-seed" type="text" placeholder="leave blank for a new run">
+                            </label>
+                        </div>
+                        <button id="parking-start-run" class="primary" type="button">Collect Forward-Parking Attempts</button>
+                    </div>
+                    <div class="parking-action-group">
+                        <h3>3. Evaluate a trained model</h3>
+                        <p>Spawn a Sultan inside the same seeded start envelope used for training, without capture or the GTA parking expert. Then load and start a parking checkpoint from Advanced.</p>
+                        <button id="parking-prepare-evaluation" class="secondary" type="button">Prepare Model Evaluation Start</button>
+                    </div>
+                    <div id="parking-banner" class="banner" aria-live="polite"></div>
+                </div>
+            </article>
+
+            <article class="card">
+                <div class="card-title-row">
+                    <h2>Live Parking Score</h2>
+                    <span class="subtle">Errors are relative to the calibrated target pose.</span>
+                </div>
+                <div class="parking-score-grid">
+                    <div class="parking-score-card">
+                        <span class="status-label">Result</span>
+                        <div id="parking-score-result" class="parking-score-value pending">Waiting</div>
+                        <span id="parking-score-result-note" class="field-note">Calibrate a target to begin.</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Phase</span>
+                        <div id="parking-score-phase" class="parking-score-value">Idle</div>
+                        <span id="parking-score-attempt" class="field-note">Attempt -- / --</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Inside Bay</span>
+                        <div id="parking-score-inside" class="parking-score-value">No</div>
+                        <span id="parking-score-aligned" class="field-note">Heading not aligned</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Distance to Goal</span>
+                        <div id="parking-score-distance" class="parking-score-value">--</div>
+                        <span class="field-note">Center-to-center distance</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Longitudinal Error</span>
+                        <div id="parking-score-longitudinal" class="parking-score-value">--</div>
+                        <span class="field-note">Forward/back error</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Lateral Error</span>
+                        <div id="parking-score-lateral" class="parking-score-value">--</div>
+                        <span class="field-note">Side-to-side error</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Heading Error</span>
+                        <div id="parking-score-heading" class="parking-score-value">--</div>
+                        <span class="field-note">Difference from target heading</span>
+                    </div>
+                    <div class="parking-score-card">
+                        <span class="status-label">Target</span>
+                        <div id="parking-score-target" class="parking-score-value">Not set</div>
+                        <span class="field-note">Current bay calibration</span>
+                    </div>
+                </div>
+            </article>
+        </section>
+    </section>
+
+    <section id="page-control" class="page-panel" hidden>
         <section class="grid-2">
             <article class="card">
                 <div class="card-title-row">

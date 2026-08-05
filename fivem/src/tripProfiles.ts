@@ -108,8 +108,15 @@ class SeededRandom {
     }
 
     pick<T>(items: T[]): T {
+        if (items.length === 0) {
+            throw new Error("trip profile choice invariant violated: options cannot be empty");
+        }
         const index = Math.floor(this.next() * items.length);
-        return items[Math.min(index, items.length - 1)];
+        const item = items[Math.min(index, items.length - 1)];
+        if (item === undefined) {
+            throw new Error("trip profile choice invariant violated: selected option is missing");
+        }
+        return item;
     }
 }
 

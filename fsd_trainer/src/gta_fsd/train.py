@@ -39,8 +39,9 @@ from config import (
     DEFAULT_TELEMETRY_FEATURE_NAMES,
     DEFAULT_TELEMETRY_HIDDEN_DIM,
     DEFAULT_TELEMETRY_OFFSETS,
-    normalize_windows_drive_path,
     parse_temporal_dataset_config,
+    resolve_data_root,
+    resolve_data_root_child,
 )
 from dataset import DatasetItem, FsdDataset
 from models.planner import DrivingCNN
@@ -718,7 +719,7 @@ def load_config(path: Path) -> TrainConfig:
     training_raw = raw["training"]
     loader_raw = raw["loader"]
 
-    data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
+    data_root = resolve_data_root(dataset_raw.get("data_root"))
     train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
     val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
     (
@@ -766,7 +767,7 @@ def load_config(path: Path) -> TrainConfig:
                 frame_stride=int(dataset_raw.get("frame_stride", _infer_frame_stride(image_offsets))),
                 sample_stride=int(dataset_raw.get("sample_stride", max(future_offsets))),
             ),
-        output=OutputConfig(base_dir=normalize_windows_drive_path(str(output_raw["base_dir"]))),
+        output=OutputConfig(base_dir=resolve_data_root_child(output_raw.get("base_dir"), "training_runs")),
         model=ModelConfig(
             width_multiplier=float(model_raw.get("width_multiplier", DEFAULT_WIDTH_MULTIPLIER)),
             telemetry_hidden_dim=int(model_raw.get("telemetry_hidden_dim", DEFAULT_TELEMETRY_HIDDEN_DIM)),

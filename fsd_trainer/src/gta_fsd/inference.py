@@ -16,6 +16,7 @@ from config import (
     DEFAULT_IMAGE_WIDTH,
     normalize_windows_drive_path,
     parse_dataset_window,
+    resolve_optional_data_root,
 )
 from dataset import FsdDataset
 from models.planner import DrivingCNN
@@ -109,20 +110,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(path: Path) -> InferenceConfig:
+def load_config(path: Path, *, require_checkpoint: bool = True) -> InferenceConfig:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     inference_raw = raw.get("inference", {})
     dataset_raw = raw.get("dataset", {})
     window_size, frame_stride, sample_stride = parse_dataset_window(raw)
 
     checkpoint = str(inference_raw.get("checkpoint", "")).strip()
-    if not checkpoint:
+    if require_checkpoint and not checkpoint:
         raise ValueError(f"Missing inference.checkpoint in {path}")
 
     data_root_raw = inference_raw.get("data_root", dataset_raw.get("data_root"))
-    data_root = None if data_root_raw is None else normalize_windows_drive_path(str(data_root_raw))
+    data_root = resolve_optional_data_root(data_root_raw)
     run_id_raw = inference_raw.get("run_id")
-    run_id = None if run_id_raw is None else str(run_id_raw).strip()
+    run_id_value = "" if run_id_raw is None else str(run_id_raw).strip()
+    run_id = run_id_value or None
     image_width = int(inference_raw.get("image_width", dataset_raw.get("image_width", DEFAULT_IMAGE_WIDTH)))
     image_height = int(inference_raw.get("image_height", dataset_raw.get("image_height", DEFAULT_IMAGE_HEIGHT)))
 
@@ -143,7 +145,10 @@ def load_config(path: Path) -> InferenceConfig:
 
 
 def resolve_config(args: argparse.Namespace) -> InferenceConfig:
-    file_config = load_config(args.config)
+    file_config = load_config(
+        args.config,
+        require_checkpoint=args.checkpoint is None,
+    )
     checkpoint = str(args.checkpoint) if args.checkpoint is not None else file_config.checkpoint
     device = args.device if args.device is not None else file_config.device
     data_root = normalize_windows_drive_path(args.data_root) if args.data_root is not None else file_config.data_root
@@ -643,9 +648,9 @@ def main() -> None:
     target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
 
     sample_result: dict[str, Any] | None = None
-    if not config.metadata_only and (config.run_id or config.data_root):
-        if not config.run_id or not config.data_root:
-            raise ValueError("Both inference.run_id and inference.data_root are required for sample inference")
+    if not config.metadata_only and config.run_id:
+        if not config.data_root:
+            raise ValueError("inference.data_root is required when inference.run_id is configured")
         sample_result = run_sample_inference(
             model,
             device,

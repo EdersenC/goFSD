@@ -5,8 +5,9 @@ import {log} from "./helper";
 import {defaultScene, defaultSceneId, getLocalScene} from "./datasets";
 import {normalizeScenePayload, SceneType} from "./sceneManger";
 import {WaypointCompleted} from "./egoService";
+import {isActuatorStateNeutral, isInferenceCleanupComplete} from "./expertNeutral";
 
-const SERVER_BUILD_ID = "2026-04-21-capture-failfast-v1";
+const SERVER_BUILD_ID = "2026-08-04-forward-parking-v1";
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
 type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "isTripComplete"> & {
@@ -41,6 +42,10 @@ type CaptureRequest = {
     sceneName?: string
 }
 
+type ValidatedCaptureRequest = Omit<CaptureRequest, "tripIndex"> & {
+    tripIndex: number
+}
+
 type CaptureResponse = {
     requestId: string
     success: boolean
@@ -48,6 +53,16 @@ type CaptureResponse = {
     outputFile?: string
     logFile?: string
     outputBytes?: number
+}
+
+type ExpertNeutralizeRequest = {
+    requestId: string
+}
+
+type ExpertNeutralizeResponse = {
+    requestId: string
+    success: boolean
+    error?: string
 }
 
 type TripFinalizeResponse = {
@@ -95,13 +110,23 @@ type TripStoragePaths = {
     metadataFile: string
 }
 
-type ControlCommandType = "startScene" | "runAllScenes" | "endScene" | "endAllScenes";
+type ControlCommandType =
+    | "startScene"
+    | "runAllScenes"
+    | "endScene"
+    | "endAllScenes"
+    | "setParkingTarget"
+    | "clearParkingTarget"
+    | "prepareParkingEvaluation"
+    | "startParkingRun";
 type InferenceCommandType = "startEgo" | "stopEgo";
 
 type ControlCommand = {
     id: string
     type: ControlCommandType | InferenceCommandType
     sceneName?: string
+    attemptCount?: number
+    seed?: string
     createdAt?: string
 }
 
@@ -131,6 +156,7 @@ type ControlTelemetryUpdate = {
     gear?: number
     rpm?: number
     wheelAngle?: number
+    wheelSteeringFullLock?: number
     onGround?: boolean
     collisionState?: string
     routeDirectionCode: number
@@ -145,6 +171,17 @@ type ControlTelemetryUpdate = {
     routeDistance: number
     leadVehicleDistance: number
     hasLeadVehicle: boolean
+    parkingTargetConfigured: boolean
+    parkingLongitudinalError: number
+    parkingLateralError: number
+    parkingHeadingError: number
+    parkingDistance: number
+    parkingInsideBay: boolean
+    parkingAligned: boolean
+    parkingParked: boolean
+    parkingAttemptIndex: number
+    parkingAttemptCount: number
+    parkingPhase: string
     timestampMs?: number
     gameTimeMs?: number
 }
@@ -169,6 +206,24 @@ let sceneListRequestInFlight = false;
 let activeControlPlayerSource: number | null = null;
 let controlConnectInFlight = false;
 let lastControlTelemetryDebugAt = 0;
+
+class ApiRequestError extends Error {
+    constructor(
+        message: string,
+        readonly status: number
+    ) {
+        super(message);
+    }
+}
+
+function formatParkingAttemptProgress(attemptIndex: unknown, attemptCount: unknown): string {
+    const count = Math.trunc(Number(attemptCount ?? 0));
+    if (count <= 0) {
+        return "--/--";
+    }
+    const index = Math.trunc(Number(attemptIndex ?? 0));
+    return `${index + 1}/${count}`;
+}
 
 onNet("capture:startRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
@@ -205,6 +260,26 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
     }
 
     emitNet("capture:startResponse", playerSource, response);
+});
+
+onNet("expert:neutralizeRequest", async (request: ExpertNeutralizeRequest) => {
+    const playerSource = (global as any).source;
+    rememberControlPlayerSource(playerSource);
+    const response: ExpertNeutralizeResponse = {
+        requestId: String(request?.requestId ?? ""),
+        success: false,
+    };
+    try {
+        if (!response.requestId) {
+            throw new Error("missing expert neutralization requestId");
+        }
+        await neutralizeExpertBackendInputs();
+        response.success = true;
+    } catch (error: any) {
+        response.error = error?.message ?? "failed to neutralize expert inputs";
+        console.error(`[expert] input neutralization failed: ${response.error}`);
+    }
+    emitNet("expert:neutralizeResponse", playerSource, response);
 });
 
 onNet("capture:stopRequest", async (request: CaptureRequest) => {
@@ -366,7 +441,9 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             `routeHeading=${Number(update?.routeHeadingError ?? 0).toFixed(2)} ` +
             `routeDistance=${Number(update?.routeDistance ?? 0).toFixed(2)} ` +
             `hasLead=${String(Boolean(update?.hasLeadVehicle))} ` +
-            `leadDistance=${Number(update?.leadVehicleDistance ?? 0).toFixed(2)}`
+            `leadDistance=${Number(update?.leadVehicleDistance ?? 0).toFixed(2)} ` +
+            `parking=${String(update?.parkingPhase ?? "idle")} ` +
+            `attempt=${formatParkingAttemptProgress(update?.parkingAttemptIndex, update?.parkingAttemptCount)}`
         );
     }
     try {
@@ -390,6 +467,7 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             gear: update?.gear,
             rpm: update?.rpm,
             wheelAngle: update?.wheelAngle,
+            wheelSteeringFullLock: update?.wheelSteeringFullLock,
             onGround: update?.onGround,
             collisionState: update?.collisionState ?? "",
             routeDirectionCode: update?.routeDirectionCode ?? 0,
@@ -404,6 +482,17 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             routeDistance: update?.routeDistance ?? 0,
             leadVehicleDistance: update?.leadVehicleDistance ?? 0,
             hasLeadVehicle: Boolean(update?.hasLeadVehicle),
+            parkingTargetConfigured: Boolean(update?.parkingTargetConfigured),
+            parkingLongitudinalError: update?.parkingLongitudinalError ?? 0,
+            parkingLateralError: update?.parkingLateralError ?? 0,
+            parkingHeadingError: update?.parkingHeadingError ?? 0,
+            parkingDistance: update?.parkingDistance ?? 0,
+            parkingInsideBay: Boolean(update?.parkingInsideBay),
+            parkingAligned: Boolean(update?.parkingAligned),
+            parkingParked: Boolean(update?.parkingParked),
+            parkingAttemptIndex: update?.parkingAttemptIndex ?? 0,
+            parkingAttemptCount: update?.parkingAttemptCount ?? 0,
+            parkingPhase: update?.parkingPhase ?? "idle",
             timestampMs: update?.timestampMs ?? 0,
             gameTimeMs: update?.gameTimeMs ?? 0
         });
@@ -515,20 +604,15 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
     if (existingTrip) {
         existingTrip.vehicleData.push(...data.vehicleData);
         existingTrip.endTime = data.endTime;
-        existingTrip.chunkDurationMs = data.chunkDurationMs;
+        existingTrip.chunkDurationMs = Math.max(0, data.endTime - existingTrip.syncTime);
+        existingTrip.parkingGoal = data.parkingGoal ?? existingTrip.parkingGoal;
+        existingTrip.parkingOutcome = data.parkingOutcome ?? existingTrip.parkingOutcome;
     } else {
+        const {vehicleData, chunkIndex: _chunkIndex, isTripComplete: _isTripComplete, ...tripMetadata} = data;
         pendingTrips.set(tripKey, {
-            runId: data.runId,
-            sceneId: data.sceneId,
-            sceneVariant: data.sceneVariant,
-            tripIndex: data.tripIndex,
-            chunkDurationMs: data.chunkDurationMs,
-            syncTime: data.syncTime,
-            endTime: data.endTime,
-            fromDestination: data.fromDestination,
-            toDestination: data.toDestination,
-            vehicle: data.vehicle,
-            vehicleData: [...data.vehicleData],
+            ...tripMetadata,
+            chunkDurationMs: Math.max(0, data.endTime - data.syncTime),
+            vehicleData: [...vehicleData],
             receivedFinalChunk: false
         });
     }
@@ -736,8 +820,11 @@ function parseRunIdParts(runId: string): RunIdParts {
         };
     }
 
-    const [, date, hour, minute, second, meridiem] = match;
-    const amPm = meridiem.toUpperCase();
+    const date = match[1]!;
+    const hour = match[2]!;
+    const minute = match[3]!;
+    const second = match[4]!;
+    const amPm = match[5]!.toUpperCase();
     const runFolder = safeRunId;
     return {
         safeRunId,
@@ -786,7 +873,7 @@ function buildTripStoragePaths(dataRoot: string, runStorage: RunStoragePaths, tr
     };
 }
 
-function validateCaptureRequest(request: CaptureRequest): CaptureRequest {
+function validateCaptureRequest(request: CaptureRequest): ValidatedCaptureRequest {
     const requestId = String(request?.requestId ?? "").trim();
     const runId = String(request?.runId ?? "").trim();
     const tripIndex = typeof request?.tripIndex === "number"
@@ -864,10 +951,98 @@ async function apiRequest(endpoint: string, method: "GET" | "POST", body?: any):
 
     if (!response.ok) {
         const message = parsed?.error || `capture api ${endpoint} failed with status ${response.status}`;
-        throw new Error(message);
+        throw new ApiRequestError(message, response.status);
     }
 
     return parsed;
+}
+
+async function neutralizeExpertBackendInputs() {
+    await stopInferenceForExpert();
+    await disableActuatorForExpert();
+    console.log("[expert] inference stopped and virtual actuator confirmed neutral");
+}
+
+async function stopInferenceForExpert() {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+        const status = await apiRequest("/inference/status", "GET");
+        const state = String(status?.state ?? "").trim().toLowerCase();
+        if (state === "idle" || state === "succeeded" || state === "failed" || state === "error") {
+            if (isInferenceCleanupComplete(status)) {
+                return;
+            }
+            await delayServer(100);
+            continue;
+        }
+        if (state === "stopping") {
+            await delayServer(100);
+            continue;
+        }
+        if (state !== "starting" && state !== "running") {
+            throw new Error(`cannot neutralize expert inputs from unknown inference state ${state || "<empty>"}`);
+        }
+        try {
+            await apiRequest("/inference/stop", "POST", {});
+        } catch (error) {
+            if (!isApiStatus(error, 404)) {
+                throw error;
+            }
+            return;
+        }
+        await delayServer(100);
+    }
+    throw new Error("inference did not reach idle before expert collection deadline");
+}
+
+async function disableActuatorForExpert() {
+    const disabled = false;
+    try {
+        await apiRequest("/actuator/command", "POST", {
+            steer: 0,
+            throttle: 0,
+            brakePressureAvg: 0,
+            handbrake: false,
+            enabled: disabled,
+            inputMode: "normalized",
+        });
+    } catch (error) {
+        if (isUnavailableActuatorError(error)) {
+            console.log("[expert] virtual actuator unavailable; no controller can contaminate collection");
+            return;
+        }
+        throw error;
+    }
+
+    const deadline = Date.now() + 1_000;
+    while (Date.now() < deadline) {
+        await delayServer(25);
+        let state: unknown;
+        try {
+            state = await apiRequest("/actuator/state", "GET");
+        } catch (error) {
+            if (isUnavailableActuatorError(error)) {
+                return;
+            }
+            throw error;
+        }
+        if (isActuatorStateNeutral(state)) {
+            return;
+        }
+    }
+    throw new Error("virtual actuator did not confirm a neutral applied state before expert collection");
+}
+
+function isUnavailableActuatorError(error: unknown): boolean {
+    return isApiStatus(error, 501) || isApiStatus(error, 503);
+}
+
+function isApiStatus(error: unknown, status: number): boolean {
+    return error instanceof ApiRequestError && error.status === status;
+}
+
+function delayServer(durationMs: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, durationMs));
 }
 
 async function syncAvailableScenes(scenes: AvailableScene[]) {
@@ -1079,10 +1254,12 @@ function flushTrip(
         vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
         vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
         tripProfile: trip.tripProfile ?? null,
+        parkingGoal: trip.parkingGoal ?? null,
+        parkingOutcome: trip.parkingOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 2,
+        telemetrySchemaVersion: 3,
         telemetrySummary,
         videoFile: tripStorage.videoFile,
         logFile: tripStorage.logFile
@@ -1112,10 +1289,12 @@ function flushTrip(
         vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
         vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
         tripProfile: trip.tripProfile ?? null,
+        parkingGoal: trip.parkingGoal ?? null,
+        parkingOutcome: trip.parkingOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 2,
+        telemetrySchemaVersion: 3,
         telemetrySummary,
         file: runFile,
         tripDir: tripStorage.tripDir,
