@@ -17,6 +17,19 @@ pnpm-debug.log*
 .cache/
 coverage/
 
+# Python environments and bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local captures, checkpoints, and training jobs
+fsd_fivem_data
+fsd_trainer/training_runs/
+fsd_trainer/training_jobs/
+training_jobs/
+
 # IDE/editor files
 .idea/
 .vscode/
@@ -26,6 +39,11 @@ coverage/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Local tool/runtime markers
+/.codex
+/.yarn.installed
+/fivem/nul
 
 # Local trainer package shadow dir
 fsd_trainer/src/gta_fsd/fsd_trainer/

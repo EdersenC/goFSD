@@ -21,6 +21,11 @@ from config import (
     DEFAULT_TELEMETRY_FEATURE_NAMES,
     DEFAULT_TELEMETRY_OFFSETS,
 )
+from control_contract import (
+    DESIRED_SPEED_MPS,
+    DESIRED_WHEEL_STEER_NORMALIZED,
+    STOP_PROBABILITY,
+)
 from image_io import load_rgb_uint8_tensor_from_path
 from target_transforms import (
     TargetTransform,
@@ -38,6 +43,7 @@ DatasetTargetAux = Tensor
 DatasetItem = tuple[DatasetImages, DatasetTelemetry, DatasetStateInputs, DatasetTargetControls, DatasetTargetAux]
 
 TelemetryMap = dict[str, Any]
+PARKING_SETTLING_MAX_SPEED_MPS = 0.15
 
 
 def _attach_sample_context(
@@ -150,6 +156,35 @@ class Trip:
         return samples
 
 
+def _load_trip_metadata_for_filtering(trip_dir: Path) -> dict[str, Any] | None:
+    metadata_path = trip_dir / "metadata.json"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"failed to read trip metadata: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"trip metadata must be a JSON object: {metadata_path}")
+    return metadata
+
+
+def _is_successful_parking_attempt(trip_dir: Path) -> bool:
+    metadata = _load_trip_metadata_for_filtering(trip_dir)
+    if metadata is None:
+        return False
+    parking_goal = metadata.get("parkingGoal")
+    outcome = metadata.get("parkingOutcome")
+    return (
+        isinstance(parking_goal, Mapping)
+        and str(parking_goal.get("task", "")).strip().lower() == "parking"
+        and str(parking_goal.get("maneuver", "")).strip().lower() == "forward-bay"
+        and isinstance(outcome, Mapping)
+        and outcome.get("success") is True
+        and str(outcome.get("status", "")).strip().lower() == "succeeded"
+    )
+
+
 def _coerce_float(mapping: TelemetryMap, key: str) -> float:
     if key not in mapping:
         raise KeyError(f"missing telemetry key '{key}'")
@@ -163,6 +198,17 @@ def _coerce_float(mapping: TelemetryMap, key: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"telemetry key '{key}' must be finite")
     return result
+
+
+def _coerce_bool(mapping: TelemetryMap, key: str) -> bool:
+    if key not in mapping:
+        raise KeyError(f"missing telemetry key '{key}'")
+    value = mapping[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    raise TypeError(f"telemetry key '{key}' must be boolean")
 
 
 def wrap_degrees_delta(current_yaw: float, future_yaw: float) -> float:
@@ -208,12 +254,76 @@ def build_telemetry_features(telemetry: TelemetryMap, feature_names: tuple[str, 
 
 def build_control_targets(telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
     telemetry = flatten_grouped_mapping(telemetry)
+    # Full-lock calibration is the capture-version marker that makes Steering's [-1, 1] meaning unambiguous.
+    full_lock_radians = _coerce_float(telemetry, "wheelSteeringFullLock")
+    if full_lock_radians <= 0.0:
+        raise ValueError(
+            "wheelSteeringFullLock must be positive; recapture parking data with the normalized steering contract"
+        )
+    desired_steer = _coerce_float(telemetry, "Steering")
+    if desired_steer < -1.0 or desired_steer > 1.0:
+        raise ValueError(
+            f"Steering must be normalized to [-1, 1], got {desired_steer}; "
+            "recapture parking data with the normalized steering contract"
+        )
+    desired_speed = _coerce_float(telemetry, "currentSpeed")
+    if desired_speed < 0.0:
+        raise ValueError(f"desired parking speed must be non-negative, got {desired_speed}")
     target_map = {
-        "steering": _coerce_float(telemetry, "Steering"),
-        "acceleration": _coerce_float(telemetry, "acceleration"),
-        "brakePressureAvg": _coerce_float(telemetry, "brakePressureAvg"),
+        DESIRED_WHEEL_STEER_NORMALIZED: desired_steer,
+        DESIRED_SPEED_MPS: desired_speed,
+        STOP_PROBABILITY: derive_stop_probability(telemetry),
     }
     return torch.tensor([target_map[name] for name in target_names], dtype=torch.float32)
+
+
+def derive_stop_probability(telemetry: TelemetryMap) -> float:
+    telemetry = flatten_grouped_mapping(telemetry)
+    parked = _coerce_bool(telemetry, "parkingParked") if "parkingParked" in telemetry else False
+    raw_phase = telemetry.get("parkingPhase")
+    if raw_phase is None:
+        if "parkingParked" not in telemetry:
+            raise KeyError(
+                "missing parking stop supervision: expected parkingPhase or parkingParked telemetry"
+            )
+        return 1.0 if parked else 0.0
+    if not isinstance(raw_phase, str) or not raw_phase.strip():
+        raise TypeError("telemetry key 'parkingPhase' must be a non-empty string")
+
+    phase = raw_phase.strip().lower()
+    known_phases = {
+        "idle",
+        "ready",
+        "spawning",
+        "recording",
+        "parking",
+        "settling",
+        "succeeded",
+        "failed",
+        "stopping",
+    }
+    if phase not in known_phases:
+        raise ValueError(f"unsupported parkingPhase for stop supervision: {raw_phase}")
+    if phase in {"failed", "stopping"}:
+        if parked:
+            raise ValueError(
+                f"contradictory parking stop supervision: phase={phase!r} cannot be parked"
+            )
+        return 0.0
+    if parked:
+        return 1.0
+    if phase != "settling":
+        return 0.0
+
+    inside_bay = _coerce_bool(telemetry, "parkingInsideBay")
+    aligned = _coerce_bool(telemetry, "parkingAligned")
+    speed_mps = _coerce_float(telemetry, "currentSpeed")
+    valid_settling = (
+        inside_bay
+        and aligned
+        and abs(speed_mps) <= PARKING_SETTLING_MAX_SPEED_MPS
+    )
+    return 1.0 if valid_settling else 0.0
 
 
 def build_aux_targets(current_telemetry: TelemetryMap, future_telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
@@ -249,6 +359,7 @@ class FsdDataset(Dataset[DatasetItem]):
         aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
         target_transforms: Mapping[str, TargetTransform] | None = None,
         state_input_config: Any | None = None,
+        include_failed_or_nonparking_trips: bool = False,
     ):
         if expected_window_size is not None and expected_window_size != len(image_offsets):
             raise ValueError(
@@ -267,6 +378,10 @@ class FsdDataset(Dataset[DatasetItem]):
             target_transforms,
         )
         self.state_input_config = state_input_config_from_metadata(state_input_config)
+        if not isinstance(include_failed_or_nonparking_trips, bool):
+            raise TypeError("include_failed_or_nonparking_trips must be boolean")
+        self.include_failed_or_nonparking_trips = include_failed_or_nonparking_trips
+        self.excluded_failed_or_nonparking_trip_count = 0
         self.image_size = image_size
         self.data_root = None if data_root is None else Path(data_root)
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
@@ -326,6 +441,12 @@ class FsdDataset(Dataset[DatasetItem]):
                     if path.is_dir() and path.name.startswith("trip-")
                 )
                 for trip_dir in trip_dirs:
+                    if (
+                        not self.include_failed_or_nonparking_trips
+                        and not _is_successful_parking_attempt(trip_dir)
+                    ):
+                        self.excluded_failed_or_nonparking_trip_count += 1
+                        continue
                     trips.append(Trip(trip_dir, run_path=run_path))
         return trips
 
@@ -412,6 +533,7 @@ class FsdDataset(Dataset[DatasetItem]):
         summary = self.rejected_sample_summary
         return (
             "rejected_samples_summary="
+            f"excluded_failed_or_nonparking_trips={self.excluded_failed_or_nonparking_trip_count} "
             f"rejected={summary['rejected_samples']} "
             f"bad_frame_paths={summary['bad_frame_paths']} "
             f"bad_telemetry_history={summary['bad_telemetry_history']} "

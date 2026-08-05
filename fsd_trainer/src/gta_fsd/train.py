@@ -39,8 +39,18 @@ from config import (
     DEFAULT_TELEMETRY_FEATURE_NAMES,
     DEFAULT_TELEMETRY_HIDDEN_DIM,
     DEFAULT_TELEMETRY_OFFSETS,
-    normalize_windows_drive_path,
+    parse_telemetry_sample_interval_ms,
     parse_temporal_dataset_config,
+    resolve_data_root,
+    resolve_data_root_child,
+)
+from control_contract import (
+    DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    STOP_PROBABILITY,
+    control_contract_metadata,
+    derive_control_horizon_dt_ms,
 )
 from dataset import DatasetItem, FsdDataset
 from models.planner import DrivingCNN
@@ -52,6 +62,7 @@ from target_transforms import (
     TARGET_TRANSFORM_TYPE_SIGNED_CAP,
     TargetTransform,
     target_transform_metadata,
+    validate_parking_control_target_transforms,
 )
 from state_inputs import (
     ROUTE_DIRECTION_KEEP_STRAIGHT_KEY,
@@ -68,7 +79,6 @@ from state_inputs import (
 
 
 MetricPayload = dict[str, Any]
-PLANNER_FORMAT = "temporal_telemetry_gru_v1"
 DEFAULT_WIDTH_MULTIPLIER = 1.0
 DEFAULT_EARLY_STOPPING_METRIC = "drive_score"
 DRIVE_SCORE_CONTROL_MAE_WEIGHT = 0.25
@@ -115,6 +125,8 @@ class DatasetConfig:
     window_size: int = len(DEFAULT_IMAGE_OFFSETS)
     frame_stride: int = 2
     sample_stride: int = DEFAULT_SAMPLE_STRIDE
+    telemetry_sample_interval_ms: int = DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS
+    include_failed_or_nonparking_trips: bool = False
 
 
 @dataclass(frozen=True)
@@ -707,6 +719,7 @@ def _parse_target_transforms(
         )
         transforms["future_speed_delta"] = future_speed_delta
 
+    validate_parking_control_target_transforms(transforms)
     return transforms
 
 
@@ -718,7 +731,7 @@ def load_config(path: Path) -> TrainConfig:
     training_raw = raw["training"]
     loader_raw = raw["loader"]
 
-    data_root = normalize_windows_drive_path(str(dataset_raw["data_root"]))
+    data_root = resolve_data_root(dataset_raw.get("data_root"))
     train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
     val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
     (
@@ -742,6 +755,13 @@ def load_config(path: Path) -> TrainConfig:
     consistency_settings = _parse_consistency_settings(training_raw)
     turn_oversampling_config = _parse_turn_oversampling_config(loader_raw)
 
+    include_failed_or_nonparking_trips = dataset_raw.get(
+        "include_failed_or_nonparking_trips",
+        False,
+    )
+    if not isinstance(include_failed_or_nonparking_trips, bool):
+        raise ValueError("dataset.include_failed_or_nonparking_trips must be boolean")
+
     return TrainConfig(
         dataset=DatasetConfig(
             data_root=data_root,
@@ -754,19 +774,21 @@ def load_config(path: Path) -> TrainConfig:
             image_offsets=image_offsets,
             telemetry_offsets=telemetry_offsets,
             future_offsets=future_offsets,
-                telemetry_feature_names=telemetry_feature_names,
-                control_target_names=control_target_names,
-                aux_target_names=aux_target_names,
-                target_transforms=_parse_target_transforms(
-                    dataset_raw,
-                    control_target_names,
-                    aux_target_names,
-                ),
-                window_size=len(image_offsets),
-                frame_stride=int(dataset_raw.get("frame_stride", _infer_frame_stride(image_offsets))),
-                sample_stride=int(dataset_raw.get("sample_stride", max(future_offsets))),
+            telemetry_feature_names=telemetry_feature_names,
+            control_target_names=control_target_names,
+            aux_target_names=aux_target_names,
+            target_transforms=_parse_target_transforms(
+                dataset_raw,
+                control_target_names,
+                aux_target_names,
             ),
-        output=OutputConfig(base_dir=normalize_windows_drive_path(str(output_raw["base_dir"]))),
+            window_size=len(image_offsets),
+            frame_stride=int(dataset_raw.get("frame_stride", _infer_frame_stride(image_offsets))),
+            sample_stride=int(dataset_raw.get("sample_stride", max(future_offsets))),
+            telemetry_sample_interval_ms=parse_telemetry_sample_interval_ms(raw),
+            include_failed_or_nonparking_trips=include_failed_or_nonparking_trips,
+        ),
+        output=OutputConfig(base_dir=resolve_data_root_child(output_raw.get("base_dir"), "training_runs")),
         model=ModelConfig(
             width_multiplier=float(model_raw.get("width_multiplier", DEFAULT_WIDTH_MULTIPLIER)),
             telemetry_hidden_dim=int(model_raw.get("telemetry_hidden_dim", DEFAULT_TELEMETRY_HIDDEN_DIM)),
@@ -867,7 +889,8 @@ def _build_checkpoint_metadata(
     metadata = {
         "epoch": epoch_index,
         "planner_format": PLANNER_FORMAT,
-        "planner_format_version": 1,
+        "planner_format_version": PLANNER_FORMAT_VERSION,
+        "control_contract": control_contract_metadata(),
         "checkpoint_variant": checkpoint_variant,
         "frame_window_size": config.dataset.window_size,
         "frame_stride": config.dataset.frame_stride,
@@ -881,6 +904,12 @@ def _build_checkpoint_metadata(
         "image_offsets": list(config.dataset.image_offsets),
         "telemetry_offsets": list(config.dataset.telemetry_offsets),
         "future_offsets": list(config.dataset.future_offsets),
+        "telemetry_sample_interval_ms": config.dataset.telemetry_sample_interval_ms,
+        "control_horizon_dt_ms": list(derive_control_horizon_dt_ms(
+            config.dataset.future_offsets,
+            config.dataset.telemetry_sample_interval_ms,
+        )),
+        "include_failed_or_nonparking_trips": config.dataset.include_failed_or_nonparking_trips,
         "telemetry_feature_names": list(config.dataset.telemetry_feature_names),
         "control_target_names": list(config.dataset.control_target_names),
         "aux_target_names": list(config.dataset.aux_target_names),
@@ -1230,6 +1259,7 @@ def _build_configured_dataset(config: TrainConfig, run_paths: tuple[str, ...]) -
         aux_target_names=config.dataset.aux_target_names,
         target_transforms=config.dataset.target_transforms,
         state_input_config=config.state_inputs,
+        include_failed_or_nonparking_trips=config.dataset.include_failed_or_nonparking_trips,
     )
 
 
@@ -1387,6 +1417,60 @@ def _elementwise_loss(
     )
 
 
+def _control_elementwise_loss(
+    prediction: Tensor,
+    target: Tensor,
+    *,
+    control_logits: Tensor | None,
+    control_target_names: tuple[str, ...],
+    loss_function: str,
+    smooth_l1_beta: float,
+) -> Tensor:
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"prediction and target shapes must match: pred={tuple(prediction.shape)} target={tuple(target.shape)}"
+        )
+    if prediction.ndim < 1 or prediction.shape[-1] != len(control_target_names):
+        raise ValueError(
+            "control tensor width must match control_target_names: "
+            f"shape={tuple(prediction.shape)} names={len(control_target_names)}"
+        )
+    if control_logits is not None and control_logits.shape != prediction.shape:
+        raise ValueError(
+            "control_logits must match prediction shape: "
+            f"logits={tuple(control_logits.shape)} pred={tuple(prediction.shape)}"
+        )
+
+    per_target_losses: list[Tensor] = []
+    for index, name in enumerate(control_target_names):
+        pred_column = prediction[..., index]
+        target_column = target[..., index]
+        if name == STOP_PROBABILITY:
+            if bool(torch.any((target_column < 0.0) | (target_column > 1.0)).item()):
+                raise ValueError("stop_probability targets must be in [0, 1]")
+            with torch.autocast(device_type=prediction.device.type, enabled=False):
+                if control_logits is not None:
+                    per_target_losses.append(F.binary_cross_entropy_with_logits(
+                        control_logits[..., index].float(),
+                        target_column.float(),
+                        reduction="none",
+                    ))
+                else:
+                    per_target_losses.append(F.binary_cross_entropy(
+                        pred_column.float(),
+                        target_column.float(),
+                        reduction="none",
+                    ))
+            continue
+        per_target_losses.append(_elementwise_loss(
+            pred_column,
+            target_column,
+            loss_function=loss_function,
+            smooth_l1_beta=smooth_l1_beta,
+        ))
+    return torch.stack(per_target_losses, dim=-1)
+
+
 def _target_weight_tensor(
     *,
     target_names: tuple[str, ...],
@@ -1494,10 +1578,13 @@ def compute_planner_losses(
     aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
     loss_function: str = DEFAULT_LOSS_FUNCTION,
     smooth_l1_beta: float = DEFAULT_SMOOTH_L1_BETA,
+    pred_control_logits: Tensor | None = None,
 ) -> dict[str, Tensor]:
-    control_element_losses = _elementwise_loss(
+    control_element_losses = _control_elementwise_loss(
         pred_controls,
         target_controls,
+        control_logits=pred_control_logits,
+        control_target_names=control_target_names,
         loss_function=loss_function,
         smooth_l1_beta=smooth_l1_beta,
     )
@@ -1997,6 +2084,7 @@ def train_batch(
             aux_target_names=aux_target_names,
             loss_function=loss_function,
             smooth_l1_beta=smooth_l1_beta,
+            pred_control_logits=output.get("pred_control_logits"),
         )
     scaler.scale(losses["loss"]).backward()
     forward_backward_time = time.perf_counter() - forward_backward_start
@@ -2247,6 +2335,7 @@ def evaluate_epoch(
                         aux_target_names=aux_target_names,
                         loss_function=loss_function,
                         smooth_l1_beta=smooth_l1_beta,
+                        pred_control_logits=output.get("pred_control_logits"),
                     )
                 update_metric_totals(
                     totals,
@@ -2291,6 +2380,8 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
         "dataset_root": str(context.data_root),
         "output_base_dir": str(context.output_base_dir),
         "planner_format": PLANNER_FORMAT,
+        "planner_format_version": PLANNER_FORMAT_VERSION,
+        "control_contract": control_contract_metadata(),
         "train_run_ids": list(context.config.dataset.train_run_ids),
         "val_run_ids": list(context.config.dataset.val_run_ids),
         "train_run_paths": list(context.config.dataset.train_run_paths),
@@ -2302,6 +2393,12 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
         "image_offsets": list(context.config.dataset.image_offsets),
         "telemetry_offsets": list(context.config.dataset.telemetry_offsets),
         "future_offsets": list(context.config.dataset.future_offsets),
+        "telemetry_sample_interval_ms": context.config.dataset.telemetry_sample_interval_ms,
+        "control_horizon_dt_ms": list(derive_control_horizon_dt_ms(
+            context.config.dataset.future_offsets,
+            context.config.dataset.telemetry_sample_interval_ms,
+        )),
+        "include_failed_or_nonparking_trips": context.config.dataset.include_failed_or_nonparking_trips,
         "telemetry_feature_names": list(context.config.dataset.telemetry_feature_names),
         "control_target_names": list(context.config.dataset.control_target_names),
         "aux_target_names": list(context.config.dataset.aux_target_names),
@@ -2420,6 +2517,7 @@ def prepare_model(
     telemetry_hidden_dim: int,
     horizon: int,
     control_dim: int,
+    control_target_names: tuple[str, ...],
     aux_dim: int,
     state_input_dim: int,
     width_multiplier: float,
@@ -2435,6 +2533,7 @@ def prepare_model(
         telemetry_sequence_length=telemetry_length,
         horizon=horizon,
         control_dim=control_dim,
+        control_target_names=control_target_names,
         aux_dim=aux_dim,
         state_input_dim=state_input_dim,
         width_multiplier=width_multiplier,
@@ -2477,6 +2576,7 @@ def prepare_model(
         telemetry_sequence_length=telemetry_length,
         horizon=horizon,
         control_dim=control_dim,
+        control_target_names=control_target_names,
         aux_dim=aux_dim,
         state_input_dim=state_input_dim,
         width_multiplier=width_multiplier,
@@ -2535,6 +2635,7 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
         telemetry_hidden_dim=config.model.telemetry_hidden_dim,
         horizon=len(config.dataset.future_offsets),
         control_dim=len(config.dataset.control_target_names),
+        control_target_names=config.dataset.control_target_names,
         aux_dim=len(config.dataset.aux_target_names),
         state_input_dim=state_input_dim,
         width_multiplier=config.model.width_multiplier,
@@ -2912,8 +3013,9 @@ def print_epoch_summary(
         f"val_aux_mae={float(epoch_result.val_metrics['aux_mae_overall']):.6f}",
         f"longitudinal_aux_mae={float(epoch_result.val_metrics.get('longitudinal_aux_mae', float('nan'))):.6f}",
         f"lateral_aux_mae={float(epoch_result.val_metrics.get('lateral_aux_mae', float('nan'))):.6f}",
-        f"steering_mae={float(epoch_result.val_metrics.get('steering_mae', float('nan'))):.6f}",
-        f"acceleration_mae={float(epoch_result.val_metrics.get('acceleration_mae', float('nan'))):.6f}",
+        f"desired_steer_mae={float(epoch_result.val_metrics.get('desired_wheel_steer_normalized_mae', float('nan'))):.6f}",
+        f"desired_speed_mae={float(epoch_result.val_metrics.get('desired_speed_mps_mae', float('nan'))):.6f}",
+        f"stop_probability_mae={float(epoch_result.val_metrics.get('stop_probability_mae', float('nan'))):.6f}",
         f"future_speed_mae={float(epoch_result.val_metrics.get('future_speed_mae', float('nan'))):.6f}",
         f"future_speed_delta_mae={float(epoch_result.val_metrics.get('future_speed_delta_mae', 0.0)):.6f}",
         f"future_speed_delta_loss={float(epoch_result.val_metrics.get('future_speed_delta_loss', 0.0)):.6f}",

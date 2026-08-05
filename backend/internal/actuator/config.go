@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"awesomeProject/internal/parkingcontrol"
+
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -15,21 +17,6 @@ const (
 	defaultActuatorURL             = "http://127.0.0.1:8080"
 	defaultActuatorHTTPTimeout     = 500 * time.Millisecond
 	defaultStaleTimeout            = 250 * time.Millisecond
-	defaultActuatorProfile         = "smooth"
-	defaultSteeringDeadzone        = 0.02
-	defaultThrottleDeadzone        = 0.03
-	defaultBrakeDeadzone           = 0.03
-	defaultSteeringMaxDelta        = 0.06
-	defaultThrottleMaxDelta        = 0.04
-	defaultBrakeMaxDelta           = 0.04
-	defaultSteeringAlpha           = 0.30
-	defaultThrottleAlpha           = 0.20
-	defaultBrakeAlpha              = 0.20
-	defaultFallbackDecay           = true
-	defaultFallbackSteerDecay      = 0.85
-	defaultFallbackThrottleDecay   = 0.65
-	defaultFallbackBrakeDecay      = 0.65
-	defaultRecentCommandWindow     = 64
 	defaultSteeringGain            = 1.0
 	defaultThrottleGain            = 1.0
 	defaultThrottleFloor           = 0.0
@@ -38,52 +25,39 @@ const (
 	defaultOverspeedBrake          = 0.25
 	defaultModelBrakeThreshold     = 0.55
 	defaultReverseLockoutSpeedKPH  = 1.0
-	defaultTemporalEnabled         = false
-	defaultTemporalLatency         = 50 * time.Millisecond
-	defaultTemporalFreshPlanAge    = 150 * time.Millisecond
-	defaultTemporalUsablePlanAge   = 400 * time.Millisecond
-	defaultTemporalStalePlanAge    = 800 * time.Millisecond
-	defaultTemporalSteeringDelta   = 0.08
-	defaultTemporalThrottleDelta   = 0.05
-	defaultTemporalBrakeDelta      = 0.08
+	defaultParkingPlanTimeout      = 400 * time.Millisecond
+	defaultParkingTelemetryTimeout = 250 * time.Millisecond
+	defaultParkingLatency          = 50 * time.Millisecond
 )
 
+type ParkingCalibration struct {
+	Verified           bool   `json:"verified"`
+	ProfileID          string `json:"profileId"`
+	VehicleModelHash   int64  `json:"vehicleModelHash"`
+	GameBuild          string `json:"gameBuild"`
+	AdapterVersion     string `json:"adapterVersion"`
+	SteeringConvention string `json:"steeringConvention"`
+}
+
 type Config struct {
-	TickHz                            int
-	StaleTimeout                      time.Duration
-	URL                               string
-	RequestTimeout                    time.Duration
-	Profile                           string
-	SteeringDeadzone                  float64
-	ThrottleDeadzone                  float64
-	BrakeDeadzone                     float64
-	SteeringMaxDelta                  float64
-	ThrottleMaxDelta                  float64
-	BrakeMaxDelta                     float64
-	SteeringAlpha                     float64
-	ThrottleAlpha                     float64
-	BrakeAlpha                        float64
-	FallbackDecayEnabled              bool
-	FallbackSteeringDecay             float64
-	FallbackThrottleDecay             float64
-	FallbackBrakeDecay                float64
-	RecentCommandWindow               int
-	SteeringGain                      float64
-	ThrottleGain                      float64
-	ThrottleFloor                     float64
-	SpeedLimitKPH                     float64
-	OverspeedBrakeMarginKPH           float64
-	OverspeedBrake                    float64
-	ModelBrakeThreshold               float64
-	ReverseLockoutSpeedKPH            float64
-	TemporalHorizonActuatorEnabled    bool
-	TemporalEstimatedActuationLatency time.Duration
-	TemporalFreshPlanAge              time.Duration
-	TemporalUsablePlanAge             time.Duration
-	TemporalStalePlanAge              time.Duration
-	TemporalSteeringMaxDelta          float64
-	TemporalThrottleMaxDelta          float64
-	TemporalBrakeMaxDelta             float64
+	TickHz                           int
+	StaleTimeout                     time.Duration
+	URL                              string
+	RequestTimeout                   time.Duration
+	SteeringGain                     float64
+	ThrottleGain                     float64
+	ThrottleFloor                    float64
+	SpeedLimitKPH                    float64
+	OverspeedBrakeMarginKPH          float64
+	OverspeedBrake                   float64
+	ModelBrakeThreshold              float64
+	ReverseLockoutSpeedKPH           float64
+	ParkingController                parkingcontrol.Config
+	ParkingCalibration               ParkingCalibration
+	ParkingPlanTimeout               time.Duration
+	ParkingTelemetryTimeout          time.Duration
+	ParkingEstimatedActuationLatency time.Duration
+	ParkingExpectedHorizonDtMs       []int
 }
 
 type Tuning struct {
@@ -109,84 +83,104 @@ type configFile struct {
 }
 
 type backendSection struct {
-	Actuator actuatorSection `toml:"actuator"`
+	Actuator          actuatorSection          `toml:"actuator"`
+	ParkingController parkingControllerSection `toml:"parking_controller"`
+}
+
+type parkingControllerSection struct {
+	CalibrationVerified             *bool                                     `toml:"calibration_verified"`
+	CalibrationProfileID            string                                    `toml:"calibration_profile_id"`
+	VehicleModelHash                *int64                                    `toml:"vehicle_model_hash"`
+	GameBuild                       string                                    `toml:"game_build"`
+	AdapterVersion                  string                                    `toml:"adapter_version"`
+	SteeringConvention              string                                    `toml:"steering_convention"`
+	SteeringProfile                 []parkingcontrol.SteeringCalibrationPoint `toml:"steering_profile"`
+	SteeringFeedbackGain            *float64                                  `toml:"steering_feedback_gain"`
+	SteeringKi                      *float64                                  `toml:"steering_ki"`
+	SteeringIntegralMin             *float64                                  `toml:"steering_integral_min"`
+	SteeringIntegralMax             *float64                                  `toml:"steering_integral_max"`
+	SteeringSlewPerSecond           *float64                                  `toml:"steering_slew_per_second"`
+	SpeedKp                         *float64                                  `toml:"speed_kp"`
+	SpeedKi                         *float64                                  `toml:"speed_ki"`
+	SpeedIntegralMin                *float64                                  `toml:"speed_integral_min"`
+	SpeedIntegralMax                *float64                                  `toml:"speed_integral_max"`
+	MaxThrottleEffort               *float64                                  `toml:"max_throttle_effort"`
+	MaxBrakeEffort                  *float64                                  `toml:"max_brake_effort"`
+	LongitudinalSlewPerSecond       *float64                                  `toml:"longitudinal_slew_per_second"`
+	StopProbabilityThreshold        *float64                                  `toml:"stop_probability_threshold"`
+	StopProbabilityReleaseThreshold *float64                                  `toml:"stop_probability_release_threshold"`
+	HoldSpeedMPS                    *float64                                  `toml:"hold_speed_mps"`
+	StopBrakeEffort                 *float64                                  `toml:"stop_brake_effort"`
+	MaxDesiredSpeedMPS              *float64                                  `toml:"max_desired_speed_mps"`
+	MaxDT                           string                                    `toml:"max_dt"`
+	PlanTimeout                     string                                    `toml:"plan_timeout"`
+	TelemetryTimeout                string                                    `toml:"telemetry_timeout"`
+	EstimatedActuationLatency       string                                    `toml:"estimated_actuation_latency"`
+	ExpectedHorizonDtMs             []int                                     `toml:"expected_horizon_dt_ms"`
 }
 
 type actuatorSection struct {
-	TickHz                            int      `toml:"tick_hz"`
-	StaleTimeout                      string   `toml:"stale_timeout"`
-	URL                               string   `toml:"url"`
-	RequestTimeout                    string   `toml:"request_timeout"`
-	Profile                           string   `toml:"profile"`
-	SteeringDeadzone                  *float64 `toml:"steering_deadzone"`
-	ThrottleDeadzone                  *float64 `toml:"throttle_deadzone"`
-	BrakeDeadzone                     *float64 `toml:"brake_deadzone"`
-	SteeringMaxDelta                  *float64 `toml:"steering_max_delta"`
-	ThrottleMaxDelta                  *float64 `toml:"throttle_max_delta"`
-	BrakeMaxDelta                     *float64 `toml:"brake_max_delta"`
-	SteeringAlpha                     *float64 `toml:"steering_alpha"`
-	ThrottleAlpha                     *float64 `toml:"throttle_alpha"`
-	BrakeAlpha                        *float64 `toml:"brake_alpha"`
-	FallbackDecayEnabled              *bool    `toml:"fallback_decay_enabled"`
-	FallbackSteeringDecay             *float64 `toml:"fallback_steering_decay"`
-	FallbackThrottleDecay             *float64 `toml:"fallback_throttle_decay"`
-	FallbackBrakeDecay                *float64 `toml:"fallback_brake_decay"`
-	RecentCommandWindow               *int     `toml:"recent_command_window"`
-	SteeringGain                      *float64 `toml:"steering_gain"`
-	ThrottleGain                      *float64 `toml:"throttle_gain"`
-	ThrottleFloor                     *float64 `toml:"throttle_floor"`
-	SpeedLimitKPH                     *float64 `toml:"speed_limit_kph"`
-	OverspeedBrakeMarginKPH           *float64 `toml:"overspeed_brake_margin_kph"`
-	OverspeedBrake                    *float64 `toml:"overspeed_brake"`
-	ModelBrakeThreshold               *float64 `toml:"model_brake_threshold"`
-	ReverseLockoutSpeedKPH            *float64 `toml:"reverse_lockout_speed_kph"`
-	TemporalHorizonActuatorEnabled    *bool    `toml:"temporal_horizon_actuator_enabled"`
-	TemporalEstimatedActuationLatency string   `toml:"temporal_estimated_actuation_latency"`
-	TemporalFreshPlanAge              string   `toml:"temporal_fresh_plan_age"`
-	TemporalUsablePlanAge             string   `toml:"temporal_usable_plan_age"`
-	TemporalStalePlanAge              string   `toml:"temporal_stale_plan_age"`
-	TemporalSteeringMaxDelta          *float64 `toml:"temporal_steering_max_delta"`
-	TemporalThrottleMaxDelta          *float64 `toml:"temporal_throttle_max_delta"`
-	TemporalBrakeMaxDelta             *float64 `toml:"temporal_brake_max_delta"`
+	TickHz                  int      `toml:"tick_hz"`
+	StaleTimeout            string   `toml:"stale_timeout"`
+	URL                     string   `toml:"url"`
+	RequestTimeout          string   `toml:"request_timeout"`
+	SteeringGain            *float64 `toml:"steering_gain"`
+	ThrottleGain            *float64 `toml:"throttle_gain"`
+	ThrottleFloor           *float64 `toml:"throttle_floor"`
+	SpeedLimitKPH           *float64 `toml:"speed_limit_kph"`
+	OverspeedBrakeMarginKPH *float64 `toml:"overspeed_brake_margin_kph"`
+	OverspeedBrake          *float64 `toml:"overspeed_brake"`
+	ModelBrakeThreshold     *float64 `toml:"model_brake_threshold"`
+	ReverseLockoutSpeedKPH  *float64 `toml:"reverse_lockout_speed_kph"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		TickHz:                            defaultTickHz,
-		StaleTimeout:                      defaultStaleTimeout,
-		URL:                               defaultActuatorURL,
-		RequestTimeout:                    defaultActuatorHTTPTimeout,
-		Profile:                           defaultActuatorProfile,
-		SteeringDeadzone:                  defaultSteeringDeadzone,
-		ThrottleDeadzone:                  defaultThrottleDeadzone,
-		BrakeDeadzone:                     defaultBrakeDeadzone,
-		SteeringMaxDelta:                  defaultSteeringMaxDelta,
-		ThrottleMaxDelta:                  defaultThrottleMaxDelta,
-		BrakeMaxDelta:                     defaultBrakeMaxDelta,
-		SteeringAlpha:                     defaultSteeringAlpha,
-		ThrottleAlpha:                     defaultThrottleAlpha,
-		BrakeAlpha:                        defaultBrakeAlpha,
-		FallbackDecayEnabled:              defaultFallbackDecay,
-		FallbackSteeringDecay:             defaultFallbackSteerDecay,
-		FallbackThrottleDecay:             defaultFallbackThrottleDecay,
-		FallbackBrakeDecay:                defaultFallbackBrakeDecay,
-		RecentCommandWindow:               defaultRecentCommandWindow,
-		SteeringGain:                      defaultSteeringGain,
-		ThrottleGain:                      defaultThrottleGain,
-		ThrottleFloor:                     defaultThrottleFloor,
-		SpeedLimitKPH:                     defaultSpeedLimitKPH,
-		OverspeedBrakeMarginKPH:           defaultOverspeedBrakeMarginKPH,
-		OverspeedBrake:                    defaultOverspeedBrake,
-		ModelBrakeThreshold:               defaultModelBrakeThreshold,
-		ReverseLockoutSpeedKPH:            defaultReverseLockoutSpeedKPH,
-		TemporalHorizonActuatorEnabled:    defaultTemporalEnabled,
-		TemporalEstimatedActuationLatency: defaultTemporalLatency,
-		TemporalFreshPlanAge:              defaultTemporalFreshPlanAge,
-		TemporalUsablePlanAge:             defaultTemporalUsablePlanAge,
-		TemporalStalePlanAge:              defaultTemporalStalePlanAge,
-		TemporalSteeringMaxDelta:          defaultTemporalSteeringDelta,
-		TemporalThrottleMaxDelta:          defaultTemporalThrottleDelta,
-		TemporalBrakeMaxDelta:             defaultTemporalBrakeDelta,
+		TickHz:                           defaultTickHz,
+		StaleTimeout:                     defaultStaleTimeout,
+		URL:                              defaultActuatorURL,
+		RequestTimeout:                   defaultActuatorHTTPTimeout,
+		SteeringGain:                     defaultSteeringGain,
+		ThrottleGain:                     defaultThrottleGain,
+		ThrottleFloor:                    defaultThrottleFloor,
+		SpeedLimitKPH:                    defaultSpeedLimitKPH,
+		OverspeedBrakeMarginKPH:          defaultOverspeedBrakeMarginKPH,
+		OverspeedBrake:                   defaultOverspeedBrake,
+		ModelBrakeThreshold:              defaultModelBrakeThreshold,
+		ReverseLockoutSpeedKPH:           defaultReverseLockoutSpeedKPH,
+		ParkingController:                defaultParkingControllerConfig(),
+		ParkingPlanTimeout:               defaultParkingPlanTimeout,
+		ParkingTelemetryTimeout:          defaultParkingTelemetryTimeout,
+		ParkingEstimatedActuationLatency: defaultParkingLatency,
+		ParkingExpectedHorizonDtMs:       []int{50, 100, 150, 200, 250, 300},
+	}
+}
+
+func defaultParkingControllerConfig() parkingcontrol.Config {
+	return parkingcontrol.Config{
+		SteeringProfile: []parkingcontrol.SteeringCalibrationPoint{
+			{WheelSteer: -1, Command: -1},
+			{WheelSteer: 0, Command: 0},
+			{WheelSteer: 1, Command: 1},
+		},
+		SteeringFeedbackGain:            0.35,
+		SteeringKi:                      0.10,
+		SteeringIntegralMin:             -0.5,
+		SteeringIntegralMax:             0.5,
+		SteeringSlewPerSecond:           4.0,
+		SpeedKp:                         0.45,
+		SpeedKi:                         0.12,
+		SpeedIntegralMin:                -2.0,
+		SpeedIntegralMax:                2.0,
+		MaxThrottleEffort:               0.65,
+		MaxBrakeEffort:                  0.70,
+		LongitudinalSlewPerSecond:       2.0,
+		StopProbabilityThreshold:        0.65,
+		StopProbabilityReleaseThreshold: 0.35,
+		HoldSpeedMPS:                    0.15,
+		StopBrakeEffort:                 0.45,
+		MaxDesiredSpeedMPS:              parkingcontrol.ParkingSetpointMaxSpeedMPS,
+		MaxDT:                           250 * time.Millisecond,
 	}
 }
 
@@ -213,9 +207,6 @@ func LoadConfig(path string) (Config, error) {
 	if section.TickHz > 0 {
 		cfg.TickHz = section.TickHz
 	}
-	if value := strings.TrimSpace(section.Profile); value != "" {
-		cfg.Profile = value
-	}
 	if value := strings.TrimSpace(section.URL); value != "" {
 		cfg.URL = strings.TrimRight(value, "/")
 	}
@@ -232,49 +223,6 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, fmt.Errorf("invalid backend.actuator.request_timeout: %w", err)
 		}
 		cfg.RequestTimeout = duration
-	}
-	applyActuatorProfile(&cfg, cfg.Profile)
-	if section.SteeringDeadzone != nil {
-		cfg.SteeringDeadzone = *section.SteeringDeadzone
-	}
-	if section.ThrottleDeadzone != nil {
-		cfg.ThrottleDeadzone = *section.ThrottleDeadzone
-	}
-	if section.BrakeDeadzone != nil {
-		cfg.BrakeDeadzone = *section.BrakeDeadzone
-	}
-	if section.SteeringMaxDelta != nil {
-		cfg.SteeringMaxDelta = *section.SteeringMaxDelta
-	}
-	if section.ThrottleMaxDelta != nil {
-		cfg.ThrottleMaxDelta = *section.ThrottleMaxDelta
-	}
-	if section.BrakeMaxDelta != nil {
-		cfg.BrakeMaxDelta = *section.BrakeMaxDelta
-	}
-	if section.SteeringAlpha != nil {
-		cfg.SteeringAlpha = *section.SteeringAlpha
-	}
-	if section.ThrottleAlpha != nil {
-		cfg.ThrottleAlpha = *section.ThrottleAlpha
-	}
-	if section.BrakeAlpha != nil {
-		cfg.BrakeAlpha = *section.BrakeAlpha
-	}
-	if section.FallbackDecayEnabled != nil {
-		cfg.FallbackDecayEnabled = *section.FallbackDecayEnabled
-	}
-	if section.FallbackSteeringDecay != nil {
-		cfg.FallbackSteeringDecay = *section.FallbackSteeringDecay
-	}
-	if section.FallbackThrottleDecay != nil {
-		cfg.FallbackThrottleDecay = *section.FallbackThrottleDecay
-	}
-	if section.FallbackBrakeDecay != nil {
-		cfg.FallbackBrakeDecay = *section.FallbackBrakeDecay
-	}
-	if section.RecentCommandWindow != nil {
-		cfg.RecentCommandWindow = *section.RecentCommandWindow
 	}
 	if section.SteeringGain != nil {
 		cfg.SteeringGain = *section.SteeringGain
@@ -300,45 +248,8 @@ func LoadConfig(path string) (Config, error) {
 	if section.ReverseLockoutSpeedKPH != nil {
 		cfg.ReverseLockoutSpeedKPH = *section.ReverseLockoutSpeedKPH
 	}
-	if section.TemporalHorizonActuatorEnabled != nil {
-		cfg.TemporalHorizonActuatorEnabled = *section.TemporalHorizonActuatorEnabled
-	}
-	if value := strings.TrimSpace(section.TemporalEstimatedActuationLatency); value != "" {
-		duration, err := time.ParseDuration(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid backend.actuator.temporal_estimated_actuation_latency: %w", err)
-		}
-		cfg.TemporalEstimatedActuationLatency = duration
-	}
-	if value := strings.TrimSpace(section.TemporalFreshPlanAge); value != "" {
-		duration, err := time.ParseDuration(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid backend.actuator.temporal_fresh_plan_age: %w", err)
-		}
-		cfg.TemporalFreshPlanAge = duration
-	}
-	if value := strings.TrimSpace(section.TemporalUsablePlanAge); value != "" {
-		duration, err := time.ParseDuration(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid backend.actuator.temporal_usable_plan_age: %w", err)
-		}
-		cfg.TemporalUsablePlanAge = duration
-	}
-	if value := strings.TrimSpace(section.TemporalStalePlanAge); value != "" {
-		duration, err := time.ParseDuration(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("invalid backend.actuator.temporal_stale_plan_age: %w", err)
-		}
-		cfg.TemporalStalePlanAge = duration
-	}
-	if section.TemporalSteeringMaxDelta != nil {
-		cfg.TemporalSteeringMaxDelta = *section.TemporalSteeringMaxDelta
-	}
-	if section.TemporalThrottleMaxDelta != nil {
-		cfg.TemporalThrottleMaxDelta = *section.TemporalThrottleMaxDelta
-	}
-	if section.TemporalBrakeMaxDelta != nil {
-		cfg.TemporalBrakeMaxDelta = *section.TemporalBrakeMaxDelta
+	if err := applyParkingControllerSection(&cfg, parsed.Backend.ParkingController); err != nil {
+		return Config{}, err
 	}
 
 	if cfg.TickHz < 1 {
@@ -350,129 +261,131 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.RequestTimeout <= 0 {
 		return Config{}, fmt.Errorf("backend actuator request_timeout must be > 0")
 	}
-	if err := validateProcessorConfig(cfg); err != nil {
+	if err := validateActuatorSafetyConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateParkingControllerConfig(cfg); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
 }
 
-func applyActuatorProfile(cfg *Config, rawProfile string) {
-	profile := strings.ToLower(strings.TrimSpace(rawProfile))
-	switch profile {
-	case "", "smooth":
-		cfg.Profile = "smooth"
-		cfg.SteeringDeadzone = 0.02
-		cfg.ThrottleDeadzone = 0.03
-		cfg.BrakeDeadzone = 0.03
-		cfg.SteeringMaxDelta = 0.06
-		cfg.ThrottleMaxDelta = 0.04
-		cfg.BrakeMaxDelta = 0.04
-		cfg.SteeringAlpha = 0.30
-		cfg.ThrottleAlpha = 0.20
-		cfg.BrakeAlpha = 0.20
-	case "responsive":
-		cfg.Profile = "responsive"
-		cfg.SteeringDeadzone = 0.02
-		cfg.ThrottleDeadzone = 0.03
-		cfg.BrakeDeadzone = 0.03
-		cfg.SteeringMaxDelta = 0.08
-		cfg.ThrottleMaxDelta = 0.05
-		cfg.BrakeMaxDelta = 0.05
-		cfg.SteeringAlpha = 0.35
-		cfg.ThrottleAlpha = 0.25
-		cfg.BrakeAlpha = 0.25
-	case "debug_raw":
-		cfg.Profile = "debug_raw"
-		cfg.SteeringDeadzone = 0
-		cfg.ThrottleDeadzone = 0
-		cfg.BrakeDeadzone = 0
-		cfg.SteeringMaxDelta = 0
-		cfg.ThrottleMaxDelta = 0
-		cfg.BrakeMaxDelta = 0
-		cfg.SteeringAlpha = 1
-		cfg.ThrottleAlpha = 1
-		cfg.BrakeAlpha = 1
-	default:
-		cfg.Profile = profile
+func applyParkingControllerSection(cfg *Config, section parkingControllerSection) error {
+	controller := &cfg.ParkingController
+	if section.CalibrationVerified != nil {
+		cfg.ParkingCalibration.Verified = *section.CalibrationVerified
 	}
-}
+	if value := strings.TrimSpace(section.CalibrationProfileID); value != "" {
+		cfg.ParkingCalibration.ProfileID = value
+	}
+	if section.VehicleModelHash != nil {
+		cfg.ParkingCalibration.VehicleModelHash = *section.VehicleModelHash
+	}
+	if value := strings.TrimSpace(section.GameBuild); value != "" {
+		cfg.ParkingCalibration.GameBuild = value
+	}
+	if value := strings.TrimSpace(section.AdapterVersion); value != "" {
+		cfg.ParkingCalibration.AdapterVersion = value
+	}
+	if value := strings.TrimSpace(section.SteeringConvention); value != "" {
+		cfg.ParkingCalibration.SteeringConvention = value
+	}
+	if len(section.SteeringProfile) > 0 {
+		controller.SteeringProfile = append([]parkingcontrol.SteeringCalibrationPoint(nil), section.SteeringProfile...)
+	}
+	assignFloat := func(destination *float64, value *float64) {
+		if value != nil {
+			*destination = *value
+		}
+	}
+	assignFloat(&controller.SteeringFeedbackGain, section.SteeringFeedbackGain)
+	assignFloat(&controller.SteeringKi, section.SteeringKi)
+	assignFloat(&controller.SteeringIntegralMin, section.SteeringIntegralMin)
+	assignFloat(&controller.SteeringIntegralMax, section.SteeringIntegralMax)
+	assignFloat(&controller.SteeringSlewPerSecond, section.SteeringSlewPerSecond)
+	assignFloat(&controller.SpeedKp, section.SpeedKp)
+	assignFloat(&controller.SpeedKi, section.SpeedKi)
+	assignFloat(&controller.SpeedIntegralMin, section.SpeedIntegralMin)
+	assignFloat(&controller.SpeedIntegralMax, section.SpeedIntegralMax)
+	assignFloat(&controller.MaxThrottleEffort, section.MaxThrottleEffort)
+	assignFloat(&controller.MaxBrakeEffort, section.MaxBrakeEffort)
+	assignFloat(&controller.LongitudinalSlewPerSecond, section.LongitudinalSlewPerSecond)
+	assignFloat(&controller.StopProbabilityThreshold, section.StopProbabilityThreshold)
+	assignFloat(&controller.StopProbabilityReleaseThreshold, section.StopProbabilityReleaseThreshold)
+	assignFloat(&controller.HoldSpeedMPS, section.HoldSpeedMPS)
+	assignFloat(&controller.StopBrakeEffort, section.StopBrakeEffort)
+	assignFloat(&controller.MaxDesiredSpeedMPS, section.MaxDesiredSpeedMPS)
 
-func validateProcessorConfig(cfg Config) error {
-	switch cfg.Profile {
-	case "smooth", "responsive", "debug_raw":
-	default:
-		return fmt.Errorf("backend actuator profile must be one of smooth, responsive, debug_raw")
+	var err error
+	if controller.MaxDT, err = parseOptionalDuration("backend.parking_controller.max_dt", section.MaxDT, controller.MaxDT); err != nil {
+		return err
 	}
-	for name, value := range map[string]float64{
-		"steering_deadzone":           cfg.SteeringDeadzone,
-		"throttle_deadzone":           cfg.ThrottleDeadzone,
-		"brake_deadzone":              cfg.BrakeDeadzone,
-		"steering_max_delta":          cfg.SteeringMaxDelta,
-		"throttle_max_delta":          cfg.ThrottleMaxDelta,
-		"brake_max_delta":             cfg.BrakeMaxDelta,
-		"fallback_steering_decay":     cfg.FallbackSteeringDecay,
-		"fallback_throttle_decay":     cfg.FallbackThrottleDecay,
-		"fallback_brake_decay":        cfg.FallbackBrakeDecay,
-		"steering_gain":               cfg.SteeringGain,
-		"throttle_gain":               cfg.ThrottleGain,
-		"throttle_floor":              cfg.ThrottleFloor,
-		"speed_limit_kph":             cfg.SpeedLimitKPH,
-		"overspeed_brake_margin_kph":  cfg.OverspeedBrakeMarginKPH,
-		"overspeed_brake":             cfg.OverspeedBrake,
-		"model_brake_threshold":       cfg.ModelBrakeThreshold,
-		"reverse_lockout_speed_kph":   cfg.ReverseLockoutSpeedKPH,
-		"temporal_steering_max_delta": cfg.TemporalSteeringMaxDelta,
-		"temporal_throttle_max_delta": cfg.TemporalThrottleMaxDelta,
-		"temporal_brake_max_delta":    cfg.TemporalBrakeMaxDelta,
-	} {
-		if value < 0 {
-			return fmt.Errorf("backend actuator %s must be >= 0", name)
-		}
+	if cfg.ParkingPlanTimeout, err = parseOptionalDuration("backend.parking_controller.plan_timeout", section.PlanTimeout, cfg.ParkingPlanTimeout); err != nil {
+		return err
 	}
-	for name, value := range map[string]float64{
-		"steering_alpha": cfg.SteeringAlpha,
-		"throttle_alpha": cfg.ThrottleAlpha,
-		"brake_alpha":    cfg.BrakeAlpha,
-	} {
-		if value < 0 || value > 1 {
-			return fmt.Errorf("backend actuator %s must be in [0,1]", name)
-		}
+	if cfg.ParkingTelemetryTimeout, err = parseOptionalDuration("backend.parking_controller.telemetry_timeout", section.TelemetryTimeout, cfg.ParkingTelemetryTimeout); err != nil {
+		return err
 	}
-	if cfg.SteeringDeadzone >= 1 || cfg.ThrottleDeadzone >= 1 || cfg.BrakeDeadzone >= 1 {
-		return fmt.Errorf("backend actuator deadzones must be < 1")
+	if cfg.ParkingEstimatedActuationLatency, err = parseOptionalDuration("backend.parking_controller.estimated_actuation_latency", section.EstimatedActuationLatency, cfg.ParkingEstimatedActuationLatency); err != nil {
+		return err
 	}
-	if cfg.FallbackSteeringDecay > 1 || cfg.FallbackThrottleDecay > 1 || cfg.FallbackBrakeDecay > 1 {
-		return fmt.Errorf("backend actuator fallback decay values must be <= 1")
-	}
-	if cfg.SteeringGain == 0 {
-		return fmt.Errorf("backend actuator steering_gain must be > 0")
-	}
-	if cfg.ThrottleGain == 0 {
-		return fmt.Errorf("backend actuator throttle_gain must be > 0")
-	}
-	if cfg.ThrottleFloor > 1 {
-		return fmt.Errorf("backend actuator throttle_floor must be in [0,1]")
-	}
-	if cfg.OverspeedBrake > 1 {
-		return fmt.Errorf("backend actuator overspeed_brake must be in [0,1]")
-	}
-	if cfg.ModelBrakeThreshold <= 0.5 || cfg.ModelBrakeThreshold > 1 {
-		return fmt.Errorf("backend actuator model_brake_threshold must be in (0.5, 1]")
-	}
-	if cfg.RecentCommandWindow < 1 {
-		return fmt.Errorf("backend actuator recent_command_window must be > 0")
-	}
-	if cfg.TemporalEstimatedActuationLatency < 0 {
-		return fmt.Errorf("backend actuator temporal_estimated_actuation_latency must be >= 0")
-	}
-	if cfg.TemporalFreshPlanAge <= 0 || cfg.TemporalUsablePlanAge <= 0 || cfg.TemporalStalePlanAge <= 0 {
-		return fmt.Errorf("backend actuator temporal plan age thresholds must be > 0")
-	}
-	if cfg.TemporalFreshPlanAge > cfg.TemporalUsablePlanAge || cfg.TemporalUsablePlanAge > cfg.TemporalStalePlanAge {
-		return fmt.Errorf("backend actuator temporal plan ages must satisfy fresh <= usable <= stale")
+	if len(section.ExpectedHorizonDtMs) > 0 {
+		cfg.ParkingExpectedHorizonDtMs = append([]int(nil), section.ExpectedHorizonDtMs...)
 	}
 	return nil
+}
+
+func parseOptionalDuration(label, raw string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", label, err)
+	}
+	return parsed, nil
+}
+
+func validateParkingControllerConfig(cfg Config) error {
+	if _, err := parkingcontrol.New(cfg.ParkingController); err != nil {
+		return fmt.Errorf("backend parking controller: %w", err)
+	}
+	if cfg.ParkingPlanTimeout <= 0 {
+		return fmt.Errorf("backend parking controller plan_timeout must be > 0")
+	}
+	if cfg.ParkingTelemetryTimeout <= 0 {
+		return fmt.Errorf("backend parking controller telemetry_timeout must be > 0")
+	}
+	if cfg.ParkingEstimatedActuationLatency < 0 {
+		return fmt.Errorf("backend parking controller estimated_actuation_latency must be >= 0")
+	}
+	if len(cfg.ParkingExpectedHorizonDtMs) == 0 {
+		return fmt.Errorf("backend parking controller expected_horizon_dt_ms must not be empty")
+	}
+	for index, value := range cfg.ParkingExpectedHorizonDtMs {
+		if value <= 0 || index > 0 && value <= cfg.ParkingExpectedHorizonDtMs[index-1] {
+			return fmt.Errorf("backend parking controller expected_horizon_dt_ms must be positive and strictly increasing")
+		}
+	}
+	if !cfg.ParkingCalibration.Verified {
+		return nil
+	}
+	if strings.TrimSpace(cfg.ParkingCalibration.ProfileID) == "" ||
+		cfg.ParkingCalibration.VehicleModelHash == 0 ||
+		strings.TrimSpace(cfg.ParkingCalibration.GameBuild) == "" ||
+		strings.TrimSpace(cfg.ParkingCalibration.AdapterVersion) == "" {
+		return fmt.Errorf("verified backend parking calibration requires profile_id, vehicle_model_hash, game_build, and adapter_version")
+	}
+	if cfg.ParkingCalibration.SteeringConvention != "positive_wheel_is_positive_xinput" {
+		return fmt.Errorf("verified backend parking calibration steering_convention must be positive_wheel_is_positive_xinput")
+	}
+	return nil
+}
+
+func validateActuatorSafetyConfig(cfg Config) error {
+	return ValidateTuning(cfg.Tuning())
 }
 
 func (c Config) Tuning() Tuning {

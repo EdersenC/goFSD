@@ -28,9 +28,9 @@ const inferenceFiveMLink = document.getElementById("inference-fivem-link");
 const inferenceSequence = document.getElementById("inference-sequence");
 const inferenceFrameIndex = document.getElementById("inference-frame-index");
 const inferencePredictedAt = document.getElementById("inference-predicted-at");
-const inferenceControlSemantics = document.getElementById("inference-control-semantics");
-const inferenceDebugFrames = document.getElementById("inference-debug-frames");
-const inferenceDebugDir = document.getElementById("inference-debug-dir");
+const inferenceControlContract = document.getElementById("inference-control-contract");
+const inferenceControlHorizon = document.getElementById("inference-control-horizon");
+const inferenceSetpointPlan = document.getElementById("inference-setpoint-plan");
 const inferenceError = document.getElementById("inference-error");
 const inferenceWindowIndices = document.getElementById("inference-window-indices");
 const inferenceFrameHashes = document.getElementById("inference-frame-hashes");
@@ -46,45 +46,17 @@ const fivemRouteDelta = document.getElementById("fivem-route-delta");
 const fivemNavOnehot = document.getElementById("fivem-nav-onehot");
 const inferenceControlChain = document.getElementById("inference-control-chain");
 const actuatorControlChain = document.getElementById("actuator-control-chain");
-const translationMode = document.getElementById("translation-mode");
-const translationCommand = document.getElementById("translation-command");
-const translationSubmitStatus = document.getElementById("translation-submit-status");
-const translationHeading = document.getElementById("translation-heading");
-const translationLongitudinal = document.getElementById("translation-longitudinal");
-const translationDriveState = document.getElementById("translation-drive-state");
-const translationReasons = document.getElementById("translation-reasons");
-const translationTuningApplyButton = document.getElementById("translation-tuning-apply");
-const translationTuningResetButton = document.getElementById("translation-tuning-reset");
-const translationTuningSaveButton = document.getElementById("translation-tuning-save");
-const translationTuningStatus = document.getElementById("translation-tuning-status");
-const translationTuningConfig = document.getElementById("translation-tuning-config");
-const translationHeadingDeadbandInput = document.getElementById("translation-tuning-heading-deadband");
-const translationSteerDeadzoneInput = document.getElementById("translation-tuning-steer-deadzone");
-const translationMaxSteerScaleInput = document.getElementById("translation-tuning-max-steer-scale");
-const translationSteerOutputGainInput = document.getElementById("translation-tuning-steer-output-gain");
-const translationSteerLowGainInput = document.getElementById("translation-tuning-steer-low-gain");
-const translationSteerHighGainInput = document.getElementById("translation-tuning-steer-high-gain");
-const translationSteerFadeSpeedInput = document.getElementById("translation-tuning-steer-fade-speed");
-const translationThrottleGainInput = document.getElementById("translation-tuning-throttle-gain");
-const translationThrottleHoldSecondsInput = document.getElementById("translation-tuning-throttle-hold-seconds");
-const translationThrottleHoldMinInput = document.getElementById("translation-tuning-throttle-hold-min");
-const translationMaxTargetSpeedKphInput = document.getElementById("translation-tuning-max-target-speed-kph");
-const translationSavedHeadingDeadband = document.getElementById("translation-saved-heading-deadband");
-const translationSavedSteerDeadzone = document.getElementById("translation-saved-steer-deadzone");
-const translationSavedMaxSteerScale = document.getElementById("translation-saved-max-steer-scale");
-const translationSavedSteerOutputGain = document.getElementById("translation-saved-steer-output-gain");
-const translationSavedSteerLowGain = document.getElementById("translation-saved-steer-low-gain");
-const translationSavedSteerHighGain = document.getElementById("translation-saved-steer-high-gain");
-const translationSavedSteerFadeSpeed = document.getElementById("translation-saved-steer-fade-speed");
-const translationSavedThrottleGain = document.getElementById("translation-saved-throttle-gain");
-const translationSavedThrottleHoldSeconds = document.getElementById("translation-saved-throttle-hold-seconds");
-const translationSavedThrottleHoldMin = document.getElementById("translation-saved-throttle-hold-min");
-const translationSavedMaxTargetSpeedKph = document.getElementById("translation-saved-max-target-speed-kph");
+const parkingControllerReady = document.getElementById("parking-controller-ready");
+const parkingControllerCalibration = document.getElementById("parking-controller-calibration");
+const parkingControllerPlanState = document.getElementById("parking-controller-plan-state");
+const parkingControllerSetpoint = document.getElementById("parking-controller-setpoint");
+const parkingControllerFeedback = document.getElementById("parking-controller-feedback");
+const parkingControllerOutput = document.getElementById("parking-controller-output");
+const parkingControllerApplied = document.getElementById("parking-controller-applied");
+const parkingControllerFault = document.getElementById("parking-controller-fault");
 const uiErrorRuntime = document.getElementById("ui-error-runtime");
 const uiErrorInference = document.getElementById("ui-error-inference");
-const uiErrorTranslation = document.getElementById("ui-error-translation");
 const uiErrorActuator = document.getElementById("ui-error-actuator");
-const uiTranslationConfig = document.getElementById("ui-translation-config");
 const actuatorReady = document.getElementById("actuator-ready");
 const actuatorLastError = document.getElementById("actuator-last-error");
 const actuatorLastCommand = document.getElementById("actuator-last-command");
@@ -115,9 +87,40 @@ const actuatorSavedModelBrakeThreshold = document.getElementById("actuator-saved
 const actuatorSavedReverseLockout = document.getElementById("actuator-saved-reverse-lockout");
 
 const pageTabs = Array.from(document.querySelectorAll("[data-page-tab]"));
+const pageParking = document.getElementById("page-parking");
 const pageControl = document.getElementById("page-control");
 const pageInspector = document.getElementById("page-inspector");
 const pageTraining = document.getElementById("page-training");
+const parkingStartSetupButton = document.getElementById("parking-start-setup");
+const parkingCalibrateTargetButton = document.getElementById("parking-calibrate-target");
+const parkingClearTargetButton = document.getElementById("parking-clear-target");
+const parkingStartRunButton = document.getElementById("parking-start-run");
+const parkingPrepareEvaluationButton = document.getElementById("parking-prepare-evaluation");
+const parkingStopButton = document.getElementById("parking-stop");
+const parkingAttemptCountInput = document.getElementById("parking-attempt-count");
+const parkingSeedInput = document.getElementById("parking-seed");
+const parkingBanner = document.getElementById("parking-banner");
+const parkingReadinessFivem = document.getElementById("parking-readiness-fivem");
+const parkingReadinessFivemNote = document.getElementById("parking-readiness-fivem-note");
+const parkingReadinessCar = document.getElementById("parking-readiness-car");
+const parkingReadinessCarNote = document.getElementById("parking-readiness-car-note");
+const parkingReadinessTarget = document.getElementById("parking-readiness-target");
+const parkingReadinessTargetNote = document.getElementById("parking-readiness-target-note");
+const parkingReadinessCollection = document.getElementById("parking-readiness-collection");
+const parkingReadinessCollectionNote = document.getElementById("parking-readiness-collection-note");
+const parkingReadinessTraining = document.getElementById("parking-readiness-training");
+const parkingReadinessTrainingNote = document.getElementById("parking-readiness-training-note");
+const parkingScoreResult = document.getElementById("parking-score-result");
+const parkingScoreResultNote = document.getElementById("parking-score-result-note");
+const parkingScorePhase = document.getElementById("parking-score-phase");
+const parkingScoreAttempt = document.getElementById("parking-score-attempt");
+const parkingScoreInside = document.getElementById("parking-score-inside");
+const parkingScoreAligned = document.getElementById("parking-score-aligned");
+const parkingScoreDistance = document.getElementById("parking-score-distance");
+const parkingScoreLongitudinal = document.getElementById("parking-score-longitudinal");
+const parkingScoreLateral = document.getElementById("parking-score-lateral");
+const parkingScoreHeading = document.getElementById("parking-score-heading");
+const parkingScoreTarget = document.getElementById("parking-score-target");
 const inspectorRunSelect = document.getElementById("data-run-select");
 const inspectorSceneSelect = document.getElementById("data-scene-select");
 const inspectorTripSelect = document.getElementById("data-trip-select");
@@ -199,20 +202,6 @@ const ACTUATOR_TUNING_FIELDS = [
     { key: "reverseLockoutSpeedKph", input: actuatorReverseLockoutInput, saved: actuatorSavedReverseLockout },
 ];
 
-const TRANSLATION_TUNING_FIELDS = [
-    { key: "headingDeadbandDeg", input: translationHeadingDeadbandInput, saved: translationSavedHeadingDeadband },
-    { key: "steerDeadzone", input: translationSteerDeadzoneInput, saved: translationSavedSteerDeadzone },
-    { key: "maxSteerScale", input: translationMaxSteerScaleInput, saved: translationSavedMaxSteerScale },
-    { key: "steerOutputGain", input: translationSteerOutputGainInput, saved: translationSavedSteerOutputGain },
-    { key: "lowSpeedSteerGain", input: translationSteerLowGainInput, saved: translationSavedSteerLowGain },
-    { key: "highSpeedSteerGain", input: translationSteerHighGainInput, saved: translationSavedSteerHighGain },
-    { key: "steerGainFadeSpeedMps", input: translationSteerFadeSpeedInput, saved: translationSavedSteerFadeSpeed },
-    { key: "throttleGain", input: translationThrottleGainInput, saved: translationSavedThrottleGain },
-    { key: "throttleHoldSeconds", input: translationThrottleHoldSecondsInput, saved: translationSavedThrottleHoldSeconds },
-    { key: "throttleHoldMin", input: translationThrottleHoldMinInput, saved: translationSavedThrottleHoldMin },
-    { key: "maxTargetSpeedKph", input: translationMaxTargetSpeedKphInput, saved: translationSavedMaxTargetSpeedKph },
-];
-
 let busy = false;
 let selectedSceneName = "";
 let selectedModelPath = "";
@@ -222,11 +211,12 @@ const liveValueTimers = new WeakMap();
 let actuatorTuningState = null;
 let actuatorTuningDraft = null;
 let actuatorTuningDirty = false;
-let translationTuningState = null;
-let translationTuningDraft = null;
-let translationTuningDirty = false;
 
-let activePage = "control";
+let activePage = "parking";
+let parkingRefreshInFlight = false;
+let parkingTrainingRefreshInFlight = false;
+let parkingTrainingSnapshot = null;
+let parkingTrainingAvailable = false;
 let inspectorRuns = [];
 let inspectorAvailableFields = [];
 let inspectorSelectedFields = new Set();
@@ -241,6 +231,11 @@ let trainingSelectedJobId = "";
 let trainingSelectedJob = null;
 const TRAINING_STATE_INPUT_ORDER = [
     "currentSpeed",
+    "parkingTargetConfigured",
+    "parkingLongitudinalError",
+    "parkingLateralError",
+    "parkingHeadingError",
+    "parkingDistance",
     "routeForwardDelta",
     "routeHeadingError",
     "routeDistance",
@@ -351,12 +346,14 @@ function setBusy(nextBusy) {
         startEgoButton,
         stopEgoButton,
         loadModelButton,
-        translationTuningApplyButton,
-        translationTuningResetButton,
-        translationTuningSaveButton,
         actuatorTuningApplyButton,
         actuatorTuningResetButton,
         actuatorTuningSaveButton,
+        parkingStartSetupButton,
+        parkingCalibrateTargetButton,
+        parkingClearTargetButton,
+        parkingStartRunButton,
+        parkingStopButton,
         trainingQueueJobButton,
         trainingResetDefaultsButton,
         trainingUseLastButton,
@@ -413,6 +410,15 @@ function setTrainingBanner(message, tone) {
     }
 }
 
+function setParkingBanner(message, tone, source = "feedback") {
+    parkingBanner.textContent = message || "";
+    parkingBanner.className = "banner";
+    parkingBanner.dataset.source = source;
+    if (tone) {
+        parkingBanner.classList.add(tone);
+    }
+}
+
 function formatCommand(command) {
     if (!command) {
         return "Nothing queued yet";
@@ -426,6 +432,254 @@ function formatRuntimeStatus(status) {
         return "idle";
     }
     return status.replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`);
+}
+
+function formatParkingPhase(phase) {
+    const value = String(phase || "idle").trim();
+    if (!value) {
+        return "Idle";
+    }
+    const spaced = value
+        .replace(/[-_]+/g, " ")
+        .replace(/[A-Z]/g, (match) => ` ${match.toLowerCase()}`)
+        .trim();
+    return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
+}
+
+function formatParkingMetric(value, suffix) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return "--";
+    }
+    return `${number.toFixed(2)}${suffix}`;
+}
+
+function setParkingReadiness(valueElement, noteElement, label, note, tone = "") {
+    setLiveValue(valueElement, label);
+    valueElement.classList.remove("ok", "warn", "bad");
+    if (tone) {
+        valueElement.classList.add(tone);
+    }
+    noteElement.textContent = note;
+}
+
+function setParkingScore(element, value, tone = "") {
+    setLiveValue(element, value);
+    element.classList.remove("good", "pending", "bad");
+    if (tone) {
+        element.classList.add(tone);
+    }
+}
+
+function renderParkingTrainingReadiness(snapshot, available) {
+    if (!available) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            "Optional / offline",
+            "Start the model server when you are ready to train collected data.",
+            "warn",
+        );
+        return;
+    }
+
+    const activeJob = snapshot && snapshot.activeJob ? snapshot.activeJob : null;
+    const queuedJobs = snapshot && Array.isArray(snapshot.queuedJobs) ? snapshot.queuedJobs : [];
+    if (activeJob) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            "Training",
+            activeJob.name || activeJob.id || "A model job is running.",
+            "ok",
+        );
+        return;
+    }
+    if (queuedJobs.length > 0) {
+        setParkingReadiness(
+            parkingReadinessTraining,
+            parkingReadinessTrainingNote,
+            `${queuedJobs.length} queued`,
+            "Open Models to inspect or manage the queue.",
+            "warn",
+        );
+        return;
+    }
+    setParkingReadiness(
+        parkingReadinessTraining,
+        parkingReadinessTrainingNote,
+        "Ready",
+        "The model server is available when the dataset is ready.",
+        "ok",
+    );
+}
+
+function renderParkingReadiness(state, trainingSnapshot, trainingAvailable) {
+    const runtime = state && state.runtime ? state.runtime : {};
+    const telemetry = state && state.telemetry ? state.telemetry : null;
+    const fivemConnected = Boolean(runtime.fivemConnected);
+    const vehicleExists = Boolean(telemetry && telemetry.vehicleExists);
+    const inVehicle = Boolean(telemetry && telemetry.isInVehicle);
+    const targetConfigured = Boolean(telemetry && telemetry.parkingTargetConfigured);
+    const phase = String(telemetry && telemetry.parkingPhase || "idle");
+    const normalizedPhase = phase.trim().toLowerCase();
+    const attemptIndex = Number(telemetry && telemetry.parkingAttemptIndex);
+    const attemptCount = Number(telemetry && telemetry.parkingAttemptCount);
+
+    setParkingReadiness(
+        parkingReadinessFivem,
+        parkingReadinessFivemNote,
+        fivemConnected ? "Connected" : "Waiting for FiveM",
+        fivemConnected ? "The FSD resource is polling this control server." : "Start FiveM and the FSD resource.",
+        fivemConnected ? "ok" : "bad",
+    );
+
+    if (!fivemConnected) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Not available",
+            "Connect FiveM before preparing the setup car.",
+            "warn",
+        );
+    } else if (vehicleExists && inVehicle) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Ready",
+            "Vehicle telemetry is live; place the car in the final parked pose.",
+            "ok",
+        );
+    } else if (vehicleExists) {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Car found",
+            "Enter the setup car before calibrating the bay.",
+            "warn",
+        );
+    } else {
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Not ready",
+            "Use Start Setup Car, then position it manually.",
+            "warn",
+        );
+    }
+
+    setParkingReadiness(
+        parkingReadinessTarget,
+        parkingReadinessTargetNote,
+        targetConfigured ? "Calibrated" : "Not calibrated",
+        targetConfigured
+            ? "Current target pose is ready for forward-parking attempts."
+            : "Park the setup car in the desired final pose, then calibrate.",
+        targetConfigured ? "ok" : "warn",
+    );
+
+    const collectionIsIdle = !normalizedPhase || normalizedPhase === "idle" || normalizedPhase === "ready";
+    const collectionSucceeded = normalizedPhase === "succeeded";
+    const collectionFailed = normalizedPhase === "failed" || normalizedPhase === "stopping";
+    const collectionLabel = collectionIsIdle ? "Idle" : formatParkingPhase(phase);
+    const collectionNote = Number.isFinite(attemptCount) && attemptCount > 0
+        ? `Attempt ${Number.isFinite(attemptIndex) ? attemptIndex + 1 : "--"} of ${attemptCount}.`
+        : "No parking run is active.";
+    setParkingReadiness(
+        parkingReadinessCollection,
+        parkingReadinessCollectionNote,
+        collectionLabel,
+        collectionNote,
+        collectionSucceeded ? "ok" : (collectionFailed ? "bad" : (collectionIsIdle ? "" : "warn")),
+    );
+
+    renderParkingTrainingReadiness(trainingSnapshot, trainingAvailable);
+}
+
+function renderParkingScore(state) {
+    const telemetry = state && state.telemetry ? state.telemetry : null;
+    const targetConfigured = Boolean(telemetry && telemetry.parkingTargetConfigured);
+    const parked = Boolean(telemetry && telemetry.parkingParked);
+    const insideBay = Boolean(telemetry && telemetry.parkingInsideBay);
+    const aligned = Boolean(telemetry && telemetry.parkingAligned);
+    const phase = telemetry && telemetry.parkingPhase ? telemetry.parkingPhase : "idle";
+    const normalizedPhase = String(phase).trim().toLowerCase();
+    const attemptIndex = Number(telemetry && telemetry.parkingAttemptIndex);
+    const attemptCount = Number(telemetry && telemetry.parkingAttemptCount);
+
+    let result = "Waiting";
+    let resultNote = "Calibrate a target to begin.";
+    let resultTone = "pending";
+    if (normalizedPhase === "failed") {
+        result = "Failed";
+        resultNote = "The attempt ended without a valid parked outcome; inspect its metadata before retrying.";
+        resultTone = "bad";
+    } else if (normalizedPhase === "stopping") {
+        result = "Stopping";
+        resultNote = "The current attempt is being stopped and finalized.";
+        resultTone = "pending";
+    } else if (normalizedPhase === "succeeded") {
+        result = "Parked";
+        resultNote = "Inside the bay, aligned, stopped, and settled.";
+        resultTone = "good";
+    } else if (targetConfigured && parked) {
+        result = "Parked";
+        resultNote = "Inside the bay, aligned, and stopped.";
+        resultTone = "good";
+    } else if (targetConfigured && insideBay && aligned) {
+        result = "Settling";
+        resultNote = "Pose is good; bring the car to a complete stop.";
+    } else if (targetConfigured && insideBay) {
+        result = "Straighten";
+        resultNote = "Inside the bay; reduce the remaining heading error.";
+    } else if (targetConfigured) {
+        result = "Approaching";
+        resultNote = "Move toward the center of the calibrated bay.";
+    }
+
+    setParkingScore(parkingScoreResult, result, resultTone);
+    parkingScoreResultNote.textContent = resultNote;
+    setParkingScore(parkingScorePhase, formatParkingPhase(phase));
+    parkingScoreAttempt.textContent = Number.isFinite(attemptCount) && attemptCount > 0
+        ? `Attempt ${Number.isFinite(attemptIndex) ? attemptIndex + 1 : "--"} / ${attemptCount}`
+        : "Attempt -- / --";
+    setParkingScore(
+        parkingScoreInside,
+        targetConfigured ? (insideBay ? "Yes" : "No") : "--",
+        targetConfigured && insideBay ? "good" : "",
+    );
+    parkingScoreAligned.textContent = targetConfigured
+        ? (aligned ? "Heading aligned" : "Heading not aligned")
+        : "Waiting for calibration";
+    setParkingScore(
+        parkingScoreDistance,
+        targetConfigured ? formatParkingMetric(telemetry.parkingDistance, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreLongitudinal,
+        targetConfigured ? formatParkingMetric(telemetry.parkingLongitudinalError, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreLateral,
+        targetConfigured ? formatParkingMetric(telemetry.parkingLateralError, " m") : "--",
+    );
+    setParkingScore(
+        parkingScoreHeading,
+        targetConfigured ? formatParkingMetric(telemetry.parkingHeadingError, "°") : "--",
+    );
+    setParkingScore(parkingScoreTarget, targetConfigured ? "Calibrated" : "Not set", targetConfigured ? "good" : "pending");
+}
+
+function renderParkingWorkspace(state, trainingSnapshot, trainingAvailable) {
+    const runtime = state && state.runtime ? state.runtime : {};
+    setConnectionPill(fivemStatus, Boolean(runtime.fivemConnected));
+    renderParkingReadiness(state, trainingSnapshot, trainingAvailable);
+    renderParkingScore(state);
+    if (runtime.lastError) {
+        setParkingBanner(runtime.lastError, "error", "health");
+    } else if (!busy && (!parkingBanner.textContent || parkingBanner.dataset.source === "health")) {
+        setParkingBanner("Parking workspace ready. Start with the setup car.", "success", "status");
+    }
 }
 
 function setConnectionPill(element, connected) {
@@ -532,20 +786,6 @@ async function fetchState() {
     return response.json();
 }
 
-async function waitForTelemetry(timeoutMs = 8000) {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-        const state = await fetchState();
-        const telemetry = state && state.telemetry ? state.telemetry : null;
-        const runtime = state && state.runtime ? state.runtime : null;
-        if (telemetry && runtime && runtime.activeSceneName === "ego-control") {
-            return state;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    throw new Error("ego control did not start producing telemetry");
-}
-
 async function fetchInferenceStatus() {
     const response = await fetch("/inference/status", { cache: "no-store" });
     if (!response.ok) {
@@ -568,15 +808,6 @@ async function fetchActuatorTuningState() {
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
         throw new Error(result.error || "failed to load actuator tuning");
-    }
-    return result;
-}
-
-async function fetchTranslationTuningState() {
-    const response = await fetch("/translation/tuning", { cache: "no-store" });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-        throw new Error(result.error || "failed to load translation tuning");
     }
     return result;
 }
@@ -669,8 +900,8 @@ async function fetchTripSeries(runId, sceneKey, tripName, source, fields) {
     return result;
 }
 
-async function sendCommand(type) {
-    const payload = { type };
+async function sendCommand(type, extraPayload = {}) {
+    const payload = { ...extraPayload, type };
     if (type === "startScene") {
         payload.sceneName = sceneSelect.value;
     }
@@ -744,15 +975,15 @@ function renderInferenceStatus(controlState, status, actuatorState) {
     setLiveValue(inferenceSequence, prediction && prediction.sequence !== undefined ? String(prediction.sequence) : "None");
     setLiveValue(inferenceFrameIndex, prediction && prediction.frameIndex !== undefined ? String(prediction.frameIndex) : "None");
     setLiveValue(inferencePredictedAt, prediction && prediction.predictedAt ? formatTimestamp(prediction.predictedAt) : "None");
-    setLiveValue(inferenceControlSemantics, prediction ? formatPlannerCommand(prediction.collapsedCommand) : "None");
-    setLiveValue(inferenceDebugFrames, prediction ? formatPlannerCommand(prediction.postProcessedCommand) : "None");
+    setLiveValue(inferenceControlContract, formatParkingContract(prediction));
+    setLiveValue(inferenceControlHorizon, formatParkingHorizon(prediction));
     setLiveValue(inferenceWindowIndices, prediction && Array.isArray(prediction.windowFrameIndices) && prediction.windowFrameIndices.length
         ? prediction.windowFrameIndices.join(", ")
         : "None");
     setLiveValue(inferenceFrameHashes, prediction && Array.isArray(prediction.selectedTelemetryTimestampsMs) && prediction.selectedTelemetryTimestampsMs.length
         ? prediction.selectedTelemetryTimestampsMs.join(", ")
         : "None");
-    setLiveValue(inferenceDebugDir, prediction ? formatPlannerHorizon(prediction.rawPredControls) : "None");
+    setLiveValue(inferenceSetpointPlan, formatSetpointPlan(prediction && prediction.setpointPlan));
     setLiveValue(inferenceRawStateInputs, prediction ? formatStateInputMap(prediction.rawStateInputs) : "None");
     setLiveValue(inferenceNormalizedStateInputs, prediction ? formatStateInputMap(prediction.normalizedStateInputs) : "None");
     setLiveValue(inferenceError, status && status.lastError ? status.lastError : "None", {
@@ -932,64 +1163,176 @@ function formatAgeMs(timestampMs) {
     return `${Math.max(0, Date.now() - numeric)}ms`;
 }
 
-function formatPlannerCommand(control) {
-    if (!control || typeof control !== "object") {
+function formatParkingContract(prediction) {
+    const contract = prediction && prediction.controlContract ? prediction.controlContract : null;
+    if (!contract || !contract.name) {
         return "None";
     }
-    const steering = Number(control.steering ?? control.steer);
-    const throttle = Number(control.throttle ?? control.acceleration);
-    const brake = Number(control.brakePressureAvg ?? control.brake ?? 0);
-    if (!Number.isFinite(steering) || !Number.isFinite(throttle)) {
-        return "None";
-    }
-    return `steer=${steering.toFixed(3)} throttle=${throttle.toFixed(3)} brake=${Number.isFinite(brake) ? brake.toFixed(3) : "0.000"}`;
+    const version = Number(contract.version);
+    const targets = Array.isArray(contract.targets) ? contract.targets.join(", ") : "targets unavailable";
+    return `${contract.name}${Number.isFinite(version) ? ` v${version}` : ""} · ${targets}`;
 }
 
-function formatPlannerHorizon(controls) {
-    if (!Array.isArray(controls) || controls.length === 0) {
+function formatParkingHorizon(prediction) {
+    const offsets = prediction && Array.isArray(prediction.controlHorizonDtMs)
+        ? prediction.controlHorizonDtMs
+        : [];
+    if (!offsets.length) {
         return "None";
     }
-    return controls.map((item, index) => {
-        const steering = Number(Array.isArray(item) ? item[0] : NaN);
-        const throttle = Number(Array.isArray(item) ? item[1] : NaN);
-        if (!Number.isFinite(steering) || !Number.isFinite(throttle)) {
-            return null;
-        }
-        return `t+${index + 1}(${steering.toFixed(2)},${throttle.toFixed(2)})`;
-    }).filter(Boolean).join(" | ") || "None";
+    return offsets.map((offset) => `+${Number(offset)}ms`).join(" · ");
 }
 
-function yesNo(value) {
-    return value ? "yes" : "no";
-}
-
-function formatProcessorRange(state) {
-    const range = state && state.recentRange ? state.recentRange : null;
-    if (!range) {
+function formatSetpoint(setpoint) {
+    if (!setpoint || typeof setpoint !== "object") {
         return "None";
     }
-    const minSteering = Number(range.minSteering);
-    const maxSteering = Number(range.maxSteering);
-    const minThrottle = Number(range.minThrottle);
-    const maxThrottle = Number(range.maxThrottle);
-    if (![minSteering, maxSteering, minThrottle, maxThrottle].every(Number.isFinite)) {
+    const dtMs = Number(setpoint.dt_ms);
+    const wheelSteer = Number(setpoint.desired_wheel_steer_normalized);
+    const speedMps = Number(setpoint.desired_speed_mps);
+    const stopProbability = Number(setpoint.stop_probability);
+    if (![dtMs, wheelSteer, speedMps, stopProbability].every(Number.isFinite)) {
         return "None";
     }
-    return `steer ${minSteering.toFixed(2)}..${maxSteering.toFixed(2)} | throttle ${minThrottle.toFixed(2)}..${maxThrottle.toFixed(2)}`;
+    return `+${dtMs.toFixed(0)}ms wheel=${wheelSteer.toFixed(3)} speed=${speedMps.toFixed(3)}m/s stop=${stopProbability.toFixed(3)}`;
 }
 
-function formatProcessorCounters(state) {
-    const stats = state && state.stats ? state.stats : null;
-    if (!stats) {
+function formatSetpointPlan(plan) {
+    if (!plan || !Array.isArray(plan.points) || !plan.points.length) {
+        return "None";
+    }
+    const points = plan.points.map(formatSetpoint).filter((point) => point !== "None");
+    if (!points.length) {
+        return "None";
+    }
+    return `${plan.contract || "unknown contract"} · ${plan.direction || "unknown direction"} · ${points.join(" | ")}`;
+}
+
+function parkingTrace(state) {
+    if (!state) {
+        return null;
+    }
+    return (state.target && state.target.parking)
+        || (state.applied && state.applied.parking)
+        || null;
+}
+
+function formatParkingCalibration(controller) {
+    const calibration = controller && controller.calibration ? controller.calibration : null;
+    if (!calibration) {
+        return "unavailable";
+    }
+    const identity = [
+        calibration.profileId ? `profile=${calibration.profileId}` : "profile=missing",
+        calibration.vehicleModelHash ? `vehicle=${calibration.vehicleModelHash}` : "vehicle=missing",
+        calibration.gameBuild ? `game=${calibration.gameBuild}` : "game=missing",
+        calibration.adapterVersion ? `adapter=${calibration.adapterVersion}` : "adapter=missing",
+        calibration.steeringConvention ? `steering=${calibration.steeringConvention}` : "steering=missing",
+    ];
+    return `${calibration.verified ? "verified" : "UNVERIFIED"} · ${identity.join(" · ")}`;
+}
+
+function formatParkingPlanState(controller, trace) {
+    if (trace) {
+        return [
+            `id=${Number(trace.plan_id || 0) || "none"}`,
+            trace.plan_state || "unknown",
+            `age=${Number(trace.plan_age_ms || 0).toFixed(1)}ms`,
+            `sample=${Number(trace.target_dt_ms || 0).toFixed(1)}ms`,
+            trace.horizon_clamped ? "horizon clamped" : "within horizon",
+        ].join(" · ");
+    }
+    if (!controller || !controller.lastPlanId) {
+        return "idle · no accepted plan";
+    }
+    const parts = [`id=${controller.lastPlanId}`, "accepted"];
+    if (controller.lastPlanAppliedId) {
+        parts.push(`applied=${controller.lastPlanAppliedId}`);
+    }
+    if (controller.lastPlanAcceptedAt) {
+        parts.push(`at=${formatTimestamp(controller.lastPlanAcceptedAt)}`);
+    }
+    return parts.join(" · ");
+}
+
+function formatParkingFeedback(trace) {
+    if (!trace) {
+        return "None";
+    }
+    const measuredSteer = trace.measured_wheel_steer === null || trace.measured_wheel_steer === undefined
+        ? NaN
+        : Number(trace.measured_wheel_steer);
+    const speedMps = Number(trace.current_speed_mps);
+    const receiptAgeMs = Number(trace.telemetry_age_ms);
+    const sourceAgeMs = Number(trace.source_telemetry_age_ms);
+    const receiptSkewMs = Number(trace.source_receipt_skew_ms);
+    return [
+        `wheel=${Number.isFinite(measuredSteer) ? measuredSteer.toFixed(3) : "unknown"}`,
+        `speed=${Number.isFinite(speedMps) ? speedMps.toFixed(3) : "unknown"}m/s`,
+        `source age=${Number.isFinite(sourceAgeMs) ? sourceAgeMs.toFixed(1) : "unknown"}ms`,
+        `receipt age=${Number.isFinite(receiptAgeMs) ? receiptAgeMs.toFixed(1) : "unknown"}ms`,
+        `receipt skew=${Number.isFinite(receiptSkewMs) ? receiptSkewMs.toFixed(1) : "unknown"}ms`,
+    ].join(" · ");
+}
+
+function formatParkingControllerOutput(trace) {
+    const output = trace && trace.controller_output ? trace.controller_output : null;
+    if (!output) {
         return "None";
     }
     return [
-        `clamp=${Number(stats.clampedCommands || 0)}`,
-        `deadzone=${Number(stats.deadzoneCommands || 0)}`,
-        `rate=${Number(stats.rateLimitedCommands || 0)}`,
-        `smooth=${Number(stats.smoothedCommands || 0)}`,
-        `fallback=${Number(stats.fallbackCommands || 0)}`,
-    ].join(" ");
+        `steer=${Number(output.steering || 0).toFixed(3)}`,
+        `effort=${Number(output.longitudinal_effort || 0).toFixed(3)}`,
+        `hold=${output.hold ? "yes" : "no"}`,
+        `stop=${output.stop_latched ? "latched" : "released"}`,
+        `wheel(ff/p/i)=${Number(output.steering_feed_forward || 0).toFixed(3)}/${Number(output.steering_proportional || 0).toFixed(3)}/${Number(output.steering_integral_correction || 0).toFixed(3)}`,
+        `speed(p/i)=${Number(output.speed_proportional || 0).toFixed(3)}/${Number(output.speed_integral_correction || 0).toFixed(3)}`,
+    ].join(" · ");
+}
+
+function formatParkingApplied(state, trace) {
+    const applied = state && state.applied ? state.applied : null;
+    if (!trace && !(applied && applied.planId)) {
+        return "None";
+    }
+    if (!trace) {
+        return [
+            `device plan=${applied.planId}`,
+            `steer=${Number(applied.steer || 0).toFixed(3)}`,
+            `throttle=${Number(applied.throttle || 0).toFixed(3)}`,
+            `brake=${Number(applied.brakePressureAvg || 0).toFixed(3)}`,
+            `hold=${applied.handbrake ? "yes" : "no"}`,
+        ].join(" · ");
+    }
+
+    const tracePlanId = Number(trace.plan_id || 0);
+    const parts = [
+        `target plan=${tracePlanId || "none"}`,
+        `steer=${Number(trace.applied_steer || 0).toFixed(3)}`,
+        `throttle=${Number(trace.applied_throttle || 0).toFixed(3)}`,
+        `brake=${Number(trace.applied_brake || 0).toFixed(3)}`,
+        `hold=${trace.applied_handbrake ? "yes" : "no"}`,
+    ];
+    if (applied && Number(applied.planId) === tracePlanId) {
+        parts.push(`device confirmed at ${formatTimestamp(applied.updatedAt)}`);
+    } else {
+        parts.push(`device pending; last plan=${Number(applied && applied.planId) || "none"}`);
+    }
+    return parts.join(" · ");
+}
+
+function formatParkingFault(controller, trace) {
+    const faults = [];
+    if (controller && controller.calibration && !controller.calibration.verified) {
+        faults.push("calibration is not verified");
+    }
+    if (trace && trace.fault) {
+        faults.push(String(trace.fault));
+    }
+    if (controller && controller.lastFault && !faults.includes(String(controller.lastFault))) {
+        faults.push(String(controller.lastFault));
+    }
+    return faults.length ? faults.join(" · ") : "None";
 }
 
 function formatControlLine(control, options = {}) {
@@ -1029,18 +1372,16 @@ function formatControlCommandLine(label, control) {
 
 function formatControlChain(prediction, actuatorState) {
     const lines = [];
-    if (prediction) {
-        lines.push(formatControlCommandLine("model raw", prediction.collapsedCommand));
-        if (prediction.throttleHeld) {
-            lines.push(`throttle hold: ${Number(prediction.heldThrottle || 0).toFixed(3)}`);
-        }
-        lines.push(formatControlCommandLine("processor", prediction.postProcessedCommand));
+    const plan = prediction && prediction.setpointPlan ? prediction.setpointPlan : null;
+    if (plan) {
+        lines.push(`plan: ${formatParkingContract(prediction)} · ${formatParkingHorizon(prediction)}`);
     }
-    if (actuatorState && actuatorState.lastCommand) {
-        lines.push(formatControlCommandLine("request", actuatorState.lastCommand));
+    const trace = parkingTrace(actuatorState);
+    if (trace && trace.selected_setpoint) {
+        lines.push(`selected: ${formatSetpoint(trace.selected_setpoint)}`);
     }
-    if (actuatorState && actuatorState.target) {
-        lines.push(formatControlCommandLine("target", actuatorState.target));
+    if (trace && trace.controller_output) {
+        lines.push(`feedback: ${formatParkingControllerOutput(trace)}`);
     }
     if (actuatorState && actuatorState.applied) {
         lines.push(formatControlCommandLine("applied", actuatorState.applied));
@@ -1102,6 +1443,40 @@ function renderActuatorState(state) {
     });
 }
 
+function renderParkingControllerState(state) {
+    const controller = state && state.parkingController ? state.parkingController : null;
+    const trace = parkingTrace(state);
+    const ready = Boolean(controller && controller.ready);
+    const expectedHorizon = controller && Array.isArray(controller.expectedHorizonDtMs)
+        ? controller.expectedHorizonDtMs.join("/")
+        : "unknown";
+    const readiness = controller
+        ? `${ready ? "ready" : "BLOCKED"} · ${controller.contract || "contract unavailable"} · dt=${expectedHorizon}ms · owner=${controller.owner || "none"}${controller.stopping ? " · STOPPING" : ""}`
+        : "unavailable";
+
+    setLiveValue(parkingControllerReady, readiness, { stale: !ready });
+    setLiveValue(parkingControllerCalibration, formatParkingCalibration(controller), {
+        stale: !(controller && controller.calibration && controller.calibration.verified),
+    });
+    setLiveValue(parkingControllerPlanState, formatParkingPlanState(controller, trace), {
+        stale: Boolean(trace && (trace.fail_safe || trace.fault)),
+    });
+    setLiveValue(parkingControllerSetpoint, trace && trace.selected_setpoint
+        ? formatSetpoint(trace.selected_setpoint)
+        : "None");
+    setLiveValue(parkingControllerFeedback, formatParkingFeedback(trace), {
+        stale: Boolean(trace && trace.fail_safe),
+    });
+    setLiveValue(parkingControllerOutput, formatParkingControllerOutput(trace), {
+        stale: Boolean(trace && trace.fail_safe),
+    });
+    setLiveValue(parkingControllerApplied, formatParkingApplied(state, trace), {
+        stale: Boolean(trace && trace.fail_safe),
+    });
+    const fault = formatParkingFault(controller, trace);
+    setLiveValue(parkingControllerFault, fault, { stale: fault !== "None" });
+}
+
 function formatSpeedGovernor(safety) {
     if (!safety) {
         return "None";
@@ -1137,24 +1512,6 @@ function formatBrakeGuard(safety) {
     ].filter(Boolean).join(" ");
 }
 
-function renderProcessorState(status) {
-    const prediction = status && status.lastPrediction ? status.lastPrediction : null;
-    const processorDebug = prediction && prediction.processorDebug ? prediction.processorDebug : null;
-    const processorState = prediction && prediction.processorState ? prediction.processorState : null;
-
-    setLiveValue(translationMode, prediction ? (prediction.fallbackApplied ? "fallback" : "planner") : "idle");
-    setLiveValue(translationCommand, prediction ? formatPlannerCommand(prediction.collapsedCommand) : "None");
-    setLiveValue(translationSubmitStatus, prediction ? formatPlannerCommand(prediction.postProcessedCommand) : "None");
-    setLiveValue(translationHeading, processorDebug
-        ? `clamp=${yesNo(processorDebug.clampApplied)} deadzone=${yesNo(processorDebug.deadzoneApplied)}`
-        : "clamp=no deadzone=no");
-    setLiveValue(translationLongitudinal, processorDebug
-        ? `rate=${yesNo(processorDebug.rateLimitApplied)} smooth=${yesNo(processorDebug.smoothingApplied)}`
-        : "rate=no smooth=no");
-    setLiveValue(translationDriveState, formatProcessorRange(processorState));
-    setLiveValue(translationReasons, formatProcessorCounters(processorState));
-}
-
 function formatTuningValue(value) {
     return Number(value || 0).toFixed(3);
 }
@@ -1176,15 +1533,6 @@ function cloneActuatorTuning(tuning) {
     };
 }
 
-function cloneTranslationTuning(tuning) {
-    if (!tuning || typeof tuning !== "object") {
-        return null;
-    }
-    return {
-        ...tuning,
-    };
-}
-
 function updateActuatorTuningActions() {
     const hasState = Boolean(actuatorTuningState);
     const saveSupported = Boolean(actuatorTuningState && actuatorTuningState.saveSupported);
@@ -1196,20 +1544,6 @@ function updateActuatorTuningActions() {
     }
     if (actuatorTuningSaveButton) {
         actuatorTuningSaveButton.disabled = busy || !hasState || !saveSupported;
-    }
-}
-
-function updateTranslationTuningActions() {
-    const hasState = Boolean(translationTuningState);
-    const saveSupported = Boolean(translationTuningState && translationTuningState.saveSupported);
-    if (translationTuningApplyButton) {
-        translationTuningApplyButton.disabled = busy || !translationTuningDirty || !hasState;
-    }
-    if (translationTuningResetButton) {
-        translationTuningResetButton.disabled = busy || !hasState;
-    }
-    if (translationTuningSaveButton) {
-        translationTuningSaveButton.disabled = busy || !hasState || !saveSupported;
     }
 }
 
@@ -1265,76 +1599,12 @@ function buildActuatorTuningPayload() {
     return next;
 }
 
-function renderTranslationTuningState(tuningState) {
-    translationTuningState = tuningState || null;
-    const live = tuningState && tuningState.live ? tuningState.live : null;
-    const saved = tuningState && tuningState.saved ? tuningState.saved : null;
-
-    if (!translationTuningDirty || !translationTuningDraft) {
-        translationTuningDraft = cloneTranslationTuning(live);
-    }
-
-    const draft = translationTuningDraft || live || {};
-    for (const field of TRANSLATION_TUNING_FIELDS) {
-        if (field.input && (!translationTuningDirty || document.activeElement !== field.input)) {
-            field.input.value = formatTuningValue(draft[field.key]);
-        }
-        if (field.saved) {
-            field.saved.textContent = formatTuningValue(saved ? saved[field.key] : 0);
-        }
-    }
-
-    if (translationTuningStatus) {
-        if (!tuningState) {
-            translationTuningStatus.textContent = "Live translation tuning unavailable.";
-        } else if (translationTuningDirty) {
-            translationTuningStatus.textContent = "Live translation edits pending apply.";
-        } else if (tuningState.saveSupported) {
-            translationTuningStatus.textContent = "Live translation tuning synced. Save persists config.";
-        } else {
-            translationTuningStatus.textContent = "Live translation tuning synced. Config save unavailable.";
-        }
-    }
-    if (translationTuningConfig) {
-        translationTuningConfig.textContent = tuningState && tuningState.configPath
-            ? `Config file: ${tuningState.configPath}`
-            : "Config file: unavailable";
-    }
-    updateTranslationTuningActions();
-}
-
-function buildTranslationTuningPayload() {
-    const base = cloneTranslationTuning(translationTuningState && translationTuningState.live);
-    if (!base) {
-        throw new Error("translation tuning is unavailable");
-    }
-    const next = {
-        ...base,
-    };
-    for (const field of TRANSLATION_TUNING_FIELDS) {
-        next[field.key] = parseTuningInputValue(field.input, base[field.key]);
-    }
-    return next;
-}
-
-
-function renderErrorSurface(state, runtime, inference, actuator) {
+function renderErrorSurface(runtime, inference, actuator) {
     uiErrorRuntime.textContent = runtime && runtime.lastError ? String(runtime.lastError) : "None";
     uiErrorInference.textContent = inference && inference.lastError ? String(inference.lastError) : "None";
-    const translationIssues = [];
-    if (state && state.lastError) {
-        translationIssues.push(String(state.lastError));
-    }
-    if (state && state.lastActuatorError) {
-        translationIssues.push(`actuator: ${state.lastActuatorError}`);
-    }
-    uiErrorTranslation.textContent = translationIssues.length ? translationIssues.join(" · ") : "None";
     uiErrorActuator.textContent = actuator && actuator.lastError
         ? String(actuator.lastError)
         : (actuator && actuator.lastApplyError ? String(actuator.lastApplyError) : "None");
-    uiTranslationConfig.textContent = state && state.configPath
-        ? `Config file: ${state.configPath}`
-        : "Config file: unavailable";
 }
 
 async function refresh(forceModels = false) {
@@ -1343,13 +1613,12 @@ async function refresh(forceModels = false) {
         fetchInferenceStatus(),
         fetchActuatorState(),
         fetchActuatorTuningState(),
-        fetchTranslationTuningState(),
     ];
     const shouldRefreshModels = forceModels || (Date.now() - lastModelsRefreshAt > 10000);
     if (shouldRefreshModels) {
         tasks.push(fetchInferenceModels());
     }
-    const [state, inference, actuator, actuatorTuning, translationTuning, modelResult] = await Promise.all(tasks);
+    const [state, inference, actuator, actuatorTuning, modelResult] = await Promise.all(tasks);
     ensureSceneOptions(state.availableScenes);
     if (modelResult) {
         ensureModelOptions(modelResult.models);
@@ -1361,11 +1630,10 @@ async function refresh(forceModels = false) {
     setLiveValue(lastCommand, formatCommand(state.lastCommand));
     renderQueue(state.pendingCommands);
     renderInferenceStatus(state, inference, actuator);
-    renderProcessorState(inference);
+    renderParkingControllerState(actuator);
     renderActuatorTuningState(actuatorTuning);
-    renderTranslationTuningState(translationTuning);
     renderActuatorState(actuator);
-    renderErrorSurface(translationTuning, state.runtime, inference, actuator);
+    renderErrorSurface(state.runtime, inference, actuator);
 
     if (!Array.isArray(state.availableScenes) || state.availableScenes.length === 0) {
         setBanner("Waiting for scene list from FiveM.", "");
@@ -1373,6 +1641,87 @@ async function refresh(forceModels = false) {
         setBanner(state.runtime.lastError, "error");
     } else if (!busy && !banner.textContent) {
         setBanner("Control page ready.", "success");
+    }
+}
+
+async function refreshParking() {
+    if (parkingRefreshInFlight || document.hidden) {
+        return;
+    }
+    parkingRefreshInFlight = true;
+    try {
+        const state = await fetchState();
+        renderParkingWorkspace(
+            state,
+            parkingTrainingSnapshot,
+            parkingTrainingAvailable,
+        );
+    } catch (error) {
+        setConnectionPill(fivemStatus, false);
+        setParkingReadiness(
+            parkingReadinessFivem,
+            parkingReadinessFivemNote,
+            "Control server unavailable",
+            "Start the Go backend, then reload this workspace.",
+            "bad",
+        );
+        setParkingReadiness(
+            parkingReadinessCar,
+            parkingReadinessCarNote,
+            "Unavailable",
+            "Setup-car status will return with the control server.",
+            "warn",
+        );
+        setParkingReadiness(
+            parkingReadinessTarget,
+            parkingReadinessTargetNote,
+            "Unavailable",
+            "Target status will return with the control server.",
+            "warn",
+        );
+        setParkingReadiness(
+            parkingReadinessCollection,
+            parkingReadinessCollectionNote,
+            "Unavailable",
+            "Collection status will return with the control server.",
+            "warn",
+        );
+        setParkingScore(parkingScoreResult, "Unavailable", "pending");
+        parkingScoreResultNote.textContent = "Waiting for live parking telemetry.";
+        setParkingScore(parkingScorePhase, "--");
+        parkingScoreAttempt.textContent = "Attempt -- / --";
+        setParkingScore(parkingScoreInside, "--");
+        parkingScoreAligned.textContent = "Waiting for live parking telemetry";
+        setParkingScore(parkingScoreDistance, "--");
+        setParkingScore(parkingScoreLongitudinal, "--");
+        setParkingScore(parkingScoreLateral, "--");
+        setParkingScore(parkingScoreHeading, "--");
+        setParkingScore(parkingScoreTarget, "--", "pending");
+        setParkingBanner(
+            error instanceof Error ? error.message : "failed to refresh parking state",
+            "error",
+            "health",
+        );
+    } finally {
+        parkingRefreshInFlight = false;
+    }
+}
+
+async function refreshParkingTraining() {
+    if (parkingTrainingRefreshInFlight || document.hidden) {
+        return;
+    }
+    parkingTrainingRefreshInFlight = true;
+    try {
+        parkingTrainingSnapshot = await fetchTrainingState();
+        parkingTrainingAvailable = true;
+        trainingState = parkingTrainingSnapshot;
+    } catch {
+        parkingTrainingSnapshot = null;
+        parkingTrainingAvailable = false;
+    } finally {
+        renderParkingTrainingReadiness(parkingTrainingSnapshot, parkingTrainingAvailable);
+        parkingTrainingRefreshInFlight = false;
     }
 }
 
@@ -1405,6 +1754,51 @@ async function handleCommand(type, successMessage) {
     }
 }
 
+function readParkingRunPayload() {
+    const attemptCount = Number(parkingAttemptCountInput.value);
+    if (!Number.isInteger(attemptCount) || attemptCount < 1 || attemptCount > 50) {
+        throw new Error("attempt count must be a whole number from 1 to 50");
+    }
+    const seed = parkingSeedInput.value.trim();
+    return seed ? { attemptCount, seed } : { attemptCount };
+}
+
+async function handleParkingCommand(type, payload, pendingMessage, successMessage) {
+    try {
+        setBusy(true);
+        setParkingBanner(pendingMessage, "");
+        await sendCommand(type, payload);
+        setParkingBanner(successMessage, "success");
+        await refreshParking();
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "parking command failed", "error");
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function stopParkingOperation() {
+    const failures = [];
+    try {
+        const inferenceStatus = await fetchInferenceStatus();
+        if (inferenceStatus && inferenceStatus.active) {
+            await postInference("/inference/stop");
+        }
+    } catch (error) {
+        failures.push(error instanceof Error ? error.message : "failed to stop parking inference");
+    }
+
+    try {
+        await sendCommand("endScene");
+    } catch (error) {
+        failures.push(error instanceof Error ? error.message : "failed to stop the FiveM parking operation");
+    }
+
+    if (failures.length > 0) {
+        throw new Error(failures.join("; "));
+    }
+}
+
 function setActivePage(pageName) {
     activePage = pageName;
     for (const tab of pageTabs) {
@@ -1412,9 +1806,14 @@ function setActivePage(pageName) {
         tab.classList.toggle("active", isActive);
         tab.setAttribute("aria-pressed", isActive ? "true" : "false");
     }
+    pageParking.hidden = pageName !== "parking";
     pageControl.hidden = pageName !== "control";
     pageInspector.hidden = pageName !== "inspector";
     pageTraining.hidden = pageName !== "training";
+    if (pageName === "parking") {
+        refreshParking();
+        refreshParkingTraining();
+    }
     if (pageName === "inspector" && inspectorRuns.length === 0) {
         refreshInspectorRuns().catch((error) => {
             setInspectorBanner(error instanceof Error ? error.message : "failed to load runs", "error");
@@ -3074,26 +3473,77 @@ for (const field of ACTUATOR_TUNING_FIELDS) {
     });
 }
 
-for (const field of TRANSLATION_TUNING_FIELDS) {
-    const input = field.input;
-    if (!input) {
-        continue;
+parkingStartSetupButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "startEgo",
+        {},
+        "Starting the setup car...",
+        "Setup car queued. Position it in the bay, then calibrate the current pose.",
+    );
+});
+
+parkingCalibrateTargetButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "setParkingTarget",
+        {},
+        "Saving the car's current pose as the parking target...",
+        "Parking target queued. Keep this bay clear before collecting attempts.",
+    );
+});
+
+parkingClearTargetButton.addEventListener("click", () => {
+    handleParkingCommand(
+        "clearParkingTarget",
+        {},
+        "Clearing the parking target...",
+        "Parking target cleared. Reposition the setup car before recalibrating.",
+    );
+});
+
+parkingStartRunButton.addEventListener("click", async () => {
+    try {
+        const payload = readParkingRunPayload();
+        await handleParkingCommand(
+            "startParkingRun",
+            payload,
+            "Queueing focused forward-parking attempts...",
+            "Parking collection queued. Watch the live phase and goal errors.",
+        );
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "invalid parking run settings", "error");
     }
-    input.addEventListener("input", () => {
-        translationTuningDirty = true;
-        if (translationTuningState && translationTuningState.live) {
-            const base = translationTuningDraft || cloneTranslationTuning(translationTuningState.live);
-            translationTuningDraft = {
-                ...base,
-                [field.key]: parseTuningInputValue(input, base[field.key]),
-            };
-        }
-        if (translationTuningStatus) {
-            translationTuningStatus.textContent = "Live translation edits pending apply.";
-        }
-        updateTranslationTuningActions();
-    });
-}
+});
+
+parkingPrepareEvaluationButton.addEventListener("click", async () => {
+    const seed = parkingSeedInput.value.trim();
+    await handleParkingCommand(
+        "prepareParkingEvaluation",
+        seed ? { seed } : {},
+        "Preparing a parking-model evaluation start...",
+        "Evaluation car queued. Load a parking checkpoint in Advanced, then start inference.",
+    );
+});
+
+parkingStopButton.addEventListener("click", async () => {
+    try {
+        setBusy(true);
+        setParkingBanner("Stopping model control and the current parking operation...", "");
+        await stopParkingOperation();
+        setParkingBanner("Parking operation stopped and held safely.", "success");
+        await refreshParking();
+    } catch (error) {
+        setParkingBanner(error instanceof Error ? error.message : "failed to stop parking operation", "error");
+    } finally {
+        setBusy(false);
+    }
+});
+
+parkingAttemptCountInput.addEventListener("change", () => {
+    const value = Number(parkingAttemptCountInput.value);
+    parkingAttemptCountInput.value = String(
+        Number.isFinite(value) ? Math.min(50, Math.max(1, Math.trunc(value))) : 10,
+    );
+});
 
 actuatorTuningApplyButton.addEventListener("click", async () => {
     try {
@@ -3107,57 +3557,6 @@ actuatorTuningApplyButton.addEventListener("click", async () => {
         await refresh();
     } catch (error) {
         setBanner(error instanceof Error ? error.message : "failed to apply actuator tuning", "error");
-    } finally {
-        setBusy(false);
-    }
-});
-
-translationTuningApplyButton.addEventListener("click", async () => {
-    try {
-        setBusy(true);
-        setBanner("Applying live translation tuning...", "");
-        const tuning = await postJSON("/translation/tuning/apply", buildTranslationTuningPayload(), "failed to apply translation tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
-        setBanner("Live translation tuning applied.", "success");
-        await refresh();
-    } catch (error) {
-        setBanner(error instanceof Error ? error.message : "failed to apply translation tuning", "error");
-    } finally {
-        setBusy(false);
-    }
-});
-
-translationTuningResetButton.addEventListener("click", async () => {
-    try {
-        setBusy(true);
-        setBanner("Resetting live translation tuning...", "");
-        const tuning = await postJSON("/translation/tuning/reset", {}, "failed to reset translation tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
-        setBanner("Live translation tuning reset.", "success");
-        await refresh();
-    } catch (error) {
-        setBanner(error instanceof Error ? error.message : "failed to reset translation tuning", "error");
-    } finally {
-        setBusy(false);
-    }
-});
-
-translationTuningSaveButton.addEventListener("click", async () => {
-    try {
-        setBusy(true);
-        setBanner("Saving translation tuning...", "");
-        const tuning = await postJSON("/translation/tuning/save", {}, "failed to save translation tuning");
-        translationTuningDirty = false;
-        translationTuningDraft = cloneTranslationTuning(tuning.live);
-        renderTranslationTuningState(tuning);
-        setBanner("Translation tuning saved.", "success");
-        await refresh();
-    } catch (error) {
-        setBanner(error instanceof Error ? error.message : "failed to save translation tuning", "error");
     } finally {
         setBusy(false);
     }
@@ -3427,13 +3826,13 @@ startInferenceButton.addEventListener("click", async () => {
         setBusy(true);
         const state = await fetchState();
         const telemetry = state && state.telemetry ? state.telemetry : null;
-        const egoActive = Boolean(state && state.runtime && state.runtime.activeSceneName === "ego-control");
-        if (!egoActive || !telemetry) {
-            setBanner("Starting ego control for telemetry...", "");
-            await sendCommand("startEgo");
-            await waitForTelemetry();
+        if (!telemetry || !telemetry.vehicleExists || !telemetry.isInVehicle) {
+            throw new Error("prepare a model evaluation start from Parking before starting inference");
         }
-        setBanner("Starting backend inference...", "");
+        if (!telemetry.parkingTargetConfigured) {
+            throw new Error("calibrate a parking target and prepare an evaluation start before starting inference");
+        }
+        setBanner("Checking parking checkpoint and evaluation safety...", "");
         await postInference("/inference/start");
         setBanner("Backend inference started.", "success");
         await refresh();
@@ -3460,7 +3859,7 @@ stopInferenceButton.addEventListener("click", async () => {
 
 setBusy(false);
 setInspectorBusy(false, false);
-setActivePage("control");
+setActivePage("parking");
 
 Promise.all([
     refresh(true),
@@ -3470,6 +3869,20 @@ Promise.all([
     setBanner(message, "error");
     setInspectorBanner(message, "error");
 });
+
+setInterval(() => {
+    if (activePage !== "parking" || document.hidden) {
+        return;
+    }
+    refreshParking();
+}, 750);
+
+setInterval(() => {
+    if (activePage !== "parking" || document.hidden) {
+        return;
+    }
+    refreshParkingTraining();
+}, 10000);
 
 setInterval(() => {
     if (activePage !== "control" || document.hidden) {

@@ -112,7 +112,7 @@ function requestCaptureLike<TResponse extends CaptureResponse | TripFinalizeResp
 
         pendingCaptureRequests.set(requestId, {
             action,
-            resolve,
+            resolve: (response) => resolve(response as TResponse),
             reject,
             timeoutHandle
         });

@@ -7,6 +7,8 @@ import math
 import torch
 import torch.nn as nn
 
+from control_contract import apply_parking_control_activations, require_parking_control_target_names
+
 
 def scaled_width(base: int, width_multiplier: float) -> int:
     return max(8, int(math.ceil((base * width_multiplier) / 8.0) * 8))
@@ -119,6 +121,7 @@ class DrivingCNN(nn.Module):
         telemetry_sequence_length: int = 9,
         horizon: int = 6,
         control_dim: int = 2,
+        control_target_names: tuple[str, ...] | None = None,
         state_input_dim: int = 0,
         aux_dim: int = 4,
         width_multiplier: float = 1.0,
@@ -148,6 +151,18 @@ class DrivingCNN(nn.Module):
             raise ValueError("horizon must be > 0")
         if control_dim < 1:
             raise ValueError("control_dim must be > 0")
+        if control_target_names is not None:
+            resolved_control_target_names = require_parking_control_target_names(
+                control_target_names,
+                source="DrivingCNN.control_target_names",
+            )
+            if len(resolved_control_target_names) != control_dim:
+                raise ValueError(
+                    "control_dim must match control_target_names: "
+                    f"control_dim={control_dim} targets={len(resolved_control_target_names)}"
+                )
+        else:
+            resolved_control_target_names = None
         if aux_dim < 1:
             raise ValueError("aux_dim must be > 0")
         if state_input_dim < 0:
@@ -181,6 +196,7 @@ class DrivingCNN(nn.Module):
         self.telemetry_sequence_length = telemetry_sequence_length
         self.horizon = horizon
         self.control_dim = control_dim
+        self.control_target_names = resolved_control_target_names
         self.state_input_dim = state_input_dim
         self.aux_dim = aux_dim
         self.input_channels = 3
@@ -382,7 +398,12 @@ class DrivingCNN(nn.Module):
         horizon_tokens = self.horizon_embeddings.weight.unsqueeze(0).expand(context.shape[0], -1, -1)
         context_expanded = context.unsqueeze(1).expand(-1, self.horizon, -1)
         decoder_input = torch.cat((context_expanded, horizon_tokens), dim=-1)
-        pred_controls = self.control_decoder(decoder_input)
+        raw_controls = self.control_decoder(decoder_input)
+        pred_controls = (
+            apply_parking_control_activations(raw_controls, self.control_target_names)
+            if self.control_target_names is not None
+            else raw_controls
+        )
         pred_aux = self.aux_decoder(decoder_input)
         if pred_controls.ndim != 3 or pred_controls.shape[1:] != (self.horizon, self.control_dim):
             raise ValueError(
@@ -396,6 +417,7 @@ class DrivingCNN(nn.Module):
             )
         return {
             "pred_controls": pred_controls,
+            "pred_control_logits": raw_controls,
             "pred_aux": pred_aux,
         }
 

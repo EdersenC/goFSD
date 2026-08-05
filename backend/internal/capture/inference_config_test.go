@@ -22,17 +22,20 @@ image_height = 180
 window_size = 5
 image_offsets = [-8, -6, -4, -2, 0]
 frame_stride = 2
-sample_stride = 10
+	sample_stride = 10
+	telemetry_sample_interval_ms = 50
 telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
 future_offsets = [1, 2, 3, 4, 5, 6]
 telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
-control_target_names = ["steering", "acceleration", "brakePressureAvg"]
+	control_target_names = ["desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"]
 aux_target_names = ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"]
 label_tolerance = "120ms"
 sync_flash_brightness_threshold = 250.0
 sync_flash_frame_limit = 45
 
-[backend.inference]
+	[backend.inference]
+	planner_format = "temporal_telemetry_gru_v2"
+	control_contract = "parking_setpoint_v1"
 model_server_url = "http://127.0.0.1:9090"
 model_device = "cuda"
 source_id = "monitor-7"
@@ -43,14 +46,6 @@ frame_width = 480
 frame_height = 480
 request_timeout = "7s"
 jpeg_quality = 82
-low_speed_steer_gain = 1.4
-high_speed_steer_gain = 0.8
-steer_gain_fade_speed_mps = 6.5
-steer_response_blend = 0.6
-max_target_speed_kph = 17.0
-steer_command_rate_per_second = 6.0
-throttle_hold_seconds = 2.3
-throttle_hold_min = 0.09
 `)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -81,26 +76,15 @@ throttle_hold_min = 0.09
 	if cfg.JPEGQuality != 82 {
 		t.Fatalf("unexpected jpeg quality: %d", cfg.JPEGQuality)
 	}
-	if cfg.LowSpeedSteerGain != 1.4 || cfg.HighSpeedSteerGain != 0.8 {
-		t.Fatalf("unexpected steer gains: low=%f high=%f", cfg.LowSpeedSteerGain, cfg.HighSpeedSteerGain)
+	if cfg.ControlContract != defaultControlContract || cfg.PlannerFormat != defaultPlannerFormat {
+		t.Fatalf("unexpected model contract: planner=%s control=%s", cfg.PlannerFormat, cfg.ControlContract)
 	}
-	if cfg.SteerGainFadeSpeedMPS != 6.5 {
-		t.Fatalf("unexpected steer gain fade speed: %f", cfg.SteerGainFadeSpeedMPS)
+	if cfg.TelemetrySampleInterval != 50*time.Millisecond {
+		t.Fatalf("unexpected telemetry sample interval: %s", cfg.TelemetrySampleInterval)
 	}
-	if cfg.SteerResponseBlend != 0.6 {
-		t.Fatalf("unexpected steer response blend: %f", cfg.SteerResponseBlend)
-	}
-	if cfg.MaxTargetSpeedKPH != 17.0 {
-		t.Fatalf("unexpected max target speed kph: %f", cfg.MaxTargetSpeedKPH)
-	}
-	if cfg.SteerCommandRatePerSec != 6.0 {
-		t.Fatalf("unexpected steer command rate: %f", cfg.SteerCommandRatePerSec)
-	}
-	if cfg.ThrottleHoldSeconds != 2.3 {
-		t.Fatalf("unexpected throttle hold seconds: %f", cfg.ThrottleHoldSeconds)
-	}
-	if cfg.ThrottleHoldMin != 0.09 {
-		t.Fatalf("unexpected throttle hold min: %f", cfg.ThrottleHoldMin)
+	expectedHorizon := []int{50, 100, 150, 200, 250, 300}
+	if err := validateExactInts("test control horizon", cfg.ControlHorizonDtMs, expectedHorizon); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -118,26 +102,11 @@ func TestLoadInferenceConfigFallsBackToDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.FrameWidth != defaultInferenceWidth || cfg.FrameHeight != defaultInferenceHeight {
 		t.Fatalf("unexpected default frame size: %dx%d", cfg.FrameWidth, cfg.FrameHeight)
 	}
-	if cfg.MaxTargetSpeedKPH != defaultMaxTargetSpeedKPH {
-		t.Fatalf("unexpected default max target speed kph: %f", cfg.MaxTargetSpeedKPH)
+	if cfg.ControlContract != defaultControlContract || cfg.PlannerFormat != defaultPlannerFormat {
+		t.Fatalf("unexpected default model contract: planner=%s control=%s", cfg.PlannerFormat, cfg.ControlContract)
 	}
-	if cfg.LowSpeedSteerGain != defaultLowSpeedSteerGain || cfg.HighSpeedSteerGain != defaultHighSpeedSteerGain {
-		t.Fatalf("unexpected default steer gains: low=%f high=%f", cfg.LowSpeedSteerGain, cfg.HighSpeedSteerGain)
-	}
-	if cfg.SteerGainFadeSpeedMPS != defaultSteerGainFadeSpeedMPS {
-		t.Fatalf("unexpected default steer gain fade speed: %f", cfg.SteerGainFadeSpeedMPS)
-	}
-	if cfg.SteerResponseBlend != defaultSteerResponseBlend {
-		t.Fatalf("unexpected default steer response blend: %f", cfg.SteerResponseBlend)
-	}
-	if cfg.SteerCommandRatePerSec != defaultSteerCommandRatePerSecond {
-		t.Fatalf("unexpected default steer command rate: %f", cfg.SteerCommandRatePerSec)
-	}
-	if cfg.ThrottleHoldSeconds != defaultThrottleHoldSeconds {
-		t.Fatalf("unexpected default throttle hold seconds: %f", cfg.ThrottleHoldSeconds)
-	}
-	if cfg.ThrottleHoldMin != defaultThrottleHoldMin {
-		t.Fatalf("unexpected default throttle hold min: %f", cfg.ThrottleHoldMin)
+	if cfg.TelemetrySampleInterval != defaultTelemetrySampleInterval {
+		t.Fatalf("unexpected default telemetry interval: %s", cfg.TelemetrySampleInterval)
 	}
 	if cfg.PredictionTimeout != defaultPredictionTimeout {
 		t.Fatalf("unexpected default inference timeout: %s", cfg.PredictionTimeout)
@@ -156,7 +125,8 @@ image_width = 640
 image_height = 360
 window_size = 7
 frame_stride = 3
-sample_stride = 9
+	sample_stride = 9
+	telemetry_sample_interval_ms = 40
 label_tolerance = "75ms"
 future_speed_delta_clip = 1.5
 future_speed_delta_normalize = false
@@ -173,6 +143,9 @@ sync_flash_frame_limit = 25
 	}
 	if cfg.WindowSize != 7 || cfg.FrameStride != 3 || cfg.SampleStride != 9 {
 		t.Fatalf("unexpected dataset config: %+v", cfg)
+	}
+	if cfg.TelemetrySampleInterval != 40*time.Millisecond {
+		t.Fatalf("unexpected telemetry sample interval: %s", cfg.TelemetrySampleInterval)
 	}
 	if cfg.ImageWidth != 640 || cfg.ImageHeight != 360 {
 		t.Fatalf("unexpected image size: %dx%d", cfg.ImageWidth, cfg.ImageHeight)

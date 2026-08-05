@@ -1,9 +1,13 @@
 {
-  "devDependencies": {
-    "@citizenfx/client": "^2.0.25988-1",
-    "@citizenfx/server": "^2.0.25988-1"
-  },
-  "dependencies": {
-    "node-fetch": "^3.3.2"
+  "name": "gta-parking-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Parking-first FiveM data collection and model training workspace",
+  "scripts": {
+    "doctor": "bash scripts/doctor.sh",
+    "build": "npm --prefix fivem run build",
+    "test": "bash scripts/validate.sh",
+    "dev:backend": "bash scripts/dev-backend.sh",
+    "dev:model": "bash scripts/dev-model-server.sh"
   }
 }

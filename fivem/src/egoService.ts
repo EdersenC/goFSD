@@ -1,8 +1,17 @@
 import {isValidEntity, log, ensureModelLoaded, wait, AbortControllerCompat, Evaluator} from "./helper"
 import {Environment, EnvironmentService, WeatherType} from "./environment";
-import {syncFlash} from "./sceneManger";
+import {syncFlash} from "./syncFlash";
 import {requestCapture, requestTripFinalize, TripFinalizeResponse} from "./captureControl";
 import {buildDeterministicTripProfile, TripProfileSnapshot} from "./tripProfiles";
+import {
+    gtaForwardVector,
+    gtaHeadingFromVector,
+    gtaRightVector,
+    headingDeltaDegrees,
+} from "./parking/geometry";
+import {ParkingGoal, ParkingOutcome, ParkingTelemetry} from "./parking/types";
+import {EgoControlTelemetry} from "./controlTelemetry";
+import {normalizeVehicleSteering, VehicleSteeringSample} from "./vehicleSteering";
 
 
 export enum DrivingFlag {
@@ -203,6 +212,10 @@ type RecordingContext = {
     toDestination: [number, number, number]
     tripProfile: TripProfileSnapshot
     scenario?: ScenarioSampleContext
+    parking?: {
+        goal: ParkingGoal
+        outcome?: ParkingOutcome
+    }
 }
 
 const VehicleNodeFlags = {
@@ -219,7 +232,12 @@ export interface VehicleData {
     acceleration: number
     brakePressureAvg: number
     isStopped: boolean | number
+    /** Controller-compatible normalized steering in [-1, 1]. */
     Steering: number
+    /** Raw physical front-wheel angle in radians. */
+    wheelAngle: number
+    /** Per-vehicle physical full-lock angle in radians. */
+    wheelSteeringFullLock: number
     yaw: number
     coords: [number, number, number]
     gps: [number, number, number]
@@ -277,6 +295,17 @@ export interface VehicleData {
     scenarioSeed?: string
     scenarioGoal?: string
     scenarioFactors?: Record<string, unknown>
+    parkingTargetConfigured?: boolean
+    parkingLongitudinalError?: number
+    parkingLateralError?: number
+    parkingHeadingError?: number
+    parkingDistance?: number
+    parkingInsideBay?: boolean
+    parkingAligned?: boolean
+    parkingParked?: boolean
+    parkingAttemptIndex?: number
+    parkingAttemptCount?: number
+    parkingPhase?: string
 }
 
 type RouteDirectionTelemetry = {
@@ -312,6 +341,8 @@ export interface WaypointCompleted {
     scenarioSeed?: string
     scenarioFactors?: Record<string, unknown>
     scenarioGoal?: string
+    parkingGoal?: ParkingGoal
+    parkingOutcome?: ParkingOutcome
 }
 
 export const SceneStoppedErrorCode = "SCENE_STOPPED";
@@ -329,6 +360,7 @@ export class EgoService {
     private tripChunkIndex = 0;
     private tripDataPointIndex = 0;
     private activeTripContext: RecordingContext | null = null;
+    private parkingRouteTarget: Vector3 | null = null;
     private stopRequested = false;
     private stopReason = "";
     private cameraTickId: number | null = null;
@@ -351,6 +383,7 @@ export class EgoService {
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         this.activeTripContext = null;
+        this.parkingRouteTarget = null;
         this.stopManagedLoops();
         if (this.oldEgo) {
             this.cleanUp(this.oldEgo);
@@ -373,6 +406,39 @@ export class EgoService {
         return
     }
 
+    public async executeEgoAt(ego: Ego, spawn: SpawnPoint, sceneName: string, runId: string) {
+        ego.vehicle.VehicleData = [];
+        this.SceneName = sceneName;
+        this.RunId = runId;
+        this.baseEnvironment = null;
+        this.stopRequested = false;
+        this.stopReason = "";
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
+        this.activeTripContext = null;
+        this.parkingRouteTarget = null;
+        this.stopManagedLoops();
+        if (this.oldEgo) {
+            this.cleanUp(this.oldEgo);
+        }
+        this.oldEgo = ego;
+        ClearPedTasksImmediately(PlayerPedId());
+
+        const vehicleReady = await this.setEgoVehicleAt(ego, spawn);
+        if (!vehicleReady || !isValidEntity(ego.vehicle.id)) {
+            throw new Error("failed to initialize ego vehicle at requested spawn");
+        }
+
+        SetPlayerInvincible(PlayerId(), true);
+        SetVehRadioStation(ego.vehicle.id, "OFF");
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        FreezeEntityPosition(ego.vehicle.id, false);
+        this.makeVehicleGodMode(ego.vehicle.id);
+        this.startCaptureCamera(ego);
+        this.makePlayerUnaware(PlayerPedId(), true);
+    }
+
     public configureManualRouteContext(ego: Ego) {
         if (!isValidEntity(ego.vehicle.id)) {
             console.log("[ego-control] cannot configure route context because ego vehicle is invalid.");
@@ -392,7 +458,11 @@ export class EgoService {
             this.baseEnvironment ?? undefined
         );
         const startCoords = GetEntityCoords(ego.vehicle.id, false) as [number, number, number];
-        const route = this.configureRoute(ego.waypoints[0], ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
+        const firstWaypoint = ego.waypoints[0];
+        if (!firstWaypoint) {
+            throw new Error("manual route waypoint invariant violated after non-empty check");
+        }
+        const route = this.configureRoute(firstWaypoint, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
         const [x, y, z] = route.destination;
         const now = GetGameTimer();
 
@@ -409,6 +479,18 @@ export class EgoService {
         };
         SetNewWaypoint(x, y);
         console.log(`[ego-control] manual route context set target=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+    }
+
+    public configureParkingRouteTarget(target: Vector3) {
+        if (!this.isFiniteVector3(target)) {
+            throw new Error("parking route target must contain finite coordinates");
+        }
+        this.parkingRouteTarget = [...target];
+        ClearGpsPlayerWaypoint();
+    }
+
+    public clearParkingRouteTarget() {
+        this.parkingRouteTarget = null;
     }
 
     public beginScenarioSampleRecording(
@@ -449,6 +531,53 @@ export class EgoService {
         this.activeTripContext = null;
     }
 
+    public beginParkingAttemptRecording(
+        ego: Ego,
+        context: {
+            runId: string
+            sceneId: string
+            sceneVariant: string
+            tripIndex: number
+            syncTime: number
+            fromDestination: Vector3
+            toDestination: Vector3
+            goal: ParkingGoal
+        }
+    ) {
+        this.RunId = context.runId;
+        this.SceneName = `${context.sceneId}:${context.sceneVariant}`;
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
+        ego.vehicle.VehicleData = [];
+        this.activeTripContext = {
+            recordingType: "trip",
+            sceneId: context.sceneId,
+            sceneVariant: context.sceneVariant,
+            tripIndex: context.tripIndex,
+            syncTime: context.syncTime,
+            chunkStartTime: context.syncTime,
+            fromDestination: context.fromDestination,
+            toDestination: context.toDestination,
+            tripProfile: this.buildParkingTripProfile(ego, context.goal),
+            parking: {
+                goal: context.goal,
+            },
+        };
+    }
+
+    public finishParkingAttemptRecording(
+        ego: Ego,
+        outcome: ParkingOutcome,
+        endTime = GetGameTimer()
+    ) {
+        if (!this.activeTripContext?.parking) {
+            throw new Error("parking recording finalization requires an active parking context");
+        }
+        this.activeTripContext.parking.outcome = outcome;
+        this.emitTripChunk(ego, endTime, true);
+        this.activeTripContext = null;
+    }
+
     public clearRecordingContext() {
         this.activeTripContext = null;
         this.tripChunkIndex = 0;
@@ -476,6 +605,7 @@ export class EgoService {
         }
         this.oldEgo = null;
         this.activeTripContext = null;
+        this.parkingRouteTarget = null;
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         SetPlayerInvincible(PlayerId(), false);
@@ -513,42 +643,7 @@ export class EgoService {
         return routeContext.routeForwardDelta;
     }
 
-    public currentControlTelemetry(): {
-        currentSpeed: number
-        currentYaw: number
-        yawRate: number
-        steering: number
-        acceleration: number
-        brakePressureAvg: number
-        vehicleExists: boolean
-        isInVehicle: boolean
-        positionX?: number
-        positionY?: number
-        positionZ?: number
-        velocityX?: number
-        velocityY?: number
-        velocityZ?: number
-        pitchDeg?: number
-        rollDeg?: number
-        gear?: number
-        rpm?: number
-        wheelAngle?: number
-        onGround?: boolean
-        collisionState?: string
-        routeDirectionCode: number
-        routeDirectionDistanceM: number
-        routeDirectionUnknown: number
-        routeDirectionKeepStraight: number
-        routeDirectionTurnLeft: number
-        routeDirectionTurnRight: number
-        routeDirectionRerouteWrongWay: number
-        routeForwardDelta: number | null
-        routeHeadingError: number | null
-        routeDistance: number | null
-        hasLeadVehicle: boolean
-        leadVehicleDistance: number | null
-        gameTimeMs: number
-    } | null {
+    public currentControlTelemetry(): EgoControlTelemetry | null {
         if (!this.oldEgo || !isValidEntity(this.oldEgo.vehicle.id)) {
             return null;
         }
@@ -561,7 +656,8 @@ export class EgoService {
         const currentSpeed = GetEntitySpeed(id);
         const acceleration = GetVehicleCurrentAcceleration(id);
         const brakePressureAvg = this.averageBrakePressure(id);
-        const steering = GetVehicleWheelSteeringAngle(id, 0);
+        const vehicleModelHash = Math.trunc(GetEntityModel(id));
+        const steering = this.readVehicleSteering(id);
         const rotationVelocity = this.toVector3(GetEntityRotationVelocity(id)) ?? [0, 0, 0];
         const gear = GetVehicleCurrentGear(id);
         const rpm = GetVehicleCurrentRpm(id);
@@ -577,9 +673,10 @@ export class EgoService {
             currentSpeed,
             currentYaw: yaw,
             yawRate: rotationVelocity[2],
-            steering,
+            steering: steering.normalized,
             acceleration,
             brakePressureAvg,
+            vehicleModelHash,
             vehicleExists: true,
             isInVehicle: IsPedInVehicle(PlayerPedId(), id, false),
             positionX: coords[0],
@@ -592,7 +689,8 @@ export class EgoService {
             rollDeg: roll,
             gear,
             rpm,
-            wheelAngle: steering,
+            wheelAngle: steering.wheelAngleRadians,
+            wheelSteeringFullLock: steering.fullLockRadians,
             onGround,
             collisionState,
             routeDirectionCode: routeDirection.routeDirectionCode,
@@ -834,7 +932,7 @@ export class EgoService {
         console.log(`[ego] capture:stop ack run=${finalizedTrip.runId} scene=${finalizedTrip.sceneId}:${finalizedTrip.sceneVariant} trip=${finalizedTrip.tripIndex}`);
     }
 
-    private requireFinalizedTrip(
+    public requireFinalizedTrip(
         response: TripFinalizeResponse,
         tripIndex: number,
         sceneInfo: { sceneId: string; sceneVariant: string }
@@ -900,6 +998,8 @@ export class EgoService {
             scenarioSeed: this.activeTripContext.scenario?.seed,
             scenarioFactors: this.activeTripContext.scenario?.factors,
             scenarioGoal: this.activeTripContext.scenario?.goal,
+            parkingGoal: this.activeTripContext.parking?.goal,
+            parkingOutcome: this.activeTripContext.parking?.outcome,
         };
 
         console.log(
@@ -969,6 +1069,23 @@ export class EgoService {
         };
     }
 
+    private buildParkingTripProfile(ego: Ego, goal: ParkingGoal): TripProfileSnapshot {
+        return {
+            seed: goal.seed,
+            weatherType: WeatherType.EXTRA_SUNNY,
+            time: {
+                hour: 12,
+                minute: 30,
+                second: 0,
+                persistent: true,
+            },
+            timeBucket: "parking_midday",
+            vehicleModel: String(ego.vehicle.model),
+            vehicleColor: ego.vehicle.color,
+            vehicleColorName: VehicleColor[ego.vehicle.color] ?? String(ego.vehicle.color),
+        };
+    }
+
     private async prepareTripRuntime(ego: Ego, tripProfile: TripProfileSnapshot) {
         if (this.baseEnvironment) {
             this.environmentService.execute({
@@ -1034,13 +1151,13 @@ export class EgoService {
 
 
 
-    public collectEgoData(ego: Ego) {
+    public collectEgoData(ego: Ego, parkingTelemetry?: ParkingTelemetry) {
         const id = ego.vehicle.id;
         const currentSpeed = GetEntitySpeed(ego.vehicle.id);
         const isStopped :boolean | number = IsVehicleStopped(id)
         const acceleration = GetVehicleCurrentAcceleration(id);
         const brakePressureAvg = this.averageBrakePressure(id);
-        const Steering = GetVehicleWheelSteeringAngle(id, 0);
+        const steering = this.readVehicleSteering(id);
         const yaw = GetEntityHeading(id)
         const time = GetGameTimer();
         const coords = this.toVector3(GetEntityCoords(id, false)) ?? [0, 0, 0];
@@ -1076,7 +1193,9 @@ export class EgoService {
             acceleration,
             brakePressureAvg,
             isStopped,
-            Steering,
+            Steering: steering.normalized,
+            wheelAngle: steering.wheelAngleRadians,
+            wheelSteeringFullLock: steering.fullLockRadians,
             yaw,
             coords,
             gps,
@@ -1133,7 +1252,18 @@ export class EgoService {
             scenarioVariantHash: this.activeTripContext?.scenario?.variantHash,
             scenarioSeed: this.activeTripContext?.scenario?.seed,
             scenarioGoal: this.activeTripContext?.scenario?.goal,
-            scenarioFactors: this.activeTripContext?.scenario?.factors
+            scenarioFactors: this.activeTripContext?.scenario?.factors,
+            parkingTargetConfigured: parkingTelemetry?.parkingTargetConfigured,
+            parkingLongitudinalError: parkingTelemetry?.parkingLongitudinalError,
+            parkingLateralError: parkingTelemetry?.parkingLateralError,
+            parkingHeadingError: parkingTelemetry?.parkingHeadingError,
+            parkingDistance: parkingTelemetry?.parkingDistance,
+            parkingInsideBay: parkingTelemetry?.parkingInsideBay,
+            parkingAligned: parkingTelemetry?.parkingAligned,
+            parkingParked: parkingTelemetry?.parkingParked,
+            parkingAttemptIndex: parkingTelemetry?.parkingAttemptIndex,
+            parkingAttemptCount: parkingTelemetry?.parkingAttemptCount,
+            parkingPhase: parkingTelemetry?.parkingPhase,
         };
 
         if (!ego.vehicle.VehicleData) {
@@ -1169,6 +1299,13 @@ export class EgoService {
             return 0;
         }
         return this.clampNumber(totalPressure / observedWheels, 0, 1);
+    }
+
+    private readVehicleSteering(vehicle: number): VehicleSteeringSample {
+        return normalizeVehicleSteering(
+            GetVehicleWheelSteeringAngle(vehicle, 0),
+            GetVehicleHandlingFloat(vehicle, "CHandlingData", "fSteeringLock")
+        );
     }
 
     private clampNumber(value: number, minValue: number, maxValue: number): number {
@@ -1248,6 +1385,12 @@ export class EgoService {
     }
 
     private getRouteTarget(gpsRouteFound: boolean, gps: Vector3): Vector3 | null {
+        if (this.activeTripContext?.parking && this.isFiniteVector3(this.activeTripContext.toDestination)) {
+            return this.activeTripContext.toDestination;
+        }
+        if (this.parkingRouteTarget && this.isFiniteVector3(this.parkingRouteTarget)) {
+            return this.parkingRouteTarget;
+        }
         if (gpsRouteFound && this.isFiniteVector3(gps)) {
             return gps;
         }
@@ -1437,37 +1580,19 @@ export class EgoService {
     }
 
     private headingForwardVector(heading: number): Vector3 {
-        const radians = heading * (Math.PI / 180);
-        return [Math.sin(radians), Math.cos(radians), 0];
+        return gtaForwardVector(heading);
     }
 
     private headingRightVector(heading: number): Vector3 {
-        const radians = heading * (Math.PI / 180);
-        return [Math.cos(radians), -Math.sin(radians), 0];
+        return gtaRightVector(heading);
     }
 
     private vectorHeadingDegrees(value: Vector3): number {
-        const radians = Math.atan2(value[0], value[1]);
-        return this.normalizeHeadingDegrees(radians * (180 / Math.PI));
-    }
-
-    private normalizeHeadingDegrees(heading: number): number {
-        let normalized = heading % 360;
-        if (normalized < 0) {
-            normalized += 360;
-        }
-        return normalized;
+        return gtaHeadingFromVector(value);
     }
 
     private headingDeltaDegrees(targetHeading: number, sourceHeading: number): number {
-        let delta = this.normalizeHeadingDegrees(targetHeading) - this.normalizeHeadingDegrees(sourceHeading);
-        while (delta > 180) {
-            delta -= 360;
-        }
-        while (delta < -180) {
-            delta += 360;
-        }
-        return delta;
+        return headingDeltaDegrees(targetHeading, sourceHeading);
     }
 
 
@@ -1543,13 +1668,85 @@ export class EgoService {
         console.log(`Requested control of vehicle ${newVehicle}, in control: ${incontrol}`);
         SetVehicleNumberPlateText(newVehicle, "EGO");
         SetVehicleOnGroundProperly(newVehicle);
-        await this.addPedToVehicle(PlayerPedId(), newVehicle);
+        const seated = await this.addPedToVehicle(PlayerPedId(), newVehicle);
+        if (!seated) {
+            SetEntityAsMissionEntity(newVehicle, true, true);
+            DeleteVehicle(newVehicle);
+            console.log(`Failed to seat ego in vehicle model: ${resolvedModel}`);
+            return;
+        }
         SetVehicleEngineOn(newVehicle, true, true, false);
         SetVehicleUndriveable(newVehicle, false);
         FreezeEntityPosition(newVehicle, false);
         ego.vehicle.id = newVehicle;
         ego.vehicle.model = resolvedModel;
         ego.vehicle.color = resolvedColor;
+    }
+
+    public async setEgoVehicleAt(
+        ego: Ego,
+        spawn: SpawnPoint,
+        modelOverride?: string,
+        colorOverride?: VehicleColor
+    ): Promise<boolean> {
+        const resolvedModel = modelOverride ?? this.resolveVehicleModel(ego.vehicle.model);
+        const resolvedColor = colorOverride ?? this.resolveVehicleColor(ego.vehicle.color);
+        const vehicle = await this.spawnVehicleAt(resolvedModel, resolvedColor, spawn);
+        if (!isValidEntity(vehicle)) {
+            return false;
+        }
+
+        SetVehicleNumberPlateText(vehicle, "EGO");
+        const seated = await this.addPedToVehicle(PlayerPedId(), vehicle);
+        if (!seated) {
+            SetEntityAsMissionEntity(vehicle, true, true);
+            DeleteVehicle(vehicle);
+            return false;
+        }
+
+        SetVehicleEngineOn(vehicle, true, true, false);
+        SetVehicleUndriveable(vehicle, false);
+        FreezeEntityPosition(vehicle, false);
+        this.makeVehicleGodMode(vehicle);
+        ego.vehicle.id = vehicle;
+        ego.vehicle.model = resolvedModel;
+        ego.vehicle.color = resolvedColor;
+        return true;
+    }
+
+    public async spawnVehicleAt(
+        modelName: VehicleModel | string,
+        color: VehicleColor,
+        spawn: SpawnPoint
+    ): Promise<number> {
+        const resolvedModel = this.resolveVehicleModel(modelName);
+        const resolvedColor = this.resolveVehicleColor(color);
+        const vehicleModel = GetHashKey(resolvedModel);
+        if (!await ensureModelLoaded(vehicleModel)) {
+            console.log(`Failed to load vehicle model: ${resolvedModel}`);
+            return 0;
+        }
+
+        const [x, y, z] = spawn.coords;
+        RequestCollisionAtCoord(x, y, z);
+        const vehicle = CreateVehicle(vehicleModel, x, y, z + 1, spawn.heading, true, false);
+        SetModelAsNoLongerNeeded(vehicleModel);
+        if (!isValidEntity(vehicle)) {
+            return 0;
+        }
+
+        SetEntityAsMissionEntity(vehicle, true, true);
+        NetworkRequestControlOfEntity(vehicle);
+        SetVehicleColours(vehicle, resolvedColor, resolvedColor);
+        FreezeEntityPosition(vehicle, true);
+        SetEntityCoordsNoOffset(vehicle, x, y, z + 0.75, false, false, true);
+        SetEntityHeading(vehicle, spawn.heading);
+        SetVehicleOnGroundProperly(vehicle);
+        await wait(75);
+        SetVehicleOnGroundProperly(vehicle);
+        FreezeEntityPosition(vehicle, false);
+        SetVehRadioStation(vehicle, "OFF");
+        return vehicle;
     }
 
     public makeVehicleGodMode(veh: number) {
@@ -1577,7 +1774,7 @@ export class EgoService {
         return vehicle;
     }
 
-    public async addPedToVehicle(egoId:number, vehicle: number) {
+    public async addPedToVehicle(egoId:number, vehicle: number): Promise<boolean> {
         TaskWarpPedIntoVehicle(egoId, vehicle, -1);
         SetPedIntoVehicle(egoId, vehicle, -1);
 
@@ -1585,13 +1782,14 @@ export class EgoService {
         while (GetGameTimer() - startedAt < 1000) {
             if (IsPedInVehicle(egoId, vehicle, false) && GetPedInVehicleSeat(vehicle, -1) === egoId) {
                 console.log(`Player ped seated in vehicle ${vehicle} as driver.`);
-                return;
+                return true;
             }
             await wait(50);
             SetPedIntoVehicle(egoId, vehicle, -1);
         }
 
         console.log(`Failed to confirm player ped seated in vehicle ${vehicle} as driver.`);
+        return false;
     }
 
     public driveToWaypoint(driver: number, vehicle: number, waypoint:number ,drivingStyle:DrivingStyle, speed: number = 20.0): void {

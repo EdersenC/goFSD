@@ -1,92 +1,104 @@
-# Virtual Controller Actuator
+# Virtual controller and parking setpoint runtime
 
-This project now actuates GTA/FiveM through a Go-owned virtual Xbox 360 controller.
+The Go backend owns a persistent virtual Xbox 360 controller for model evaluation. Expert demonstration collection does not use it: FiveM's native parking task produces the successful forward-bay examples.
 
-## Requirements
+## Runtime boundary
 
-- Windows only for live actuation. The actuator endpoint reports `501 Not Implemented` on non-Windows hosts.
-- Install the ViGEmBus driver before running the backend on Windows.
-- Run the Go backend as Administrator so `vgamepad-go` can create and drive the virtual controller.
+- Live actuation is Windows-only and requires ViGEmBus.
+- The backend and model server must use the same `fsd_trainer/train_config.toml` and data root.
+- Load a `temporal_telemetry_gru_v2` / `parking_setpoint_v1` checkpoint before starting inference.
+- Keep the backend bound to loopback; its control endpoints are intentionally local and unauthenticated.
 
-## Data Flow
-
-1. FiveM still runs the existing `startEgoControl` setup path and prepares the ego vehicle/session.
-2. The Go backend captures frames and requests predictions from the Python model server.
-3. The Python model server posts raw model outputs to `POST /actuator/command`, and the Go actuator normalizes them before applying controller-specific gains and limits.
-4. The Go actuator stores the latest command and applies it to a persistent virtual Xbox 360 controller at the configured `backend.actuator.tick_hz` cadence. The checked-in training config uses `15Hz`.
-5. GTA/FiveM sees normal controller input from the virtual gamepad.
-
-FiveM no longer applies predicted steer/throttle/brake itself.
-
-## Start
-
-1. Start the Python model server:
-
-```bash
-cd fsd_trainer/src/gta_fsd
-python server.py --config ../../train_config.toml
+```text
+FiveM wheel/speed telemetry + captured frames
+                    ↓
+          Python parking planner
+                    ↓
+      versioned physical setpoint plan
+                    ↓
+ calibrated Go feedback controller + safety
+                    ↓
+       virtual Xbox controller → GTA
 ```
 
-2. Start the Go backend on Windows as Administrator:
+The Python model never outputs trigger values. It outputs desired normalized physical wheel steer, desired speed in meters per second, and stop probability at the exact future times declared by the checkpoint.
 
-```bash
-cd backend
-go run ./cmd
+## Arming and ownership
+
+Inference starts only when all of these agree:
+
+- FiveM ego telemetry is fresh and valid;
+- a forward-bay goal is calibrated and the car is inside the curriculum start envelope;
+- the loaded checkpoint exposes the exact parking contract, timing, tensors, and enabled state inputs;
+- the virtual controller reports ready with no apply fault;
+- the parking controller has a verified calibration profile; and
+- the current `vehicleModelHash` equals the calibrated hash.
+
+The session first claims parking ownership. Before the first plan, the actuator holds the car with service brake or low-speed handbrake and waits for that exact ownership command ID to be applied. Once armed, parking inference may submit only `parking_setpoint_v1` plans or request the actuator-owned safety stop. Other enabled commands are rejected; an explicit disabled manual safety command can preempt the session.
+
+Success, manual stop, target loss, collision, reverse motion, invalid pose, stale telemetry/plan, model error, controller error, or capture-process failure requests a persistent terminal stop from the actuator. The actuator uses service brake while moving and handbrake only after fresh telemetry confirms low speed. The backend waits for the exact stop command ID and a safe applied brake/hold state before reporting confirmation.
+
+## Feedback and fail-safe behavior
+
+At the actuator tick, the backend samples the plan using its observation age plus configured actuation latency. Steering uses a calibrated monotonic feed-forward map plus bounded PI correction from measured wheel steer. Speed uses bounded PI control and one signed longitudinal effort, so throttle and brake are mutually exclusive.
+
+Stop probability has hysteresis. While moving, a stop request uses service brake. Handbrake is used only when fresh telemetry confirms speed is below the hold threshold. If speed is unknown, the fail-safe chooses service braking rather than assuming the vehicle is stopped.
+
+Every plan and telemetry sample has a freshness limit. Frame PTS, source telemetry time, backend receipt time, and source/receipt skew are checked independently. Wrong contract, planner version, direction, horizon timing, output bounds, timestamp echo, vehicle identity, or controller `dt` fails closed. `GET /actuator/state` shows the plan receipt, selected setpoint, measured state, P/I terms, requested effort, final applied controls, and fault.
+
+## Calibration profile
+
+The checked-in config is deliberately unverified. Obtain the current hash from `GET /control/state`, measure the selected vehicle, then fill `[backend.parking_controller]`:
+
+```toml
+[backend.parking_controller]
+calibration_verified = true
+calibration_profile_id = "vehicle-name-gamebuild-adapter-v1"
+vehicle_model_hash = 123456789
+game_build = "replace-with-tested-build"
+adapter_version = "vgamepad-go-v1"
+steering_convention = "positive_wheel_is_positive_xinput"
+steering_profile = [
+  { wheel_steer = -1.0, command = -1.0 },
+  { wheel_steer =  0.0, command =  0.0 },
+  { wheel_steer =  1.0, command =  1.0 },
+]
 ```
 
-3. Start FiveM as usual and use the existing ego-control flow:
+Replace the identity points with measured monotonic points when the game response is nonlinear. The vehicle hash is checked live. `game_build` and `adapter_version` are required test provenance but are not currently sensed by FiveM telemetry, so the operator must verify them. Restart the backend after editing and confirm `parkingController.ready: true` at `GET /actuator/state`.
 
-- Control page button: `Start Ego Control`
-- Or FiveM command: `startEgo`
+Before model evaluation, use the manual controller only for calibration:
 
-That still spawns/prepares the ego vehicle and capture state, but it does not apply controls anymore.
+```powershell
+.\.venv\Scripts\python.exe fsd_trainer\src\gta_fsd\send_control.py `
+  --config fsd_trainer\train_config.toml --steer 0.20 --throttle 0.12
 
-## Test Fixed Commands
-
-Send a manual command from Python:
-
-```bash
-cd fsd_trainer/src/gta_fsd
-python send_control.py --config ../../train_config.toml --steer -0.20 --throttle 0.35
+.\.venv\Scripts\python.exe fsd_trainer\src\gta_fsd\send_control.py `
+  --config fsd_trainer\train_config.toml --disabled
 ```
 
-`send_control.py` explicitly marks those inputs as `normalized`; the actuator API otherwise assumes raw model-scale inputs by default.
-For manual testing, `send_control.py` repeats non-disabled commands for about one second at `15Hz` by default so the command stays visible across the actuator stale timeout.
+Verify small positive/negative steering, settled wheel response, low trigger response, braking, latency, and release. Keep the car at walking speed with room around it. If steering signs disagree, stop and correct the convention boundary once before collecting or evaluating data.
 
-Release controls explicitly:
+## Shared configuration
 
-```bash
-cd fsd_trainer/src/gta_fsd
-python send_control.py --config ../../train_config.toml --disabled
-```
+`fsd_trainer/train_config.toml` separates manual/device safety from the model controller:
 
-You can also inspect backend state:
+- `[backend.actuator]`: controller tick, request timeout, manual calibration gains, and final speed/overspeed safety.
+- `[backend.parking_controller]`: calibration identity, steering map, PI gains, effort/slew bounds, stop hysteresis, freshness, latency, and expected horizon timing.
+- `[backend.inference]`: exact planner/control contract, capture cadence, model server, and frame/telemetry alignment limits.
+- `[dataset]`: the 50 ms sample interval and future offsets from which `50..300 ms` control timing is derived.
 
-```bash
-curl -s http://127.0.0.1:8080/actuator/state
-```
+Manual actuator tuning does not alter model setpoints or the parking PI controller. It remains available only for deliberate calibration and direct manual commands.
 
-## Safety Behavior
+## Live acceptance
 
-- Steering is clamped, deadzoned, scaled, and rate-limited before it is applied.
-- Raw model steer/acceleration values are normalized first using `model_steer_scale` and `model_accel_scale`.
-- Throttle and brake are ramp-limited.
-- If both throttle and brake are present, brake wins and throttle is forced to zero.
-- If a fresh command is not received within `backend.actuator.stale_timeout`, Go recenters steering and releases throttle/brake.
-- `/actuator/state` reports the last received request, the resolved controller target, and the last controller state that was successfully applied.
+Unit and replay checks are not a live acceptance test. On the actual Windows/FiveM stack, verify:
 
-## Config
+1. steering sign, monotonicity, center, and saturation;
+2. service-brake versus low-speed handbrake transition;
+3. no simultaneous applied throttle and brake;
+4. stale plan, stale telemetry, wrong vehicle, and controller apply failures;
+5. one successful and one deliberately failed evaluation with trace receipts; and
+6. comparable setpoint tracking at the supported inference cadence.
 
-`fsd_trainer/train_config.toml` now contains a `[backend.actuator]` section used by both Python and Go:
-
-- `url`
-- `request_timeout`
-- `tick_hz`
-- `stale_timeout`
-- `steer_deadzone`
-- `max_steer_scale`
-- `steer_rate_per_second`
-- `throttle_rate_per_second`
-- `brake_rate_per_second`
-- `model_steer_scale`
-- `model_accel_scale`
+The current contract is forward-only. Reverse or parallel parking requires explicit direction/gear supervision and a separate safety interlock.

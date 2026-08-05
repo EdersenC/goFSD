@@ -8,10 +8,15 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from control_contract import (
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    control_contract_metadata,
+    derive_control_horizon_dt_ms,
+)
 from dataset import FsdDataset
 from inference import (
     DEFAULT_CONFIG_PATH,
-    PLANNER_FORMAT,
     build_model,
     load_checkpoint,
     load_config as load_inference_config,
@@ -103,6 +108,7 @@ def _fresh_model(config: Any, device: torch.device) -> DrivingCNN:
         telemetry_sequence_length=len(config.dataset.telemetry_offsets),
         horizon=len(config.dataset.future_offsets),
         control_dim=len(config.dataset.control_target_names),
+        control_target_names=config.dataset.control_target_names,
         aux_dim=len(config.dataset.aux_target_names),
         state_input_dim=len(config.state_inputs.enabled_keys()),
         width_multiplier=config.model.width_multiplier,
@@ -194,6 +200,7 @@ def main() -> None:
         aux_target_names=config.dataset.aux_target_names,
         target_transforms=config.dataset.target_transforms,
         state_input_config=config.state_inputs,
+        include_failed_or_nonparking_trips=config.dataset.include_failed_or_nonparking_trips,
     )
     if len(dataset) <= 0:
         raise ValueError(f"Dataset is empty for run_path={run_path}")
@@ -253,9 +260,16 @@ def main() -> None:
         },
         "metadata": {
             "planner_format": PLANNER_FORMAT,
+            "planner_format_version": PLANNER_FORMAT_VERSION,
             "image_offsets": list(config.dataset.image_offsets),
             "telemetry_offsets": list(config.dataset.telemetry_offsets),
             "future_offsets": list(config.dataset.future_offsets),
+            "telemetry_sample_interval_ms": config.dataset.telemetry_sample_interval_ms,
+            "control_horizon_dt_ms": list(derive_control_horizon_dt_ms(
+                config.dataset.future_offsets,
+                config.dataset.telemetry_sample_interval_ms,
+            )),
+            "control_contract": control_contract_metadata(),
             "telemetry_feature_names": list(config.dataset.telemetry_feature_names),
             "control_target_names": list(config.dataset.control_target_names),
             "aux_target_names": list(config.dataset.aux_target_names),

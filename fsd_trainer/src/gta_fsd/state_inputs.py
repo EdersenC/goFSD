@@ -12,6 +12,11 @@ CURRENT_SPEED_KEY = "current_speed"
 ROUTE_FORWARD_DELTA_KEY = "route_forward_delta"
 ROUTE_HEADING_ERROR_KEY = "route_heading_error"
 ROUTE_DISTANCE_KEY = "route_distance"
+PARKING_TARGET_CONFIGURED_KEY = "parking_target_configured"
+PARKING_LONGITUDINAL_ERROR_KEY = "parking_longitudinal_error"
+PARKING_LATERAL_ERROR_KEY = "parking_lateral_error"
+PARKING_HEADING_ERROR_KEY = "parking_heading_error"
+PARKING_DISTANCE_KEY = "parking_distance"
 LEAD_VEHICLE_DISTANCE_KEY = "lead_vehicle_distance"
 HAS_LEAD_VEHICLE_KEY = "has_lead_vehicle"
 ROUTE_DIRECTION_UNKNOWN_KEY = "route_direction_unknown"
@@ -24,6 +29,10 @@ DEFAULT_CURRENT_SPEED_CAP = 25.0
 DEFAULT_ROUTE_FORWARD_DELTA_CAP = 1.5
 DEFAULT_ROUTE_HEADING_ERROR_CAP = 180.0
 DEFAULT_ROUTE_DISTANCE_CAP = 100.0
+DEFAULT_PARKING_LONGITUDINAL_ERROR_CAP = 15.0
+DEFAULT_PARKING_LATERAL_ERROR_CAP = 8.0
+DEFAULT_PARKING_HEADING_ERROR_CAP = 90.0
+DEFAULT_PARKING_DISTANCE_CAP = 20.0
 DEFAULT_LEAD_VEHICLE_DISTANCE_CAP = 100.0
 DEFAULT_WIDTH_MULTIPLIER = 1.5
 
@@ -77,6 +86,51 @@ STATE_INPUT_DEFINITIONS: tuple[StateInputDefinition, ...] = (
         normalization=NORMALIZATION_POSITIVE_CAP,
         default_cap=DEFAULT_ROUTE_DISTANCE_CAP,
         default_enabled=False,
+    ),
+    StateInputDefinition(
+        key=PARKING_TARGET_CONFIGURED_KEY,
+        camel_key="parkingTargetConfigured",
+        label_key="parkingTargetConfigured",
+        normalization=NORMALIZATION_BINARY,
+        default_cap=None,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=PARKING_LONGITUDINAL_ERROR_KEY,
+        camel_key="parkingLongitudinalError",
+        label_key="parkingLongitudinalError",
+        normalization=NORMALIZATION_SIGNED_CAP,
+        default_cap=DEFAULT_PARKING_LONGITUDINAL_ERROR_CAP,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=PARKING_LATERAL_ERROR_KEY,
+        camel_key="parkingLateralError",
+        label_key="parkingLateralError",
+        normalization=NORMALIZATION_SIGNED_CAP,
+        default_cap=DEFAULT_PARKING_LATERAL_ERROR_CAP,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=PARKING_HEADING_ERROR_KEY,
+        camel_key="parkingHeadingError",
+        label_key="parkingHeadingError",
+        normalization=NORMALIZATION_SIGNED_CAP,
+        default_cap=DEFAULT_PARKING_HEADING_ERROR_CAP,
+        default_enabled=False,
+        planner_fused_only=True,
+    ),
+    StateInputDefinition(
+        key=PARKING_DISTANCE_KEY,
+        camel_key="parkingDistance",
+        label_key="parkingDistance",
+        normalization=NORMALIZATION_POSITIVE_CAP,
+        default_cap=DEFAULT_PARKING_DISTANCE_CAP,
+        default_enabled=False,
+        planner_fused_only=True,
     ),
     StateInputDefinition(
         key=LEAD_VEHICLE_DISTANCE_KEY,

@@ -9,10 +9,15 @@ from typing import Any, Iterable
 
 import torch
 
+from control_contract import (
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    control_contract_metadata,
+    resolve_checkpoint_control_horizon_dt_ms,
+)
 from dataset import FsdDataset
 from inference import (
     DEFAULT_CONFIG_PATH,
-    PLANNER_FORMAT,
     build_model,
     checkpoint_sample_stride,
     load_checkpoint,
@@ -392,11 +397,15 @@ def build_output(
             "device": str(device),
             "epoch": int(checkpoint.get("epoch", 0) or 0),
             "planner_format": PLANNER_FORMAT,
+            "planner_format_version": PLANNER_FORMAT_VERSION,
+            "control_contract": control_contract_metadata(),
             "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
             "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
             "sample_stride": checkpoint_sample_stride(checkpoint),
             "input_channels": int(checkpoint.get("input_channels", 0) or 0),
             "future_offsets": list(future_offsets),
+            "telemetry_sample_interval_ms": int(checkpoint["telemetry_sample_interval_ms"]),
+            "control_horizon_dt_ms": list(resolve_checkpoint_control_horizon_dt_ms(checkpoint)),
             "telemetry_feature_names": list(checkpoint.get("telemetry_feature_names", [])),
             "control_target_names": list(control_target_names),
             "aux_target_names": list(aux_target_names),

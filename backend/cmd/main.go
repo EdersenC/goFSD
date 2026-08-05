@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,14 +22,13 @@ import (
 	"awesomeProject/internal/capture"
 	"awesomeProject/internal/control"
 	datasetproc "awesomeProject/internal/dataset"
-	"awesomeProject/internal/translation"
 )
 
 //go:embed web/index.html web/app.ts
 var webAssets embed.FS
 
 func main() {
-	const backendBuildID = "2026-04-21-capture-failfast-v1"
+	const backendBuildID = "2026-08-04-parking-lab-v1"
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "process-runs":
@@ -60,10 +60,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load backend actuator config: %v", err)
 	}
-	translationConfig, err := translation.LoadConfig(configPath)
-	if err != nil {
-		log.Fatalf("failed to load backend translation config: %v", err)
-	}
 	datasetConfig, err := capture.LoadDatasetConfig(configPath)
 	if err != nil {
 		log.Fatalf("failed to load dataset frame-window config: %v", err)
@@ -72,12 +68,11 @@ func main() {
 	svc := capture.NewService()
 	controlStore := control.NewStore()
 	actuatorService := actuator.NewService(actuatorConfig, configPath, controlStore)
-	translationService := translation.NewService(translationConfig, configPath, actuatorService)
 	inferencer := capture.NewInferencer(inferenceConfig, actuatorConfig, controlStore, actuatorService)
 	trainingProxyBaseURL := strings.TrimRight(strings.TrimSpace(inferenceConfig.ModelServerURL), "/")
 	trainingProxyClient := &http.Client{Timeout: inferenceConfig.RequestTimeout}
 	if err := actuatorService.Start(); err != nil {
-		log.Fatalf("failed to start virtual controller actuator: %v", err)
+		log.Printf("virtual controller actuator unavailable; expert collection remains available: %v", err)
 	}
 	defer func() {
 		if err := actuatorService.Close(); err != nil {
@@ -88,6 +83,7 @@ func main() {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
+		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
 		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)
@@ -181,6 +177,10 @@ func main() {
 		}
 		res, err := inferencer.LoadModel(r.Context(), req)
 		if err != nil {
+			if errors.Is(err, capture.ErrInferenceAlreadyRunning) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -342,66 +342,6 @@ func main() {
 		}
 
 		writeJSON(w, http.StatusOK, actuatorService.ResetTuning())
-	})
-
-	mux.HandleFunc("/translation/state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		writeJSON(w, http.StatusOK, translationService.State())
-	})
-
-	mux.HandleFunc("/translation/tuning", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, translationService.TuningState())
-	})
-
-	mux.HandleFunc("/translation/tuning/apply", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		var req translation.Tuning
-		if err := decodeJSONBody(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		state, err := translationService.ApplyTuning(req)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, state)
-	})
-
-	mux.HandleFunc("/translation/tuning/save", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		state, err := translationService.SaveTuning()
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, state)
-	})
-
-	mux.HandleFunc("/translation/tuning/reset", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, translationService.ResetTuning())
 	})
 
 	mux.HandleFunc("/control/state", func(w http.ResponseWriter, r *http.Request) {
@@ -680,12 +620,7 @@ func main() {
 		})
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	addr := ":" + port
+	addr := backendListenAddress(os.Getenv("HOST"), os.Getenv("PORT"))
 	log.Printf("capture API listening on %s", addr)
 	server := &http.Server{
 		Addr:    addr,
@@ -862,6 +797,7 @@ func runProcessRuns(args []string) error {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
+		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
 		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)
@@ -1033,4 +969,16 @@ func defaultBackendDataRoot() string {
 		return `S:\fsd_fivem_data`
 	}
 	return "/mnt/s/fsd_fivem_data"
+}
+
+func backendListenAddress(host string, port string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		port = "8080"
+	}
+	return net.JoinHostPort(host, port)
 }

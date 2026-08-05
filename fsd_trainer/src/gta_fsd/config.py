@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
+
+from control_contract import (
+    DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    PARKING_CONTROL_TARGET_NAMES,
+    require_parking_control_target_names,
+)
 
 DEFAULT_IMAGE_WIDTH = 480
 DEFAULT_IMAGE_HEIGHT = 480
@@ -20,13 +27,14 @@ DEFAULT_TELEMETRY_FEATURE_NAMES = (
     "steering",
     "acceleration",
 )
-DEFAULT_CONTROL_TARGET_NAMES = ("steering", "acceleration", "brakePressureAvg")
+DEFAULT_CONTROL_TARGET_NAMES = PARKING_CONTROL_TARGET_NAMES
 DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate")
 DEFAULT_AUX_LOSS_WEIGHT = 0.3
 DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
 DEFAULT_LOSS_FUNCTION = "smooth_l1"
 DEFAULT_SMOOTH_L1_BETA = 0.1
 DEFAULT_TELEMETRY_HIDDEN_DIM = 128
+DATA_ROOT_ENV = "FSD_DATA_ROOT"
 
 
 def normalize_windows_drive_path(value: str) -> str:
@@ -41,6 +49,42 @@ def normalize_windows_drive_path(value: str) -> str:
         rest = cleaned[2:].replace("\\", "/")
         return f"/mnt/{drive}{rest}"
     return cleaned
+
+
+def environment_data_root() -> str | None:
+    raw_value = os.environ.get(DATA_ROOT_ENV, "").strip()
+    if not raw_value:
+        return None
+    return normalize_windows_drive_path(raw_value)
+
+
+def resolve_optional_data_root(configured_value: Any = None) -> str | None:
+    override = environment_data_root()
+    if override:
+        return override
+    if configured_value is None:
+        return None
+    resolved = normalize_windows_drive_path(str(configured_value))
+    return resolved or None
+
+
+def resolve_data_root(configured_value: Any) -> str:
+    resolved = resolve_optional_data_root(configured_value)
+    if not resolved:
+        raise ValueError("dataset.data_root must be configured or FSD_DATA_ROOT must be set")
+    return resolved
+
+
+def resolve_data_root_child(configured_value: Any, child_name: str) -> str:
+    override = environment_data_root()
+    if override:
+        return str(Path(override) / child_name)
+    if configured_value is None:
+        raise ValueError(f"path must be configured or FSD_DATA_ROOT must be set for {child_name}")
+    resolved = normalize_windows_drive_path(str(configured_value))
+    if not resolved:
+        raise ValueError(f"path must be configured or FSD_DATA_ROOT must be set for {child_name}")
+    return resolved
 
 
 def validate_frame_window(window_size: int, frame_stride: int, sample_stride: int, *, prefix: str = "dataset") -> None:
@@ -137,6 +181,10 @@ def parse_temporal_dataset_config(
         dataset_raw.get("control_target_names", list(DEFAULT_CONTROL_TARGET_NAMES)),
         key="dataset.control_target_names",
     )
+    require_parking_control_target_names(
+        control_target_names,
+        source="dataset.control_target_names",
+    )
     aux_target_names = _parse_name_list(
         dataset_raw.get("aux_target_names", list(DEFAULT_AUX_TARGET_NAMES)),
         key="dataset.aux_target_names",
@@ -150,3 +198,19 @@ def parse_temporal_dataset_config(
         aux_target_names,
     )
 
+
+def parse_telemetry_sample_interval_ms(raw: dict[str, Any]) -> int:
+    dataset_raw = raw.get("dataset", {})
+    raw_value = dataset_raw.get(
+        "telemetry_sample_interval_ms",
+        DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    )
+    if isinstance(raw_value, bool):
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer")
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer") from exc
+    if not numeric.is_integer() or numeric <= 0:
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer")
+    return int(numeric)

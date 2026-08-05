@@ -14,12 +14,21 @@ var ErrInvalidCommand = errors.New("invalid control command")
 type CommandType string
 
 const (
-	CommandStartScene   CommandType = "startScene"
-	CommandRunAllScenes CommandType = "runAllScenes"
-	CommandEndScene     CommandType = "endScene"
-	CommandEndAllScenes CommandType = "endAllScenes"
-	CommandStartEgo     CommandType = "startEgo"
-	CommandStopEgo      CommandType = "stopEgo"
+	CommandStartScene               CommandType = "startScene"
+	CommandRunAllScenes             CommandType = "runAllScenes"
+	CommandEndScene                 CommandType = "endScene"
+	CommandEndAllScenes             CommandType = "endAllScenes"
+	CommandStartEgo                 CommandType = "startEgo"
+	CommandStopEgo                  CommandType = "stopEgo"
+	CommandSetParkingTarget         CommandType = "setParkingTarget"
+	CommandClearParkingTarget       CommandType = "clearParkingTarget"
+	CommandPrepareParkingEvaluation CommandType = "prepareParkingEvaluation"
+	CommandStartParkingRun          CommandType = "startParkingRun"
+)
+
+const (
+	maximumParkingAttemptCount = 50
+	parkingPhaseIdle           = "idle"
 )
 
 type RuntimeStatus string
@@ -33,15 +42,19 @@ const (
 )
 
 type Command struct {
-	ID        string      `json:"id"`
-	Type      CommandType `json:"type"`
-	SceneName string      `json:"sceneName,omitempty"`
-	CreatedAt string      `json:"createdAt"`
+	ID           string      `json:"id"`
+	Type         CommandType `json:"type"`
+	SceneName    string      `json:"sceneName,omitempty"`
+	AttemptCount int         `json:"attemptCount,omitempty"`
+	Seed         string      `json:"seed,omitempty"`
+	CreatedAt    string      `json:"createdAt"`
 }
 
 type CommandRequest struct {
-	Type      CommandType `json:"type"`
-	SceneName string      `json:"sceneName,omitempty"`
+	Type         CommandType `json:"type"`
+	SceneName    string      `json:"sceneName,omitempty"`
+	AttemptCount int         `json:"attemptCount,omitempty"`
+	Seed         string      `json:"seed,omitempty"`
 }
 
 type StatusUpdate struct {
@@ -59,6 +72,7 @@ type TelemetryUpdate struct {
 	BrakePressureAvg              float64  `json:"brakePressureAvg"`
 	VehicleExists                 bool     `json:"vehicleExists"`
 	IsInVehicle                   bool     `json:"isInVehicle"`
+	VehicleModelHash              int64    `json:"vehicleModelHash"`
 	PositionX                     *float64 `json:"positionX,omitempty"`
 	PositionY                     *float64 `json:"positionY,omitempty"`
 	PositionZ                     *float64 `json:"positionZ,omitempty"`
@@ -73,6 +87,7 @@ type TelemetryUpdate struct {
 	Gear                          *int     `json:"gear,omitempty"`
 	RPM                           *float64 `json:"rpm,omitempty"`
 	WheelAngle                    *float64 `json:"wheelAngle,omitempty"`
+	WheelSteeringFullLock         *float64 `json:"wheelSteeringFullLock,omitempty"`
 	OnGround                      *bool    `json:"onGround,omitempty"`
 	CollisionState                string   `json:"collisionState,omitempty"`
 	RouteDirectionCode            float64  `json:"routeDirectionCode"`
@@ -87,6 +102,17 @@ type TelemetryUpdate struct {
 	RouteDistance                 float64  `json:"routeDistance"`
 	LeadVehicleDistance           float64  `json:"leadVehicleDistance"`
 	HasLeadVehicle                bool     `json:"hasLeadVehicle"`
+	ParkingTargetConfigured       bool     `json:"parkingTargetConfigured"`
+	ParkingLongitudinalError      float64  `json:"parkingLongitudinalError"`
+	ParkingLateralError           float64  `json:"parkingLateralError"`
+	ParkingHeadingError           float64  `json:"parkingHeadingError"`
+	ParkingDistance               float64  `json:"parkingDistance"`
+	ParkingInsideBay              bool     `json:"parkingInsideBay"`
+	ParkingAligned                bool     `json:"parkingAligned"`
+	ParkingParked                 bool     `json:"parkingParked"`
+	ParkingAttemptIndex           int      `json:"parkingAttemptIndex"`
+	ParkingAttemptCount           int      `json:"parkingAttemptCount"`
+	ParkingPhase                  string   `json:"parkingPhase"`
 	TimestampMs                   int64    `json:"timestampMs,omitempty"`
 	GameTimeMs                    int64    `json:"gameTimeMs,omitempty"`
 }
@@ -100,6 +126,7 @@ type RuntimeTelemetry struct {
 	BrakePressureAvg              float64  `json:"brakePressureAvg"`
 	VehicleExists                 bool     `json:"vehicleExists"`
 	IsInVehicle                   bool     `json:"isInVehicle"`
+	VehicleModelHash              int64    `json:"vehicleModelHash"`
 	PositionX                     *float64 `json:"positionX,omitempty"`
 	PositionY                     *float64 `json:"positionY,omitempty"`
 	PositionZ                     *float64 `json:"positionZ,omitempty"`
@@ -114,6 +141,7 @@ type RuntimeTelemetry struct {
 	Gear                          *int     `json:"gear,omitempty"`
 	RPM                           *float64 `json:"rpm,omitempty"`
 	WheelAngle                    *float64 `json:"wheelAngle,omitempty"`
+	WheelSteeringFullLock         *float64 `json:"wheelSteeringFullLock,omitempty"`
 	OnGround                      *bool    `json:"onGround,omitempty"`
 	CollisionState                string   `json:"collisionState,omitempty"`
 	RouteDirectionCode            float64  `json:"routeDirectionCode"`
@@ -128,6 +156,17 @@ type RuntimeTelemetry struct {
 	RouteDistance                 float64  `json:"routeDistance"`
 	LeadVehicleDistance           float64  `json:"leadVehicleDistance"`
 	HasLeadVehicle                bool     `json:"hasLeadVehicle"`
+	ParkingTargetConfigured       bool     `json:"parkingTargetConfigured"`
+	ParkingLongitudinalError      float64  `json:"parkingLongitudinalError"`
+	ParkingLateralError           float64  `json:"parkingLateralError"`
+	ParkingHeadingError           float64  `json:"parkingHeadingError"`
+	ParkingDistance               float64  `json:"parkingDistance"`
+	ParkingInsideBay              bool     `json:"parkingInsideBay"`
+	ParkingAligned                bool     `json:"parkingAligned"`
+	ParkingParked                 bool     `json:"parkingParked"`
+	ParkingAttemptIndex           int      `json:"parkingAttemptIndex"`
+	ParkingAttemptCount           int      `json:"parkingAttemptCount"`
+	ParkingPhase                  string   `json:"parkingPhase"`
 	TimestampMs                   int64    `json:"timestampMs,omitempty"`
 	GameTimeMs                    int64    `json:"gameTimeMs,omitempty"`
 	ReceivedAtMs                  int64    `json:"receivedAtMs,omitempty"`
@@ -218,8 +257,9 @@ func WithNowFunc(now func() time.Time) Option {
 func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 	commandType := normalizeCommandType(req.Type)
 	sceneName := strings.TrimSpace(req.SceneName)
+	seed := strings.TrimSpace(req.Seed)
 
-	if err := validateCommand(commandType, sceneName); err != nil {
+	if err := validateCommand(commandType, sceneName, req.AttemptCount); err != nil {
 		return Command{}, err
 	}
 
@@ -229,10 +269,12 @@ func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 	s.commandSeq++
 	now := s.nowFunc()
 	command := Command{
-		ID:        fmt.Sprintf("cmd-%d-%d", now.UTC().UnixNano(), s.commandSeq),
-		Type:      commandType,
-		SceneName: sceneName,
-		CreatedAt: now.Format(time.RFC3339),
+		ID:           fmt.Sprintf("cmd-%d-%d", now.UTC().UnixNano(), s.commandSeq),
+		Type:         commandType,
+		SceneName:    sceneName,
+		AttemptCount: req.AttemptCount,
+		Seed:         seed,
+		CreatedAt:    now.Format(time.RFC3339),
 	}
 
 	s.commands = append(s.commands, command)
@@ -344,6 +386,7 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		BrakePressureAvg:              update.BrakePressureAvg,
 		VehicleExists:                 update.VehicleExists,
 		IsInVehicle:                   update.IsInVehicle,
+		VehicleModelHash:              update.VehicleModelHash,
 		PositionX:                     cloneFloatPtr(update.PositionX),
 		PositionY:                     cloneFloatPtr(update.PositionY),
 		PositionZ:                     cloneFloatPtr(update.PositionZ),
@@ -358,6 +401,7 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		Gear:                          cloneIntPtr(update.Gear),
 		RPM:                           cloneFloatPtr(update.RPM),
 		WheelAngle:                    cloneFloatPtr(update.WheelAngle),
+		WheelSteeringFullLock:         cloneFloatPtr(update.WheelSteeringFullLock),
 		OnGround:                      cloneBoolPtr(update.OnGround),
 		CollisionState:                update.CollisionState,
 		RouteDirectionCode:            update.RouteDirectionCode,
@@ -372,6 +416,17 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		RouteDistance:                 update.RouteDistance,
 		LeadVehicleDistance:           update.LeadVehicleDistance,
 		HasLeadVehicle:                update.HasLeadVehicle,
+		ParkingTargetConfigured:       update.ParkingTargetConfigured,
+		ParkingLongitudinalError:      update.ParkingLongitudinalError,
+		ParkingLateralError:           update.ParkingLateralError,
+		ParkingHeadingError:           update.ParkingHeadingError,
+		ParkingDistance:               update.ParkingDistance,
+		ParkingInsideBay:              update.ParkingInsideBay,
+		ParkingAligned:                update.ParkingAligned,
+		ParkingParked:                 update.ParkingParked,
+		ParkingAttemptIndex:           update.ParkingAttemptIndex,
+		ParkingAttemptCount:           update.ParkingAttemptCount,
+		ParkingPhase:                  normalizeParkingPhase(update.ParkingPhase),
 		TimestampMs:                   update.TimestampMs,
 		GameTimeMs:                    update.GameTimeMs,
 		ReceivedAtMs:                  now.UnixMilli(),
@@ -386,7 +441,7 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 	s.actuatorEgo = &actuatorEgo
 	s.temporalHistory.Add(snapshot, actuatorEgo, s.lastAppliedControls)
 	s.telemetryUpdatedAt = now
-	s.telemetryHistory = append(s.telemetryHistory, *s.telemetry)
+	s.telemetryHistory = append(s.telemetryHistory, cloneRuntimeTelemetry(*s.telemetry))
 	if len(s.telemetryHistory) > s.telemetryLimit {
 		s.telemetryHistory = append([]RuntimeTelemetry(nil), s.telemetryHistory[len(s.telemetryHistory)-s.telemetryLimit:]...)
 	}
@@ -419,7 +474,7 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		)
 		s.lastTelemetryLogAt = now
 	}
-	copyTelemetry := *s.telemetry
+	copyTelemetry := cloneRuntimeTelemetry(*s.telemetry)
 	return &copyTelemetry
 }
 
@@ -480,7 +535,9 @@ func (s *Store) TelemetryHistorySnapshot(limit int) []RuntimeTelemetry {
 	}
 	start := len(s.telemetryHistory) - limit
 	out := make([]RuntimeTelemetry, limit)
-	copy(out, s.telemetryHistory[start:])
+	for index, telemetry := range s.telemetryHistory[start:] {
+		out[index] = cloneRuntimeTelemetry(telemetry)
+	}
 	return out
 }
 
@@ -523,23 +580,29 @@ func (s *Store) telemetryLocked() *RuntimeTelemetry {
 	if s.telemetry == nil {
 		return nil
 	}
-	copyTelemetry := *s.telemetry
-	copyTelemetry.PositionX = cloneFloatPtr(s.telemetry.PositionX)
-	copyTelemetry.PositionY = cloneFloatPtr(s.telemetry.PositionY)
-	copyTelemetry.PositionZ = cloneFloatPtr(s.telemetry.PositionZ)
-	copyTelemetry.VelocityX = cloneFloatPtr(s.telemetry.VelocityX)
-	copyTelemetry.VelocityY = cloneFloatPtr(s.telemetry.VelocityY)
-	copyTelemetry.VelocityZ = cloneFloatPtr(s.telemetry.VelocityZ)
-	copyTelemetry.PitchDeg = cloneFloatPtr(s.telemetry.PitchDeg)
-	copyTelemetry.RollDeg = cloneFloatPtr(s.telemetry.RollDeg)
-	copyTelemetry.SteeringApplied = cloneFloatPtr(s.telemetry.SteeringApplied)
-	copyTelemetry.ThrottleApplied = cloneFloatPtr(s.telemetry.ThrottleApplied)
-	copyTelemetry.BrakeApplied = cloneFloatPtr(s.telemetry.BrakeApplied)
-	copyTelemetry.Gear = cloneIntPtr(s.telemetry.Gear)
-	copyTelemetry.RPM = cloneFloatPtr(s.telemetry.RPM)
-	copyTelemetry.WheelAngle = cloneFloatPtr(s.telemetry.WheelAngle)
-	copyTelemetry.OnGround = cloneBoolPtr(s.telemetry.OnGround)
+	copyTelemetry := cloneRuntimeTelemetry(*s.telemetry)
 	return &copyTelemetry
+}
+
+func cloneRuntimeTelemetry(source RuntimeTelemetry) RuntimeTelemetry {
+	clone := source
+	clone.PositionX = cloneFloatPtr(source.PositionX)
+	clone.PositionY = cloneFloatPtr(source.PositionY)
+	clone.PositionZ = cloneFloatPtr(source.PositionZ)
+	clone.VelocityX = cloneFloatPtr(source.VelocityX)
+	clone.VelocityY = cloneFloatPtr(source.VelocityY)
+	clone.VelocityZ = cloneFloatPtr(source.VelocityZ)
+	clone.PitchDeg = cloneFloatPtr(source.PitchDeg)
+	clone.RollDeg = cloneFloatPtr(source.RollDeg)
+	clone.SteeringApplied = cloneFloatPtr(source.SteeringApplied)
+	clone.ThrottleApplied = cloneFloatPtr(source.ThrottleApplied)
+	clone.BrakeApplied = cloneFloatPtr(source.BrakeApplied)
+	clone.Gear = cloneIntPtr(source.Gear)
+	clone.RPM = cloneFloatPtr(source.RPM)
+	clone.WheelAngle = cloneFloatPtr(source.WheelAngle)
+	clone.WheelSteeringFullLock = cloneFloatPtr(source.WheelSteeringFullLock)
+	clone.OnGround = cloneBoolPtr(source.OnGround)
+	return clone
 }
 
 func (s *Store) egoTelemetryLocked() *EgoTelemetrySnapshot {
@@ -578,13 +641,18 @@ func (s *Store) nextCommandIndexLocked(lastSeenCommandID string) int {
 	return 0
 }
 
-func validateCommand(commandType CommandType, sceneName string) error {
+func validateCommand(commandType CommandType, sceneName string, attemptCount int) error {
 	switch commandType {
 	case CommandStartScene:
 		if sceneName == "" {
 			return fmt.Errorf("%w: sceneName is required for %s", ErrInvalidCommand, commandType)
 		}
-	case CommandStartEgo, CommandRunAllScenes, CommandEndScene, CommandEndAllScenes, CommandStopEgo:
+	case CommandStartParkingRun:
+		if attemptCount < 1 || attemptCount > maximumParkingAttemptCount {
+			return fmt.Errorf("%w: attemptCount must be between 1 and %d for %s", ErrInvalidCommand, maximumParkingAttemptCount, commandType)
+		}
+	case CommandStartEgo, CommandRunAllScenes, CommandEndScene, CommandEndAllScenes, CommandStopEgo,
+		CommandSetParkingTarget, CommandClearParkingTarget, CommandPrepareParkingEvaluation:
 	default:
 		return fmt.Errorf("%w: unsupported command type %q", ErrInvalidCommand, commandType)
 	}
@@ -594,6 +662,14 @@ func validateCommand(commandType CommandType, sceneName string) error {
 
 func normalizeCommandType(commandType CommandType) CommandType {
 	return CommandType(strings.TrimSpace(string(commandType)))
+}
+
+func normalizeParkingPhase(phase string) string {
+	phase = strings.TrimSpace(phase)
+	if phase == "" {
+		return parkingPhaseIdle
+	}
+	return phase
 }
 
 func normalizeStatus(status RuntimeStatus) RuntimeStatus {

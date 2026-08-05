@@ -1,0 +1,132 @@
+{
+  "folders": [
+    {
+      "name": "GTA Parking Lab",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/dist": true,
+      "**/node_modules": true
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "typescript.tsdk": "fivem/node_modules/typescript/lib"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Parking Lab: Doctor",
+        "type": "shell",
+        "command": "bash",
+        "args": ["scripts/doctor.sh"],
+        "problemMatcher": []
+      },
+      {
+        "label": "FiveM: Install dependencies",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "install"],
+        "problemMatcher": []
+      },
+      {
+        "label": "FiveM: Build",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "run", "build"],
+        "detail": "Build repository-local dist files only; does not change the live FiveM resource.",
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": ["$tsc"]
+      },
+      {
+        "label": "FiveM: Check deploy target",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "run", "deploy:check"],
+        "options": {
+          "env": {
+            "FIVEM_RESOURCE_DIR": "${input:fivemResourceDir}"
+          }
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "FiveM: Build and deploy resource",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "run", "build:deploy"],
+        "options": {
+          "env": {
+            "FIVEM_RESOURCE_DIR": "${input:fivemResourceDir}"
+          }
+        },
+        "detail": "Build locally, then copy client.js, server.js, and fxmanifest.lua into the validated resource directory.",
+        "problemMatcher": []
+      },
+      {
+        "label": "FiveM: Watch",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "run", "watch"],
+        "detail": "Watch repository-local dist files only; does not change the live FiveM resource.",
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "FiveM: Watch and deploy resource",
+        "type": "shell",
+        "command": "npm",
+        "args": ["--prefix", "fivem", "run", "watch:deploy"],
+        "options": {
+          "env": {
+            "FIVEM_RESOURCE_DIR": "${input:fivemResourceDir}"
+          }
+        },
+        "detail": "Watch local bundles and copy each successful build plus the manifest into the validated resource directory.",
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "Backend: Run (Windows bridge)",
+        "type": "shell",
+        "command": "bash",
+        "args": ["scripts/dev-backend.sh"],
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "Model server: Run",
+        "type": "shell",
+        "command": "bash",
+        "args": ["scripts/dev-model-server.sh"],
+        "isBackground": true,
+        "problemMatcher": []
+      },
+      {
+        "label": "Parking Lab: Validate",
+        "type": "shell",
+        "command": "bash",
+        "args": ["scripts/validate.sh"],
+        "group": {
+          "kind": "test",
+          "isDefault": true
+        },
+        "problemMatcher": []
+      }
+    ],
+    "inputs": [
+      {
+        "id": "fivemResourceDir",
+        "type": "promptString",
+        "description": "Absolute path to the existing FiveM FSD resource directory",
+        "default": "/home/eddy/Fivem/data/cfx-server-data/resources/FSD"
+      }
+    ]
+  }
+}
