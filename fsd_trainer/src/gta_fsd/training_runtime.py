@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from config import environment_data_root, resolve_data_root_child
+from control_contract import PARKING_CONTROL_TARGET_NAMES
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
     STATE_INPUT_DEFINITIONS,
@@ -25,9 +26,7 @@ from state_inputs import (
 
 
 ALLOWED_LOSS_WEIGHT_KEYS = [
-    "steering",
-    "acceleration",
-    "brakePressureAvg",
+    *PARKING_CONTROL_TARGET_NAMES,
     "future_speed",
     "future_speed_delta",
     "future_yaw_delta",
@@ -41,16 +40,16 @@ ALLOWED_EARLY_STOPPING_METRICS = [
     "aux_loss",
     "control_mae_overall",
     "aux_mae_overall",
-    "steering_loss",
-    "acceleration_loss",
-    "brakePressureAvg_loss",
+    "desired_wheel_steer_normalized_loss",
+    "desired_speed_mps_loss",
+    "stop_probability_loss",
     "future_speed_loss",
     "future_speed_delta_loss",
     "future_yaw_delta_loss",
     "future_yaw_rate_loss",
-    "steering_mae",
-    "acceleration_mae",
-    "brakePressureAvg_mae",
+    "desired_wheel_steer_normalized_mae",
+    "desired_speed_mps_mae",
+    "stop_probability_mae",
     "future_speed_mae",
     "future_speed_delta_mae",
     "future_yaw_delta_mae",

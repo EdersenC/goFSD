@@ -8,9 +8,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"awesomeProject/internal/parkingcontrol"
 )
 
 var ErrParkingModelIncompatible = errors.New("model is not compatible with parking inference")
+
+const requiredParkingPlannerFormatVersion = 2
 
 var requiredParkingStateInputs = []string{
 	"current_speed",
@@ -21,24 +25,38 @@ var requiredParkingStateInputs = []string{
 }
 
 var requiredParkingControlHeads = []string{
-	"steering",
-	"acceleration",
-	"brakePressureAvg",
+	"desired_wheel_steer_normalized",
+	"desired_speed_mps",
+	"stop_probability",
+}
+
+type parkingControlContract struct {
+	Name              string               `json:"name"`
+	Version           int                  `json:"version"`
+	Direction         string               `json:"direction"`
+	Targets           []string             `json:"targets"`
+	OutputActivations map[string]string    `json:"output_activations"`
+	OutputRanges      map[string][]float64 `json:"output_ranges"`
 }
 
 type parkingModelStatus struct {
-	Loaded             bool                             `json:"loaded"`
-	Checkpoint         string                           `json:"checkpoint"`
-	PlannerFormat      string                           `json:"planner_format"`
-	ImageSize          parkingModelImageSize            `json:"image_size"`
-	FrameWindow        parkingModelFrameWindow          `json:"frame_window"`
-	ImageOffsets       []int                            `json:"image_offsets"`
-	TelemetryOffsets   []int                            `json:"telemetry_offsets"`
-	FutureOffsets      []int                            `json:"future_offsets"`
-	TelemetryFeatures  []string                         `json:"telemetry_feature_names"`
-	ControlTargetNames []string                         `json:"control_target_names"`
-	AuxTargetNames     []string                         `json:"aux_target_names"`
-	StateInputs        map[string]parkingModelInputSpec `json:"state_inputs"`
+	Loaded                    bool                             `json:"loaded"`
+	Checkpoint                string                           `json:"checkpoint"`
+	PlannerFormat             string                           `json:"planner_format"`
+	PlannerFormatVersion      int                              `json:"planner_format_version"`
+	ControlContract           parkingControlContract           `json:"control_contract"`
+	ControlHorizonDtMs        []int                            `json:"control_horizon_dt_ms"`
+	TelemetrySampleIntervalMs int                              `json:"telemetry_sample_interval_ms"`
+	Direction                 string                           `json:"direction"`
+	ImageSize                 parkingModelImageSize            `json:"image_size"`
+	FrameWindow               parkingModelFrameWindow          `json:"frame_window"`
+	ImageOffsets              []int                            `json:"image_offsets"`
+	TelemetryOffsets          []int                            `json:"telemetry_offsets"`
+	FutureOffsets             []int                            `json:"future_offsets"`
+	TelemetryFeatures         []string                         `json:"telemetry_feature_names"`
+	ControlTargetNames        []string                         `json:"control_target_names"`
+	AuxTargetNames            []string                         `json:"aux_target_names"`
+	StateInputs               map[string]parkingModelInputSpec `json:"state_inputs"`
 }
 
 type parkingModelImageSize struct {
@@ -98,6 +116,21 @@ func (i *Inferencer) validateParkingPredictionModel(prediction pythonPredictResp
 	if strings.TrimSpace(prediction.PlannerFormat) != strings.TrimSpace(i.config.PlannerFormat) {
 		return parkingModelCompatibilityError("prediction planner format changed while inference was active")
 	}
+	if prediction.PlannerFormatVersion != requiredParkingPlannerFormatVersion {
+		return parkingModelCompatibilityError("prediction planner format version must be %d, got=%d", requiredParkingPlannerFormatVersion, prediction.PlannerFormatVersion)
+	}
+	if err := validateParkingControlContract(prediction.ControlContract); err != nil {
+		return err
+	}
+	if strings.TrimSpace(prediction.Direction) != parkingcontrol.ParkingDirectionForward {
+		return parkingModelCompatibilityError("prediction direction must be %q", parkingcontrol.ParkingDirectionForward)
+	}
+	if prediction.TelemetrySampleIntervalMs != int(i.config.TelemetrySampleInterval.Milliseconds()) {
+		return parkingModelCompatibilityError("prediction telemetry sample interval must be %dms, got=%dms", i.config.TelemetrySampleInterval.Milliseconds(), prediction.TelemetrySampleIntervalMs)
+	}
+	if err := validateOrderedInts("prediction control horizon timing", prediction.ControlHorizonDtMs, i.config.ControlHorizonDtMs); err != nil {
+		return err
+	}
 	if err := validateOrderedStrings("prediction control heads", prediction.ControlTargetNames, i.config.ControlOutputNames); err != nil {
 		return err
 	}
@@ -132,6 +165,21 @@ func validateParkingModelStatus(status parkingModelStatus, expected InferenceCon
 			plannerFormat,
 			strings.TrimSpace(expected.PlannerFormat),
 		)
+	}
+	if status.PlannerFormatVersion != requiredParkingPlannerFormatVersion {
+		return parkingModelCompatibilityError("checkpoint planner format version must be %d, got=%d", requiredParkingPlannerFormatVersion, status.PlannerFormatVersion)
+	}
+	if err := validateParkingControlContract(status.ControlContract); err != nil {
+		return err
+	}
+	if strings.TrimSpace(status.Direction) != parkingcontrol.ParkingDirectionForward {
+		return parkingModelCompatibilityError("checkpoint direction must be %q", parkingcontrol.ParkingDirectionForward)
+	}
+	if status.TelemetrySampleIntervalMs != int(expected.TelemetrySampleInterval.Milliseconds()) {
+		return parkingModelCompatibilityError("checkpoint telemetry sample interval must be %dms, got=%dms", expected.TelemetrySampleInterval.Milliseconds(), status.TelemetrySampleIntervalMs)
+	}
+	if err := validateOrderedInts("checkpoint control horizon timing", status.ControlHorizonDtMs, expected.ControlHorizonDtMs); err != nil {
+		return err
 	}
 	if status.ImageSize.Width != expected.FrameWidth || status.ImageSize.Height != expected.FrameHeight {
 		return parkingModelCompatibilityError(
@@ -197,6 +245,67 @@ func validateEnabledParkingStateInputs(inputs map[string]parkingModelInputSpec) 
 		}
 	}
 	return nil
+}
+
+func validateParkingControlContract(contract parkingControlContract) error {
+	if strings.TrimSpace(contract.Name) != parkingcontrol.ParkingSetpointContractV1 {
+		return parkingModelCompatibilityError(
+			"control contract %q is incompatible; retrain with %q",
+			strings.TrimSpace(contract.Name),
+			parkingcontrol.ParkingSetpointContractV1,
+		)
+	}
+	if contract.Version != 1 {
+		return parkingModelCompatibilityError("control contract version must be 1, got=%d", contract.Version)
+	}
+	if strings.TrimSpace(contract.Direction) != parkingcontrol.ParkingDirectionForward {
+		return parkingModelCompatibilityError("control contract direction must be %q", parkingcontrol.ParkingDirectionForward)
+	}
+	if err := validateOrderedStrings("control contract targets", contract.Targets, requiredParkingControlHeads); err != nil {
+		return err
+	}
+	expectedActivations := map[string]string{
+		"desired_wheel_steer_normalized": "tanh",
+		"desired_speed_mps":              "sigmoid",
+		"stop_probability":               "sigmoid",
+	}
+	for name, expected := range expectedActivations {
+		if strings.ToLower(strings.TrimSpace(contract.OutputActivations[name])) != expected {
+			return parkingModelCompatibilityError("control contract activation for %s must be %s", name, expected)
+		}
+	}
+	if len(contract.OutputActivations) != len(expectedActivations) {
+		return parkingModelCompatibilityError("control contract output activations differ: got=%v", contract.OutputActivations)
+	}
+	expectedRanges := map[string][2]float64{
+		"desired_wheel_steer_normalized": {-1, 1},
+		"desired_speed_mps":              {0, parkingcontrol.ParkingSetpointMaxSpeedMPS},
+		"stop_probability":               {0, 1},
+	}
+	for name, expected := range expectedRanges {
+		actual := contract.OutputRanges[name]
+		if len(actual) != 2 || actual[0] != expected[0] || actual[1] != expected[1] {
+			return parkingModelCompatibilityError("control contract range for %s must be [%g, %g]", name, expected[0], expected[1])
+		}
+	}
+	if len(contract.OutputRanges) != len(expectedRanges) {
+		return parkingModelCompatibilityError("control contract output ranges differ: got=%v", contract.OutputRanges)
+	}
+	return nil
+}
+
+func cloneParkingControlContract(source parkingControlContract) parkingControlContract {
+	out := source
+	out.Targets = append([]string(nil), source.Targets...)
+	out.OutputActivations = make(map[string]string, len(source.OutputActivations))
+	for key, value := range source.OutputActivations {
+		out.OutputActivations[key] = value
+	}
+	out.OutputRanges = make(map[string][]float64, len(source.OutputRanges))
+	for key, value := range source.OutputRanges {
+		out.OutputRanges[key] = append([]float64(nil), value...)
+	}
+	return out
 }
 
 func validateOrderedStrings(label string, actual, expected []string) error {

@@ -22,7 +22,6 @@ import (
 	"awesomeProject/internal/capture"
 	"awesomeProject/internal/control"
 	datasetproc "awesomeProject/internal/dataset"
-	"awesomeProject/internal/translation"
 )
 
 //go:embed web/index.html web/app.ts
@@ -61,10 +60,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load backend actuator config: %v", err)
 	}
-	translationConfig, err := translation.LoadConfig(configPath)
-	if err != nil {
-		log.Fatalf("failed to load backend translation config: %v", err)
-	}
 	datasetConfig, err := capture.LoadDatasetConfig(configPath)
 	if err != nil {
 		log.Fatalf("failed to load dataset frame-window config: %v", err)
@@ -73,7 +68,6 @@ func main() {
 	svc := capture.NewService()
 	controlStore := control.NewStore()
 	actuatorService := actuator.NewService(actuatorConfig, configPath, controlStore)
-	translationService := translation.NewService(translationConfig, configPath, actuatorService)
 	inferencer := capture.NewInferencer(inferenceConfig, actuatorConfig, controlStore, actuatorService)
 	trainingProxyBaseURL := strings.TrimRight(strings.TrimSpace(inferenceConfig.ModelServerURL), "/")
 	trainingProxyClient := &http.Client{Timeout: inferenceConfig.RequestTimeout}
@@ -89,6 +83,7 @@ func main() {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
+		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
 		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)
@@ -347,66 +342,6 @@ func main() {
 		}
 
 		writeJSON(w, http.StatusOK, actuatorService.ResetTuning())
-	})
-
-	mux.HandleFunc("/translation/state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		writeJSON(w, http.StatusOK, translationService.State())
-	})
-
-	mux.HandleFunc("/translation/tuning", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, translationService.TuningState())
-	})
-
-	mux.HandleFunc("/translation/tuning/apply", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		var req translation.Tuning
-		if err := decodeJSONBody(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		state, err := translationService.ApplyTuning(req)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, state)
-	})
-
-	mux.HandleFunc("/translation/tuning/save", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		state, err := translationService.SaveTuning()
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, state)
-	})
-
-	mux.HandleFunc("/translation/tuning/reset", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, translationService.ResetTuning())
 	})
 
 	mux.HandleFunc("/control/state", func(w http.ResponseWriter, r *http.Request) {
@@ -862,6 +797,7 @@ func runProcessRuns(args []string) error {
 		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
 		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
 		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
+		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
 		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
 	)

@@ -14,6 +14,7 @@ const (
 	defaultDatasetWindowSize                 = 3
 	defaultDatasetFrameStride                = 2
 	defaultDatasetSampleStride               = 2
+	defaultTelemetrySampleInterval           = 50 * time.Millisecond
 	defaultDatasetImageWidth                 = 224
 	defaultDatasetImageHeight                = 224
 	defaultDatasetLabelTolerance             = 100 * time.Millisecond
@@ -32,6 +33,7 @@ type DatasetConfig struct {
 	WindowSize                   int
 	FrameStride                  int
 	SampleStride                 int
+	TelemetrySampleInterval      time.Duration
 	ImageOffsets                 []int
 	TelemetryOffsets             []int
 	FutureOffsets                []int
@@ -57,6 +59,7 @@ type datasetSection struct {
 	WindowStride                 *int     `toml:"window_stride"`
 	FrameStride                  *int     `toml:"frame_stride"`
 	SampleStride                 *int     `toml:"sample_stride"`
+	TelemetrySampleIntervalMs    *int     `toml:"telemetry_sample_interval_ms"`
 	ImageOffsets                 []int    `toml:"image_offsets"`
 	TelemetryOffsets             []int    `toml:"telemetry_offsets"`
 	FutureOffsets                []int    `toml:"future_offsets"`
@@ -77,11 +80,12 @@ func DefaultDatasetConfig() DatasetConfig {
 		WindowSize:                   defaultDatasetWindowSize,
 		FrameStride:                  defaultDatasetFrameStride,
 		SampleStride:                 defaultDatasetSampleStride,
+		TelemetrySampleInterval:      defaultTelemetrySampleInterval,
 		ImageOffsets:                 []int{-4, -2, 0},
 		TelemetryOffsets:             []int{-2, -1, 0},
 		FutureOffsets:                []int{1},
 		TelemetryFeatureNames:        []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
-		ControlTargetNames:           []string{"steering", "acceleration", "brakePressureAvg"},
+		ControlTargetNames:           []string{"desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"},
 		AuxTargetNames:               []string{"future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"},
 		LabelTolerance:               defaultDatasetLabelTolerance,
 		FutureSpeedDeltaClip:         defaultDatasetFutureSpeedDeltaClip,
@@ -121,6 +125,9 @@ func LoadDatasetConfig(path string) (DatasetConfig, error) {
 		cfg.SampleStride = *parsed.Dataset.SampleStride
 	} else if exists {
 		return DatasetConfig{}, fmt.Errorf("%s", missingDatasetSampleStrideMessage)
+	}
+	if parsed.Dataset.TelemetrySampleIntervalMs != nil {
+		cfg.TelemetrySampleInterval = time.Duration(*parsed.Dataset.TelemetrySampleIntervalMs) * time.Millisecond
 	}
 	if len(parsed.Dataset.ImageOffsets) > 0 {
 		cfg.ImageOffsets = append([]int(nil), parsed.Dataset.ImageOffsets...)
@@ -216,6 +223,14 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	if len(cfg.FutureOffsets) < 1 {
 		return fmt.Errorf("%s future_offsets must contain at least one entry", prefix)
 	}
+	for index, offset := range cfg.FutureOffsets {
+		if offset < 1 {
+			return fmt.Errorf("%s future_offsets must contain positive values", prefix)
+		}
+		if index > 0 && offset <= cfg.FutureOffsets[index-1] {
+			return fmt.Errorf("%s future_offsets must be strictly increasing", prefix)
+		}
+	}
 	if len(cfg.ImageOffsets) != cfg.WindowSize {
 		return fmt.Errorf("%s image_offsets length must match window_size", prefix)
 	}
@@ -224,6 +239,9 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	}
 	if cfg.SampleStride < 1 {
 		return fmt.Errorf("%s sample_stride must be > 0", prefix)
+	}
+	if cfg.TelemetrySampleInterval <= 0 || cfg.TelemetrySampleInterval%time.Millisecond != 0 {
+		return fmt.Errorf("%s telemetry_sample_interval_ms must be a positive whole number", prefix)
 	}
 	if cfg.LabelTolerance <= 0 {
 		return fmt.Errorf("%s label_tolerance must be > 0", prefix)

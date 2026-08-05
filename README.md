@@ -68,7 +68,7 @@ Set `FSD_DATA_ROOT` when you do not want the Windows default of `S:\fsd_fivem_da
 
 `metadata.json` and `run.jsonl` record the calibrated goal, deterministic start offset, tolerances, attempt index/seed, and final parking outcome. The existing Data page and `process-runs` command continue to work because parking attempts use the standard top-level `trip-*` format.
 
-Every fresh sample records `Steering` as the normalized controller command contract in `[-1, 1]`. For diagnostics, `wheelAngle` retains FiveM's raw physical front-wheel angle in radians and `wheelSteeringFullLock` records the per-vehicle full-lock angle in radians used for normalization.
+Every fresh sample records `Steering` as normalized physical wheel steer in `[-1, 1]`, not as a thumbstick command. For diagnostics, `wheelAngle` retains FiveM's raw physical front-wheel angle in radians and `wheelSteeringFullLock` records the per-vehicle full-lock angle in radians used for normalization.
 
 ## Training from a clean slate
 
@@ -91,7 +91,7 @@ For GPU training, install the PyTorch build matching the machine's CUDA runtime 
 6. In **Advanced**, select **Start Inference**, then return to **Parking** to watch the live score and terminal result.
 7. Stop the completed inference session and prepare a fresh evaluation start before the next attempt.
 
-Inference refuses to start unless the virtual controller is ready, telemetry is fresh, the checkpoint exposes the parking state inputs/control heads, and the car is inside the complete forward-curriculum envelope. A success, collision, reverse motion, unsafe pose, stale or misaligned telemetry, model error, timeout, or manual stop latches a safe vehicle hold before model control ends.
+Inference refuses to start unless the virtual controller is ready, a measured parking calibration is explicitly verified, telemetry is fresh, the checkpoint exposes the exact v2 parking setpoint contract, and the car is inside the complete forward-curriculum envelope. Parking ownership holds the car until the first valid plan. A success, collision, reverse motion, unsafe pose, stale or misaligned telemetry, model/controller error, timeout, or manual stop latches an actuator-owned service-brake-to-handbrake stop before model control ends.
 
 ## Components
 

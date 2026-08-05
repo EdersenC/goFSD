@@ -26,6 +26,7 @@ const (
 	defaultFrameStride               = 2
 	defaultSampleStride              = 2
 	defaultFutureTelemetryCount      = 6
+	defaultTelemetrySampleInterval   = 50 * time.Millisecond
 	defaultLabelTolerance            = 100 * time.Millisecond
 	defaultFutureSpeedDeltaClip      = 2.0
 	defaultFutureSpeedDeltaNormalize = true
@@ -198,6 +199,9 @@ type Processor struct {
 	frameStride               int
 	sampleStride              int
 	labelTolerance            time.Duration
+	telemetryOffsets          []int
+	futureOffsets             []int
+	telemetrySampleInterval   time.Duration
 	futureSpeedDeltaClip      float64
 	futureSpeedDeltaNormalize bool
 	flashBrightnessThreshold  float64
@@ -260,6 +264,9 @@ func NewProcessor(opts ...Option) *Processor {
 		frameStride:               defaultFrameStride,
 		sampleStride:              defaultSampleStride,
 		labelTolerance:            defaultLabelTolerance,
+		telemetryOffsets:          defaultTelemetryHistoryOffsets(),
+		futureOffsets:             defaultFutureOffsets(),
+		telemetrySampleInterval:   defaultTelemetrySampleInterval,
 		futureSpeedDeltaClip:      defaultFutureSpeedDeltaClip,
 		futureSpeedDeltaNormalize: defaultFutureSpeedDeltaNormalize,
 		flashBrightnessThreshold:  defaultFlashBrightnessThreshold,
@@ -324,6 +331,15 @@ func WithSamplingConfig(size int, frameStride int, sampleStride int) Option {
 func WithLabelTolerance(tolerance time.Duration) Option {
 	return func(p *Processor) {
 		p.labelTolerance = tolerance
+	}
+}
+
+// WithTelemetryTimelineConfig sets the model history, horizon, and base telemetry cadence.
+func WithTelemetryTimelineConfig(telemetryOffsets []int, futureOffsets []int, sampleInterval time.Duration) Option {
+	return func(p *Processor) {
+		p.telemetryOffsets = append([]int(nil), telemetryOffsets...)
+		p.futureOffsets = append([]int(nil), futureOffsets...)
+		p.telemetrySampleInterval = sampleInterval
 	}
 }
 
@@ -500,6 +516,9 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 		p.frameStride,
 		p.sampleStride,
 		p.labelTolerance,
+		p.telemetryOffsets,
+		p.futureOffsets,
+		p.telemetrySampleInterval,
 		p.futureSpeedDeltaClip,
 		p.futureSpeedDeltaNormalize,
 	)
@@ -750,7 +769,7 @@ func buildTimedLabels(vehicleData []map[string]any, syncTime float64) []timedLab
 	labels := make([]timedLabel, 0, len(vehicleData))
 	for _, label := range vehicleData {
 		rawTime, ok := numberField(label["time"])
-		if !ok {
+		if !ok || !isFiniteFloat64(rawTime) {
 			continue
 		}
 		labels = append(labels, timedLabel{
@@ -772,6 +791,9 @@ func buildDatasetSamples(
 	frameStride int,
 	sampleStride int,
 	tolerance time.Duration,
+	telemetryOffsets []int,
+	futureOffsets []int,
+	telemetrySampleInterval time.Duration,
 	futureSpeedDeltaClip float64,
 	futureSpeedDeltaNormalize bool,
 ) []DatasetSample {
@@ -783,6 +805,9 @@ func buildDatasetSamples(
 		frameStride,
 		sampleStride,
 		tolerance,
+		telemetryOffsets,
+		futureOffsets,
+		telemetrySampleInterval,
 		futureSpeedDeltaClip,
 		futureSpeedDeltaNormalize,
 	)
@@ -797,16 +822,27 @@ func buildDatasetSamplesWithStats(
 	frameStride int,
 	sampleStride int,
 	tolerance time.Duration,
+	telemetryOffsets []int,
+	futureOffsets []int,
+	telemetrySampleInterval time.Duration,
 	futureSpeedDeltaClip float64,
 	futureSpeedDeltaNormalize bool,
 ) ([]DatasetSample, sampleBuildStats) {
 	var stats sampleBuildStats
-	if len(frames) == 0 || len(labels) == 0 || windowSize < 1 || windowSize%2 == 0 || frameStride < 1 || sampleStride < 1 {
+	if len(frames) == 0 ||
+		len(labels) == 0 ||
+		windowSize < 1 ||
+		windowSize%2 == 0 ||
+		frameStride < 1 ||
+		sampleStride < 1 ||
+		!validTelemetryOffsets(telemetryOffsets) ||
+		!validFutureOffsets(futureOffsets) ||
+		telemetrySampleInterval <= 0 {
 		return nil, stats
 	}
 
-	historyTelemetryCount := ((windowSize - 1) * frameStride) + 1
 	toleranceSeconds := tolerance.Seconds()
+	telemetryAlignmentTolerance := telemetryAlignmentTolerance(tolerance, telemetrySampleInterval)
 	samples := make([]DatasetSample, 0)
 	for anchorIndex := 0; anchorIndex < len(frames); anchorIndex += sampleStride {
 		stats.CandidateWindowCount++
@@ -823,11 +859,25 @@ func buildDatasetSamplesWithStats(
 			stats.MissingCurrentLabelCount++
 			continue
 		}
-		if !hasTelemetryWindow(labels, labelIndex-(historyTelemetryCount-1), historyTelemetryCount) {
+		telemetryHistory, ok := buildTelemetryHistory(
+			labels,
+			labelIndex,
+			telemetryOffsets,
+			telemetrySampleInterval,
+			telemetryAlignmentTolerance,
+		)
+		if !ok {
 			stats.IncompleteTelemetryHistoryCount++
 			continue
 		}
-		if !hasTelemetryWindow(labels, labelIndex+1, defaultFutureTelemetryCount) {
+		telemetryFuture, ok := buildTelemetryFuture(
+			labels,
+			labelIndex,
+			futureOffsets,
+			telemetrySampleInterval,
+			telemetryAlignmentTolerance,
+		)
+		if !ok {
 			stats.IncompleteTelemetryFutureCount++
 			continue
 		}
@@ -887,8 +937,8 @@ func buildDatasetSamplesWithStats(
 			AnchorVideoPTS:   anchorFrame.PTS,
 			AnchorGameTime:   label.RelativeSeconds,
 			FramePaths:       window,
-			TelemetryHistory: buildTelemetryHistory(labels, labelIndex, historyTelemetryCount),
-			TelemetryFuture:  buildTelemetryFuture(labels, labelIndex, defaultFutureTelemetryCount),
+			TelemetryHistory: telemetryHistory,
+			TelemetryFuture:  telemetryFuture,
 			Label:            derivedLabel,
 		})
 		stats.GeneratedSampleCount++
@@ -916,44 +966,130 @@ func buildPastOnlyFrameWindow(frames []VideoFrame, anchorIndex int, windowSize i
 	return window, true
 }
 
-func buildTelemetryHistory(labels []timedLabel, anchorIndex int, count int) []GroupedTelemetryItem {
-	if count <= 0 {
-		return nil
+func buildTelemetryHistory(
+	labels []timedLabel,
+	anchorIndex int,
+	telemetryOffsets []int,
+	sampleInterval time.Duration,
+	alignmentTolerance time.Duration,
+) ([]GroupedTelemetryItem, bool) {
+	if anchorIndex < 0 || anchorIndex >= len(labels) || !validTelemetryOffsets(telemetryOffsets) || sampleInterval <= 0 || alignmentTolerance < 0 {
+		return nil, false
 	}
-	startIndex := anchorIndex - (count - 1)
-	return buildTelemetryWindow(labels, startIndex, count)
+
+	// Keep the serialized window dense because trainer offsets address it relative to the final row.
+	firstOffset := telemetryOffsets[0]
+	window := make([]GroupedTelemetryItem, 0, -firstOffset+1)
+	previousIndex := -1
+	anchorTime := labels[anchorIndex].RelativeSeconds
+	if !isFiniteFloat64(anchorTime) {
+		return nil, false
+	}
+	for offset := firstOffset; offset <= 0; offset++ {
+		label := labels[anchorIndex]
+		labelIndex := anchorIndex
+		ok := true
+		if offset < 0 {
+			targetTime := anchorTime + (float64(offset) * sampleInterval.Seconds())
+			label, labelIndex, ok = nearestLabelWithIndexRange(
+				labels,
+				targetTime,
+				alignmentTolerance.Seconds(),
+				previousIndex+1,
+				anchorIndex-1,
+			)
+		}
+		if !ok || labelIndex <= previousIndex || labelIndex > anchorIndex || !isFiniteFloat64(label.RelativeSeconds) {
+			return nil, false
+		}
+		window = append(window, groupTelemetryItem(label.Label))
+		previousIndex = labelIndex
+	}
+	return window, true
 }
 
-func buildTelemetryFuture(labels []timedLabel, anchorIndex int, count int) []GroupedTelemetryItem {
-	if count <= 0 {
-		return nil
+func buildTelemetryFuture(
+	labels []timedLabel,
+	anchorIndex int,
+	futureOffsets []int,
+	sampleInterval time.Duration,
+	alignmentTolerance time.Duration,
+) ([]GroupedTelemetryItem, bool) {
+	if anchorIndex < 0 || anchorIndex >= len(labels) || !validFutureOffsets(futureOffsets) || sampleInterval <= 0 || alignmentTolerance < 0 {
+		return nil, false
 	}
-	startIndex := anchorIndex + 1
-	return buildTelemetryWindow(labels, startIndex, count)
+
+	// Keep the serialized window dense because trainer offsets address it by offset-1.
+	horizonLength := futureOffsets[len(futureOffsets)-1]
+	window := make([]GroupedTelemetryItem, 0, horizonLength)
+	previousIndex := anchorIndex
+	anchorTime := labels[anchorIndex].RelativeSeconds
+	if !isFiniteFloat64(anchorTime) {
+		return nil, false
+	}
+	for offset := 1; offset <= horizonLength; offset++ {
+		targetTime := anchorTime + (float64(offset) * sampleInterval.Seconds())
+		label, labelIndex, ok := nearestLabelWithIndexRange(
+			labels,
+			targetTime,
+			alignmentTolerance.Seconds(),
+			previousIndex+1,
+			len(labels)-1,
+		)
+		if !ok || labelIndex <= previousIndex || !isFiniteFloat64(label.RelativeSeconds) {
+			return nil, false
+		}
+		window = append(window, groupTelemetryItem(label.Label))
+		previousIndex = labelIndex
+	}
+	return window, true
 }
 
-func hasTelemetryWindow(labels []timedLabel, startIndex int, count int) bool {
-	if len(labels) == 0 || count <= 0 {
+func telemetryAlignmentTolerance(labelTolerance time.Duration, sampleInterval time.Duration) time.Duration {
+	if labelTolerance <= 0 || sampleInterval <= 0 {
+		return 0
+	}
+	maxJitter := sampleInterval / 2
+	if labelTolerance < maxJitter {
+		return labelTolerance
+	}
+	return maxJitter
+}
+
+func defaultTelemetryHistoryOffsets() []int {
+	return []int{-4, -3, -2, -1, 0}
+}
+
+func defaultFutureOffsets() []int {
+	offsets := make([]int, defaultFutureTelemetryCount)
+	for index := range offsets {
+		offsets[index] = index + 1
+	}
+	return offsets
+}
+
+func validFutureOffsets(offsets []int) bool {
+	if len(offsets) == 0 {
 		return false
 	}
-	if startIndex < 0 {
-		return false
+	for index, offset := range offsets {
+		if offset < 1 || (index > 0 && offset <= offsets[index-1]) {
+			return false
+		}
 	}
-	endIndex := startIndex + count - 1
-	return endIndex >= startIndex && endIndex < len(labels)
+	return true
 }
 
-func buildTelemetryWindow(labels []timedLabel, startIndex int, count int) []GroupedTelemetryItem {
-	if !hasTelemetryWindow(labels, startIndex, count) {
-		return nil
+func validTelemetryOffsets(offsets []int) bool {
+	if len(offsets) == 0 || offsets[len(offsets)-1] != 0 {
+		return false
 	}
-
-	window := make([]GroupedTelemetryItem, 0, count)
-	for offset := 0; offset < count; offset++ {
-		index := startIndex + offset
-		window = append(window, groupTelemetryItem(labels[index].Label))
+	for index, offset := range offsets {
+		if offset > 0 || (index > 0 && offset <= offsets[index-1]) {
+			return false
+		}
 	}
-	return window
+	return true
 }
 
 func buildTrainingLabel(
@@ -1523,11 +1659,28 @@ func nearestLabel(labels []timedLabel, target float64, toleranceSeconds float64)
 }
 
 func nearestLabelWithIndex(labels []timedLabel, target float64, toleranceSeconds float64) (timedLabel, int, bool) {
-	if len(labels) == 0 {
+	return nearestLabelWithIndexRange(labels, target, toleranceSeconds, 0, len(labels)-1)
+}
+
+func nearestLabelWithIndexRange(
+	labels []timedLabel,
+	target float64,
+	toleranceSeconds float64,
+	firstIndex int,
+	lastIndex int,
+) (timedLabel, int, bool) {
+	if len(labels) == 0 ||
+		firstIndex < 0 ||
+		lastIndex >= len(labels) ||
+		firstIndex > lastIndex ||
+		!isFiniteFloat64(target) ||
+		!isFiniteFloat64(toleranceSeconds) ||
+		toleranceSeconds < 0 {
 		return timedLabel{}, -1, false
 	}
-	idx := sort.Search(len(labels), func(i int) bool {
-		return labels[i].RelativeSeconds >= target
+	rangeLength := lastIndex - firstIndex + 1
+	idx := firstIndex + sort.Search(rangeLength, func(offset int) bool {
+		return labels[firstIndex+offset].RelativeSeconds >= target
 	})
 
 	type candidateLabel struct {
@@ -1535,10 +1688,10 @@ func nearestLabelWithIndex(labels []timedLabel, target float64, toleranceSeconds
 		index int
 	}
 	candidates := make([]candidateLabel, 0, 2)
-	if idx < len(labels) {
+	if idx <= lastIndex && isFiniteFloat64(labels[idx].RelativeSeconds) {
 		candidates = append(candidates, candidateLabel{label: labels[idx], index: idx})
 	}
-	if idx > 0 {
+	if idx > firstIndex && isFiniteFloat64(labels[idx-1].RelativeSeconds) {
 		candidates = append(candidates, candidateLabel{label: labels[idx-1], index: idx - 1})
 	}
 	if len(candidates) == 0 {

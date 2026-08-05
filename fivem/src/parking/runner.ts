@@ -47,7 +47,7 @@ export const PARKING_SCENE_ID = "parking-forward-bay";
 export const PARKING_SCENE_VARIANT = "default";
 export const PARKING_SCENE_NAME = `${PARKING_SCENE_ID}:${PARKING_SCENE_VARIANT}`;
 export const PARKING_EVALUATION_SCENE_NAME = "parking-evaluation";
-export const PARKING_MAX_SPEED_MPS = 8 / 3.6;
+export const PARKING_MAX_SPEED_MPS = 2.22;
 
 const headingConventionDotThreshold = 0.99;
 const maximumCalibrationSpeedMps = 0.1;

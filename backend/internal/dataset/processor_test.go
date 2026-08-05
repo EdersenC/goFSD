@@ -123,7 +123,7 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 1 {
 		t.Fatalf("unexpected sample count: got=%d want=1", len(samples))
 	}
@@ -192,6 +192,158 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	}
 }
 
+func TestBuildTelemetryFutureUsesTimestampSlotsInsteadOfAdjacentRows(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.400, Label: map[string]any{"time": 400.0}},
+		{RelativeSeconds: 0.421, Label: map[string]any{"time": 421.0}},
+		{RelativeSeconds: 0.449, Label: map[string]any{"time": 449.0}},
+		{RelativeSeconds: 0.503, Label: map[string]any{"time": 503.0}},
+		{RelativeSeconds: 0.548, Label: map[string]any{"time": 548.0}},
+		{RelativeSeconds: 0.601, Label: map[string]any{"time": 601.0}},
+		{RelativeSeconds: 0.652, Label: map[string]any{"time": 652.0}},
+		{RelativeSeconds: 0.698, Label: map[string]any{"time": 698.0}},
+	}
+
+	future, ok := buildTelemetryFuture(
+		labels,
+		0,
+		defaultFutureOffsets(),
+		50*time.Millisecond,
+		25*time.Millisecond,
+	)
+	if !ok {
+		t.Fatal("expected a complete timestamp-aligned future horizon")
+	}
+	got := sampleTelemetryWindow(t, future, "telemetry_future")
+	wantTimes := []float64{449, 503, 548, 601, 652, 698}
+	for index, want := range wantTimes {
+		if got[index]["time"] != want {
+			t.Fatalf("unexpected horizon slot %d: got=%v want_time=%v", index, got[index], want)
+		}
+	}
+	if got[0]["time"] == 421.0 {
+		t.Fatalf("future horizon used the adjacent row instead of the +50ms slot: %+v", got)
+	}
+}
+
+func TestBuildTelemetryFutureRejectsMissingTimestampSlot(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.400, Label: map[string]any{"time": 400.0}},
+		{RelativeSeconds: 0.500, Label: map[string]any{"time": 500.0}},
+		{RelativeSeconds: 0.550, Label: map[string]any{"time": 550.0}},
+		{RelativeSeconds: 0.600, Label: map[string]any{"time": 600.0}},
+		{RelativeSeconds: 0.650, Label: map[string]any{"time": 650.0}},
+		{RelativeSeconds: 0.700, Label: map[string]any{"time": 700.0}},
+	}
+
+	if future, ok := buildTelemetryFuture(
+		labels,
+		0,
+		defaultFutureOffsets(),
+		50*time.Millisecond,
+		25*time.Millisecond,
+	); ok || future != nil {
+		t.Fatalf("expected the missing +50ms slot to reject the horizon, got=%+v", future)
+	}
+}
+
+func TestBuildTelemetryFutureKeepsDenseRowsForConfiguredOffsets(t *testing.T) {
+	labels := make([]timedLabel, 0, 7)
+	for offset := 0; offset <= 6; offset++ {
+		labels = append(labels, timedLabel{
+			RelativeSeconds: float64(offset) * 0.05,
+			Label:           map[string]any{"time": float64(offset * 50)},
+		})
+	}
+
+	future, ok := buildTelemetryFuture(
+		labels,
+		0,
+		[]int{1, 3, 6},
+		50*time.Millisecond,
+		25*time.Millisecond,
+	)
+	if !ok {
+		t.Fatal("expected a complete dense future horizon")
+	}
+	if len(future) != 6 {
+		t.Fatalf("future rows must remain indexable by configured offsets: got=%d want=6", len(future))
+	}
+}
+
+func TestBuildTelemetryHistoryUsesTimestampSlotsInsteadOfAdjacentRows(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.249, Label: map[string]any{"time": 249.0}},
+		{RelativeSeconds: 0.301, Label: map[string]any{"time": 301.0}},
+		{RelativeSeconds: 0.329, Label: map[string]any{"time": 329.0}},
+		{RelativeSeconds: 0.351, Label: map[string]any{"time": 351.0}},
+		{RelativeSeconds: 0.400, Label: map[string]any{"time": 400.0}},
+	}
+
+	history, ok := buildTelemetryHistory(
+		labels,
+		4,
+		[]int{-3, -2, -1, 0},
+		50*time.Millisecond,
+		25*time.Millisecond,
+	)
+	if !ok {
+		t.Fatal("expected a complete timestamp-aligned telemetry history")
+	}
+	got := sampleTelemetryWindow(t, history, "telemetry_history")
+	wantTimes := []float64{249, 301, 351, 400}
+	for index, want := range wantTimes {
+		if got[index]["time"] != want {
+			t.Fatalf("unexpected history slot %d: got=%v want_time=%v", index, got[index], want)
+		}
+	}
+	if got[2]["time"] == 329.0 {
+		t.Fatalf("telemetry history used the adjacent row instead of the -50ms slot: %+v", got)
+	}
+}
+
+func TestBuildTelemetryHistoryRejectsMissingTimestampSlot(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0.250, Label: map[string]any{"time": 250.0}},
+		{RelativeSeconds: 0.300, Label: map[string]any{"time": 300.0}},
+		{RelativeSeconds: 0.400, Label: map[string]any{"time": 400.0}},
+	}
+
+	if history, ok := buildTelemetryHistory(
+		labels,
+		2,
+		[]int{-3, -2, -1, 0},
+		50*time.Millisecond,
+		25*time.Millisecond,
+	); ok || history != nil {
+		t.Fatalf("expected the missing -50ms slot to reject the history, got=%+v", history)
+	}
+}
+
+func TestBuildTelemetryHistoryKeepsDenseRowsForConfiguredOffsets(t *testing.T) {
+	labels := make([]timedLabel, 0, 5)
+	for offset := 0; offset <= 4; offset++ {
+		labels = append(labels, timedLabel{
+			RelativeSeconds: float64(offset) * 0.05,
+			Label:           map[string]any{"time": float64(offset * 50)},
+		})
+	}
+
+	history, ok := buildTelemetryHistory(
+		labels,
+		4,
+		[]int{-4, -2, 0},
+		50*time.Millisecond,
+		25*time.Millisecond,
+	)
+	if !ok {
+		t.Fatal("expected a complete dense telemetry history")
+	}
+	if len(history) != 5 {
+		t.Fatalf("history rows must remain indexable by configured offsets: got=%d want=5", len(history))
+	}
+}
+
 func TestBuildDatasetSamplesSupportsConfigurableWindowSize(t *testing.T) {
 	rawFrames := make([]VideoFrame, 0, 17)
 	labels := make([]timedLabel, 0, 17)
@@ -211,7 +363,7 @@ func TestBuildDatasetSamplesSupportsConfigurableWindowSize(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 8, 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 8, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 1 {
 		t.Fatalf("unexpected sample count: got=%d want=1", len(samples))
 	}
@@ -255,7 +407,7 @@ func TestBuildDatasetSamplesUsesIndependentSampleStride(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 10, 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 10, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 3 {
 		t.Fatalf("unexpected sample count: got=%d want=3", len(samples))
 	}
@@ -299,7 +451,7 @@ func TestBuildDatasetSamplesSkipsIncompleteTelemetryWindows(t *testing.T) {
 		{RelativeSeconds: 1.0, Label: map[string]any{"time": 1000.0, "Steering": 0.2, "currentSpeed": 7.0, "acceleration": 0.8, "yaw": 34.0, "yawRate": 1.75, "routeForwardDelta": 0.7}},
 	}
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 0 {
 		t.Fatalf("unexpected sample count: got=%d want=0", len(samples))
 	}
@@ -547,7 +699,7 @@ func TestBuildDatasetSamplesWithStatsTracksMissingFutureYawTargets(t *testing.T)
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 0 {
 		t.Fatalf("expected no samples, got=%d", len(samples))
 	}
@@ -589,7 +741,7 @@ func TestBuildDatasetSamplesWithStatsTracksIncompleteFrameHistory(t *testing.T) 
 		})
 	}
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 10, 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 10, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 0 {
 		t.Fatalf("expected no samples, got=%d", len(samples))
 	}
@@ -623,7 +775,7 @@ func TestBuildDatasetSamplesWithStatsTracksIncompleteTelemetryFuture(t *testing.
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 8, 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 8, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
 	if len(samples) != 0 {
 		t.Fatalf("expected no samples, got=%d", len(samples))
 	}
@@ -802,6 +954,7 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 		WithForce(true),
 		WithDatasetOnly(true),
 		WithSamplingConfig(3, 2, 2),
+		WithTelemetryTimelineConfig(testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond),
 		WithCommandFactory(func(_ context.Context, name string, _ ...string) *exec.Cmd {
 			if name == "ffprobe" {
 				cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessFFprobeStoppedTail", "--")
@@ -900,6 +1053,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		WithForce(true),
 		WithDatasetOnly(true),
 		WithSamplingConfig(3, 2, 2),
+		WithTelemetryTimelineConfig(testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond),
 		WithCommandFactory(func(_ context.Context, name string, _ ...string) *exec.Cmd {
 			if name == "ffprobe" {
 				cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessFFprobeDatasetOnly", "--")
@@ -1064,6 +1218,15 @@ func sampleTelemetryWindow(t *testing.T, window []GroupedTelemetryItem, field st
 		flattened = append(flattened, flattenGroupedTelemetry(item))
 	}
 	return flattened
+}
+
+func testTelemetryOffsets(windowSize int, frameStride int) []int {
+	firstOffset := -((windowSize - 1) * frameStride)
+	offsets := make([]int, 0, -firstOffset+1)
+	for offset := firstOffset; offset <= 0; offset++ {
+		offsets = append(offsets, offset)
+	}
+	return offsets
 }
 
 func flattenedLabel(label GroupedLabel) map[string]any {

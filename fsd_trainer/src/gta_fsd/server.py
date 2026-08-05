@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -16,11 +17,18 @@ from urllib.parse import parse_qs, urlparse
 import torch
 
 from config import resolve_data_root_child
+from control_contract import (
+    CONTROL_CONTRACT_NAME,
+    CONTROL_HORIZON_DIRECTION,
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    control_contract_metadata,
+    resolve_checkpoint_control_horizon_dt_ms,
+)
 from image_io import load_rgb_tensor_from_bytes, load_rgb_tensor_from_path
 from inference import (
     DEFAULT_CONFIG_PATH,
     LEGACY_SCALAR_HEAD_ERROR,
-    PLANNER_FORMAT,
     build_model,
     load_checkpoint,
     load_config,
@@ -193,6 +201,8 @@ class ModelRuntime:
         self._image_offsets: list[int] = []
         self._telemetry_offsets: list[int] = []
         self._future_offsets: list[int] = []
+        self._telemetry_sample_interval_ms = 0
+        self._control_horizon_dt_ms: list[int] = []
         self._telemetry_feature_names: list[str] = []
         self._control_target_names: list[str] = []
         self._aux_target_names: list[str] = []
@@ -203,9 +213,11 @@ class ModelRuntime:
             loaded = self._model is not None
             return {
                 "loaded": loaded,
+                "direction": CONTROL_HORIZON_DIRECTION,
                 "device": None if self._device is None else str(self._device),
                 "checkpoint": None if self._checkpoint_path is None else str(self._checkpoint_path),
                 "planner_format": self._planner_format or PLANNER_FORMAT,
+                "planner_format_version": PLANNER_FORMAT_VERSION,
                 "image_size": {
                     "width": self._image_size[0],
                     "height": self._image_size[1],
@@ -221,6 +233,9 @@ class ModelRuntime:
                 "image_offsets": list(self._image_offsets),
                 "telemetry_offsets": list(self._telemetry_offsets),
                 "future_offsets": list(self._future_offsets),
+                "telemetry_sample_interval_ms": self._telemetry_sample_interval_ms,
+                "control_horizon_dt_ms": list(self._control_horizon_dt_ms),
+                "control_contract": control_contract_metadata(),
                 "telemetry_feature_names": list(self._telemetry_feature_names),
                 "control_target_names": list(self._control_target_names),
                 "aux_target_names": list(self._aux_target_names),
@@ -245,6 +260,7 @@ class ModelRuntime:
         width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
         state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
         future_offsets = list(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+        control_horizon_dt_ms = list(resolve_checkpoint_control_horizon_dt_ms(checkpoint))
         control_target_names = resolve_checkpoint_control_target_names(
             checkpoint,
             future_steps=len(future_offsets),
@@ -271,6 +287,8 @@ class ModelRuntime:
             self._image_offsets = list(checkpoint.get("image_offsets", []))
             self._telemetry_offsets = list(checkpoint.get("telemetry_offsets", []))
             self._future_offsets = future_offsets
+            self._telemetry_sample_interval_ms = int(checkpoint["telemetry_sample_interval_ms"])
+            self._control_horizon_dt_ms = control_horizon_dt_ms
             self._telemetry_feature_names = list(checkpoint.get("telemetry_feature_names", []))
             self._control_target_names = control_target_names
             self._aux_target_names = aux_target_names
@@ -278,9 +296,11 @@ class ModelRuntime:
 
         return {
             "status": "loaded",
+            "direction": CONTROL_HORIZON_DIRECTION,
             "checkpoint": str(checkpoint_path),
             "device": str(device),
             "planner_format": planner_format,
+            "planner_format_version": PLANNER_FORMAT_VERSION,
             "image_size": {
                 "width": image_size[0],
                 "height": image_size[1],
@@ -297,6 +317,9 @@ class ModelRuntime:
             "image_offsets": checkpoint.get("image_offsets", []),
             "telemetry_offsets": checkpoint.get("telemetry_offsets", []),
             "future_offsets": checkpoint.get("future_offsets", []),
+            "telemetry_sample_interval_ms": int(checkpoint["telemetry_sample_interval_ms"]),
+            "control_horizon_dt_ms": control_horizon_dt_ms,
+            "control_contract": control_contract_metadata(),
             "telemetry_feature_names": checkpoint.get("telemetry_feature_names", []),
             "control_target_names": control_target_names,
             "aux_target_names": aux_target_names,
@@ -319,6 +342,8 @@ class ModelRuntime:
             self._image_offsets = []
             self._telemetry_offsets = []
             self._future_offsets = []
+            self._telemetry_sample_interval_ms = 0
+            self._control_horizon_dt_ms = []
             self._telemetry_feature_names = []
             self._control_target_names = []
             self._aux_target_names = []
@@ -340,14 +365,18 @@ class ModelRuntime:
             target_transforms = self._target_transforms
             telemetry_offsets = list(self._telemetry_offsets)
             future_offsets = list(self._future_offsets)
+            telemetry_sample_interval_ms = self._telemetry_sample_interval_ms
+            control_horizon_dt_ms = list(self._control_horizon_dt_ms)
             telemetry_feature_names = list(self._telemetry_feature_names)
             control_target_names = list(self._control_target_names)
             aux_target_names = list(self._aux_target_names)
             image_offsets = list(self._image_offsets)
 
-        frames = self._extract_frames(payload)
         if planner_format != PLANNER_FORMAT:
             raise RuntimeError(LEGACY_SCALAR_HEAD_ERROR)
+        require_predict_control_contract(payload)
+        sampled_at_s = parse_sampled_at_s(payload)
+        frames = self._extract_frames(payload)
 
         images = torch.stack(frames, dim=0).unsqueeze(0).to(device, non_blocking=device.type == "cuda")
         telemetry = self._extract_planner_telemetry(payload).to(device, non_blocking=device.type == "cuda")
@@ -380,7 +409,10 @@ class ModelRuntime:
         response = {
             "checkpoint": str(checkpoint_path),
             "device": str(device),
+            "sampled_at_s": sampled_at_s,
+            "direction": CONTROL_HORIZON_DIRECTION,
             "planner_format": planner_format,
+            "planner_format_version": PLANNER_FORMAT_VERSION,
             "pred_controls": pred_controls_denorm.tolist(),
             "pred_aux": pred_aux_denorm.tolist(),
             "pred_controls_normalized": pred_controls.tolist(),
@@ -393,6 +425,9 @@ class ModelRuntime:
             "image_offsets": image_offsets,
             "telemetry_offsets": telemetry_offsets,
             "future_offsets": future_offsets,
+            "telemetry_sample_interval_ms": telemetry_sample_interval_ms,
+            "control_horizon_dt_ms": control_horizon_dt_ms,
+            "control_contract": control_contract_metadata(),
             "telemetry_feature_names": telemetry_feature_names,
             "control_target_names": control_target_names,
             "aux_target_names": aux_target_names,
@@ -499,6 +534,24 @@ class ModelRuntime:
             raw_state_inputs[definition.key] = (normalized >= 0.5) if definition.key == "has_lead_vehicle" else float(raw_value)
             normalized_state_inputs[definition.key] = torch.tensor([normalized], dtype=torch.float32)
         return raw_state_inputs, normalized_state_inputs
+
+
+def parse_sampled_at_s(payload: dict[str, Any]) -> float:
+    raw_value = payload.get("sampled_at_s")
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+        raise ValueError("sampled_at_s must be a finite number greater than 0")
+    sampled_at_s = float(raw_value)
+    if not math.isfinite(sampled_at_s) or sampled_at_s <= 0:
+        raise ValueError("sampled_at_s must be a finite number greater than 0")
+    return sampled_at_s
+
+
+def require_predict_control_contract(payload: dict[str, Any]) -> None:
+    raw_contract = payload.get("control_contract")
+    if raw_contract != CONTROL_CONTRACT_NAME:
+        raise ValueError(
+            f"predict request control_contract must equal '{CONTROL_CONTRACT_NAME}'"
+        )
 
 
 class ModelServer(ThreadingHTTPServer):

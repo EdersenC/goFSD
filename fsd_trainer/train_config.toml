@@ -5,8 +5,8 @@ train_script = 'fsd_trainer/src/gta_fsd/train.py'
 jobs_dir = 'S:\fsd_fivem_data\training_jobs'
 
 [backend.actuator]
-temporal_horizon_actuator_enabled = false
 request_timeout = '500ms'
+stale_timeout = '250ms'
 steering_gain = 1.0
 throttle_gain = 1.0
 throttle_floor = 0.0
@@ -15,66 +15,61 @@ overspeed_brake_margin_kph = 2.0
 overspeed_brake = 0.25
 model_brake_threshold = 0.55
 reverse_lockout_speed_kph = 1.0
-tick_hz = 15
+tick_hz = 60
 url = 'http://127.0.0.1:8080'
 
-[backend.translation]
-steer_deadzone = 0.0
-max_steer_scale = 1.0
-steer_output_gain = 10.0
-throttle_gain = 10.0
-brake_gain = 1.0
-brake_activation_threshold = 0.18
-overspeed_brake_margin_mps = 0.75
-brake_release_margin_mps = 0.20
-brake_enter_hold_seconds = 0.18
-throttle_hold_min = 0.12
-throttle_ramp_up_per_second = 0.75
-throttle_decay_per_second = 0.90
-heading_deadband_deg = 2.5
-heading_full_lock_deg = 45.0
-low_speed_steer_gain = 1.35
-high_speed_steer_gain = 0.75
-steer_gain_fade_speed_mps = 5.0
-steer_response_blend = 0.55
-steer_command_rate_per_second = 4.0
-target_speed_error_gain = 0.7
-target_accel_gain = 0.25
-longitudinal_deadband = 0.05
-launch_throttle_min = 0.22
-launch_speed_threshold = 1.0
-launch_target_speed_margin = 0.75
-max_target_speed_kph = 8.0
-motion_confidence_on_threshold = 0.6
-motion_confidence_off_threshold = 0.4
-motion_hold_speed_max = 4.0
-min_lateral_confidence = 0.05
-min_longitudinal_confidence = 0.05
+[backend.parking_controller]
+# Fail closed until this profile is measured against the active vehicle and adapter.
+calibration_verified = false
+calibration_profile_id = ''
+vehicle_model_hash = 0
+game_build = ''
+adapter_version = ''
+steering_convention = 'positive_wheel_is_positive_xinput'
+steering_profile = [
+  { wheel_steer = -1.0, command = -1.0 },
+  { wheel_steer = 0.0, command = 0.0 },
+  { wheel_steer = 1.0, command = 1.0 },
+]
+steering_feedback_gain = 0.35
+steering_ki = 0.10
+steering_integral_min = -0.5
+steering_integral_max = 0.5
+steering_slew_per_second = 4.0
+speed_kp = 0.45
+speed_ki = 0.12
+speed_integral_min = -2.0
+speed_integral_max = 2.0
+max_throttle_effort = 0.65
+max_brake_effort = 0.70
+longitudinal_slew_per_second = 2.0
+stop_probability_threshold = 0.65
+stop_probability_release_threshold = 0.35
+hold_speed_mps = 0.15
+stop_brake_effort = 0.45
+max_desired_speed_mps = 2.22
+max_dt = '250ms'
+plan_timeout = '400ms'
+telemetry_timeout = '250ms'
+estimated_actuation_latency = '50ms'
+expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
 
 [backend.inference]
 auto_load = false
+planner_format = 'temporal_telemetry_gru_v2'
+control_contract = 'parking_setpoint_v1'
 dispatch_stride = 2
 fps = 30
 frame_height = 480
 frame_width = 480
-high_speed_steer_gain = 0.75
-low_speed_steer_gain = 1.35
 jpeg_quality = 90
-launch_speed_threshold = 1.0
-launch_target_speed_margin = 0.75
-launch_throttle_min = 0.22
-max_target_speed_kph = 8.0
 model_device = 'cuda'
 model_server_url = 'http://127.0.0.1:8090'
 request_timeout = '5s'
 inference_timeout = '250ms'
 alignment_tolerance = '125ms'
+max_frame_telemetry_skew = '75ms'
 source_id = 'monitor-2'
-steer_gain_fade_speed_mps = 5.0
-steer_command_rate_per_second = 4.0
-steer_response_blend = 0.55
-target_speed_deadband = 0.05
-target_speed_error_gain = 0.7
 
 [dataset]
 data_root = 'S:\fsd_fivem_data'
@@ -87,8 +82,9 @@ image_offsets = [-8, -6, -4, -2, 0]
 label_tolerance = '100ms'
 telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
 future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_sample_interval_ms = 50
 telemetry_feature_names = ['current_speed', 'yaw_sin', 'yaw_cos', 'yaw_rate', 'steering', 'acceleration']
-control_target_names = ['steering', 'acceleration', 'brakePressureAvg']
+control_target_names = ['desired_wheel_steer_normalized', 'desired_speed_mps', 'stop_probability']
 aux_target_names = ['future_speed', 'future_speed_delta', 'future_yaw_delta', 'future_yaw_rate']
 frame_stride = 2
 sample_stride = 4
@@ -96,17 +92,19 @@ sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
 train_run_ids = []
 val_run_ids = []
+# Parking-setpoint training uses only successful forward-bay attempts with complete goal/outcome metadata by default.
+include_failed_or_nonparking_trips = false
 
 [dataset.target_transforms]
-[dataset.target_transforms.steering]
+[dataset.target_transforms.desired_wheel_steer_normalized]
 type = 'signed_cap'
 clip = 1.0
 
-[dataset.target_transforms.acceleration]
-type = 'signed_cap'
-clip = 1.0
+[dataset.target_transforms.desired_speed_mps]
+type = 'positive_cap'
+clip = 2.22
 
-[dataset.target_transforms.brakePressureAvg]
+[dataset.target_transforms.stop_probability]
 type = 'positive_cap'
 clip = 1.0
 
@@ -233,9 +231,9 @@ enabled = true
 decay = 0.999
 
 [training.target_loss_weights]
-steering = 2.5
-acceleration = 3.9
-brakePressureAvg = 2.5
+desired_wheel_steer_normalized = 2.5
+desired_speed_mps = 3.9
+stop_probability = 2.5
 future_speed = 1.8
 future_speed_delta = 1.5
 future_yaw_delta = 1.3

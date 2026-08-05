@@ -5,6 +5,8 @@ export type EgoControlTelemetry = {
     steering: number
     acceleration: number
     brakePressureAvg: number
+    /** Integer GTA model hash for the sampled vehicle; zero when no ego vehicle exists. */
+    vehicleModelHash: number
     vehicleExists: boolean
     isInVehicle: boolean
     positionX?: number
@@ -49,6 +51,7 @@ export function createNoEgoControlTelemetry(gameTimeMs: number): EgoControlTelem
         steering: 0,
         acceleration: 0,
         brakePressureAvg: 0,
+        vehicleModelHash: 0,
         vehicleExists: false,
         isInVehicle: false,
         collisionState: "",

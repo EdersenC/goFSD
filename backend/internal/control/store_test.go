@@ -316,6 +316,7 @@ func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 		BrakePressureAvg:      0.3,
 		VehicleExists:         true,
 		IsInVehicle:           true,
+		VehicleModelHash:      424242,
 		PositionX:             &positionX,
 		PositionY:             &positionY,
 		PositionZ:             &positionZ,
@@ -339,6 +340,9 @@ func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 	}
 	if snapshot.SpeedMPS != 12.5 {
 		t.Fatalf("unexpected speed normalization: %+v", snapshot)
+	}
+	if snapshot.VehicleModelHash != 424242 {
+		t.Fatalf("expected vehicle identity in normalized telemetry, got=%d", snapshot.VehicleModelHash)
 	}
 	if snapshot.HeadingRad == nil || math.Abs(*snapshot.HeadingRad-math.Pi/2) > 1e-9 {
 		t.Fatalf("expected heading in radians, got=%+v", snapshot.HeadingRad)
@@ -365,6 +369,12 @@ func TestTelemetryNormalizationProducesEgoSnapshot(t *testing.T) {
 	}
 	if ego.LastAppliedSteer != 0.25 || ego.LastAppliedThrottle != 0.50 || ego.LastAppliedBrake != 0.10 {
 		t.Fatalf("unexpected applied controls in ego state: %+v", ego)
+	}
+	if ego.SteeringActual == nil || math.Abs(*ego.SteeringActual-0.5) > 1e-9 {
+		t.Fatalf("expected measured steering in actuator ego state, got=%+v", ego.SteeringActual)
+	}
+	if ego.VehicleModelHash != 424242 {
+		t.Fatalf("expected vehicle identity in actuator ego state, got=%d", ego.VehicleModelHash)
 	}
 }
 

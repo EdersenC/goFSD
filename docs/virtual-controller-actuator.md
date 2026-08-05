@@ -1,81 +1,104 @@
-# Virtual controller actuator
+# Virtual controller and parking setpoint runtime
 
-The Go backend owns a persistent virtual Xbox 360 controller for model-driven inference. Expert parking collection does **not** use this path: FiveM's native parking task drives those demonstrations directly.
+The Go backend owns a persistent virtual Xbox 360 controller for model evaluation. Expert demonstration collection does not use it: FiveM's native parking task produces the successful forward-bay examples.
 
 ## Runtime boundary
 
-- Live actuation is Windows-only; non-Windows builds expose an unsupported actuator state.
-- Install ViGEmBus and run the backend with enough permission to create a virtual controller.
-- Start the backend with `scripts/dev-backend.ps1` so the data root and working directory are consistent.
-- Start `scripts/dev-model-server.ps1`, load a checkpoint from the Models/Advanced UI, and only then start inference.
-
-The request flow is:
+- Live actuation is Windows-only and requires ViGEmBus.
+- The backend and model server must use the same `fsd_trainer/train_config.toml` and data root.
+- Load a `temporal_telemetry_gru_v2` / `parking_setpoint_v1` checkpoint before starting inference.
+- Keep the backend bound to loopback; its control endpoints are intentionally local and unauthenticated.
 
 ```text
-FiveM telemetry + captured frames
-             ↓
-Go inference bridge → Python planner
-             ↓
-Go translation and actuator safety
-             ↓
-virtual Xbox controller → GTA/FiveM
+FiveM wheel/speed telemetry + captured frames
+                    ↓
+          Python parking planner
+                    ↓
+      versioned physical setpoint plan
+                    ↓
+ calibrated Go feedback controller + safety
+                    ↓
+       virtual Xbox controller → GTA
 ```
 
-FiveM publishes vehicle state, but it does not apply predicted steer/throttle/brake values itself.
+The Python model never outputs trigger values. It outputs desired normalized physical wheel steer, desired speed in meters per second, and stop probability at the exact future times declared by the checkpoint.
 
-## Parking safety boundary
+## Arming and ownership
 
-The checked-in parking profile limits inferred motion to `8 km/h`. The actuator also:
+Inference starts only when all of these agree:
 
-- clamps and smooths steering, throttle, and brake;
-- makes brake win if throttle and brake conflict;
-- applies overspeed braking;
-- releases or decays stale enabled drive commands;
-- preserves reverse lockout by translating a real brake request below the lockout speed into a handbrake hold, then releasing that automatic hold on forward throttle; and
-- exposes the received, resolved, and applied values at `GET /actuator/state`.
+- FiveM ego telemetry is fresh and valid;
+- a forward-bay goal is calibrated and the car is inside the curriculum start envelope;
+- the loaded checkpoint exposes the exact parking contract, timing, tensors, and enabled state inputs;
+- the virtual controller reports ready with no apply fault;
+- the parking controller has a verified calibration profile; and
+- the current `vehicleModelHash` equals the calibrated hash.
 
-Inference starts only when FiveM reports a fresh, valid ego vehicle in the `ready` evaluation phase, a calibrated parking target, and a pose inside the forward curriculum start envelope: `-17.0..-9.5 m` longitudinal, `+/-2.75 m` lateral, and `+/-17 deg` heading error relative to the bay. The loaded checkpoint must enable the target-present and signed longitudinal/lateral/heading parking inputs and expose steering, acceleration, and brake heads. The session binds both the calibrated target pose and checkpoint identity so neither can be replaced while the car is moving.
+The session first claims parking ownership. Before the first plan, the actuator holds the car with service brake or low-speed handbrake and waits for that exact ownership command ID to be applied. Once armed, parking inference may submit only `parking_setpoint_v1` plans or request the actuator-owned safety stop. Other enabled commands are rejected; an explicit disabled manual safety command can preempt the session.
 
-Any prediction/actuator error, target loss, collision, reverse motion, off-ground state, tilt beyond `5 deg`, frame/telemetry skew beyond the configured limit, unexpected capture stream/process exit, or failure to settle within `45 s` latches the session. Every arm and terminal hold carries a monotonic command ID; the backend waits until that exact neutral or disabled-handbrake command is reported as physically applied. An apply fault or confirmation timeout is terminal and can never be reported as a parking success. Once confirmed, the safety handbrake remains held beyond the normal stale-command timeout and the inference capture process is canceled. `GET /inference/status` reports `active: true` until process cleanup finishes and then preserves the terminal `succeeded` or `error` result with `active: false`. A new Start is the only operation that rechecks every parking/model/actuator precondition and confirms neutral actuation before motion can resume; legacy cruising fallback decay is never applied in this parking-first path.
+Success, manual stop, target loss, collision, reverse motion, invalid pose, stale telemetry/plan, model error, controller error, or capture-process failure requests a persistent terminal stop from the actuator. The actuator uses service brake while moving and handbrake only after fresh telemetry confirms low speed. The backend waits for the exact stop command ID and a safe applied brake/hold state before reporting confirmation.
 
-Safety holds and neutral Start arms are acknowledged only after the actuator reports that the exact submitted command ID reached the controller with the expected applied state. A queued command, an older matching state, or a controller apply error does not satisfy this gate; parking success becomes visible only after the hold is confirmed.
+## Feedback and fail-safe behavior
 
-The parking start gate compares the checkpoint's exact ordered image, telemetry, future-offset, telemetry-feature, control-head, auxiliary-head, image-size, frame-window, and enabled state-input contracts. Temporal-horizon actuation currently fails closed at Start because its control timing is not yet derived from the checkpoint's future offsets; keep `temporal_horizon_actuator_enabled = false` for parking.
+At the actuator tick, the backend samples the plan using its observation age plus configured actuation latency. Steering uses a calibrated monotonic feed-forward map plus bounded PI correction from measured wheel steer. Speed uses bounded PI control and one signed longitudinal effort, so throttle and brake are mutually exclusive.
 
-The reverse lockout is why the current milestone is forward-bay parking only. Adding reverse or parallel parking requires an explicit direction/gear output and an independently tested interlock; negative acceleration is not treated as reverse.
+Stop probability has hysteresis. While moving, a stop request uses service brake. Handbrake is used only when fresh telemetry confirms speed is below the hold threshold. If speed is unknown, the fail-safe chooses service braking rather than assuming the vehicle is stopped.
 
-## Manual smoke test
+Every plan and telemetry sample has a freshness limit. Frame PTS, source telemetry time, backend receipt time, and source/receipt skew are checked independently. Wrong contract, planner version, direction, horizon timing, output bounds, timestamp echo, vehicle identity, or controller `dt` fails closed. `GET /actuator/state` shows the plan receipt, selected setpoint, measured state, P/I terms, requested effort, final applied controls, and fault.
 
-Before collecting fresh demonstrations, perform a steering-sign acceptance check at walking speed: send `+0.20` steering, verify GTA turns right, and verify normalized `steering_actual` is positive. If either sign is wrong, stop and disable actuation; invert the sign exactly once in the FiveM telemetry normalization boundary, then repeat this check before collecting data.
+## Calibration profile
 
-With the Windows backend running, send a short normalized command:
+The checked-in config is deliberately unverified. Obtain the current hash from `GET /control/state`, measure the selected vehicle, then fill `[backend.parking_controller]`:
+
+```toml
+[backend.parking_controller]
+calibration_verified = true
+calibration_profile_id = "vehicle-name-gamebuild-adapter-v1"
+vehicle_model_hash = 123456789
+game_build = "replace-with-tested-build"
+adapter_version = "vgamepad-go-v1"
+steering_convention = "positive_wheel_is_positive_xinput"
+steering_profile = [
+  { wheel_steer = -1.0, command = -1.0 },
+  { wheel_steer =  0.0, command =  0.0 },
+  { wheel_steer =  1.0, command =  1.0 },
+]
+```
+
+Replace the identity points with measured monotonic points when the game response is nonlinear. The vehicle hash is checked live. `game_build` and `adapter_version` are required test provenance but are not currently sensed by FiveM telemetry, so the operator must verify them. Restart the backend after editing and confirm `parkingController.ready: true` at `GET /actuator/state`.
+
+Before model evaluation, use the manual controller only for calibration:
 
 ```powershell
 .\.venv\Scripts\python.exe fsd_trainer\src\gta_fsd\send_control.py `
-  --config fsd_trainer\train_config.toml --steer 0.20 --throttle 0.20
-```
+  --config fsd_trainer\train_config.toml --steer 0.20 --throttle 0.12
 
-Release every control explicitly:
-
-```powershell
 .\.venv\Scripts\python.exe fsd_trainer\src\gta_fsd\send_control.py `
   --config fsd_trainer\train_config.toml --disabled
 ```
 
-Inspect state:
+Verify small positive/negative steering, settled wheel response, low trigger response, braking, latency, and release. Keep the car at walking speed with room around it. If steering signs disagree, stop and correct the convention boundary once before collecting or evaluating data.
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8080/actuator/state
-```
+## Shared configuration
 
-## Configuration
+`fsd_trainer/train_config.toml` separates manual/device safety from the model controller:
 
-`fsd_trainer/train_config.toml` is the shared runtime configuration. The primary actuator fields are:
+- `[backend.actuator]`: controller tick, request timeout, manual calibration gains, and final speed/overspeed safety.
+- `[backend.parking_controller]`: calibration identity, steering map, PI gains, effort/slew bounds, stop hysteresis, freshness, latency, and expected horizon timing.
+- `[backend.inference]`: exact planner/control contract, capture cadence, model server, and frame/telemetry alignment limits.
+- `[dataset]`: the 50 ms sample interval and future offsets from which `50..300 ms` control timing is derived.
 
-- `tick_hz`, `request_timeout`, and optional `stale_timeout`;
-- `steering_gain`, `throttle_gain`, and `throttle_floor`;
-- `speed_limit_kph`, overspeed margin/brake, and `model_brake_threshold`;
-- `reverse_lockout_speed_kph`; and
-- the optional temporal-horizon safety settings.
+Manual actuator tuning does not alter model setpoints or the parking PI controller. It remains available only for deliberate calibration and direct manual commands.
 
-The Advanced UI can tune supported values live. Save deliberately: the checked-in TOML remains the reproducible baseline for the next run.
+## Live acceptance
+
+Unit and replay checks are not a live acceptance test. On the actual Windows/FiveM stack, verify:
+
+1. steering sign, monotonicity, center, and saturation;
+2. service-brake versus low-speed handbrake transition;
+3. no simultaneous applied throttle and brake;
+4. stale plan, stale telemetry, wrong vehicle, and controller apply failures;
+5. one successful and one deliberately failed evaluation with trace receipts; and
+6. comparable setpoint tracking at the supported inference cadence.
+
+The current contract is forward-only. Reverse or parallel parking requires explicit direction/gear supervision and a separate safety interlock.

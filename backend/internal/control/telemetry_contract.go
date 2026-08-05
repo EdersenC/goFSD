@@ -38,6 +38,7 @@ type EgoTelemetrySnapshot struct {
 	WallTimeS             *float64 `json:"wall_time_s,omitempty"`
 	VehicleExists         bool     `json:"vehicle_exists"`
 	IsInVehicle           bool     `json:"is_in_vehicle"`
+	VehicleModelHash      int64    `json:"vehicle_model_hash"`
 	PositionX             *float64 `json:"position_x,omitempty"`
 	PositionY             *float64 `json:"position_y,omitempty"`
 	PositionZ             *float64 `json:"position_z,omitempty"`
@@ -69,6 +70,8 @@ type EgoTelemetrySnapshot struct {
 type ActuatorEgoState struct {
 	TimestampS          float64  `json:"timestamp_s"`
 	SpeedMPS            float64  `json:"speed_mps"`
+	VehicleModelHash    int64    `json:"vehicle_model_hash"`
+	SteeringActual      *float64 `json:"steering_actual,omitempty"`
 	HeadingRad          *float64 `json:"heading_rad,omitempty"`
 	YawRateRadS         *float64 `json:"yaw_rate_rad_s,omitempty"`
 	Position            *Vec3    `json:"position,omitempty"`
@@ -165,6 +168,7 @@ func (a *FiveMTelemetryAdapter) Snapshot(update TelemetryUpdate, receivedAt time
 		TimestampS:            timestampS,
 		VehicleExists:         update.VehicleExists,
 		IsInVehicle:           update.IsInVehicle,
+		VehicleModelHash:      update.VehicleModelHash,
 		PositionX:             cloneFloatPtr(update.PositionX),
 		PositionY:             cloneFloatPtr(update.PositionY),
 		PositionZ:             cloneFloatPtr(update.PositionZ),
@@ -233,6 +237,8 @@ func (a *FiveMTelemetryAdapter) ToActuatorEgoState(snapshot EgoTelemetrySnapshot
 	state := ActuatorEgoState{
 		TimestampS:          snapshot.TimestampS,
 		SpeedMPS:            snapshot.SpeedMPS,
+		VehicleModelHash:    snapshot.VehicleModelHash,
+		SteeringActual:      cloneFloatPtr(snapshot.SteeringActual),
 		HeadingRad:          cloneFloatPtr(snapshot.HeadingRad),
 		YawRateRadS:         cloneFloatPtr(snapshot.YawRateRadS),
 		LastAppliedSteer:    optionalFloat(snapshot.SteeringApplied, 0),
@@ -442,6 +448,7 @@ func cloneEgoTelemetrySnapshot(snapshot EgoTelemetrySnapshot) EgoTelemetrySnapsh
 
 func cloneActuatorEgoState(state ActuatorEgoState) ActuatorEgoState {
 	out := state
+	out.SteeringActual = cloneFloatPtr(state.SteeringActual)
 	out.HeadingRad = cloneFloatPtr(state.HeadingRad)
 	out.YawRateRadS = cloneFloatPtr(state.YawRateRadS)
 	if state.Position != nil {

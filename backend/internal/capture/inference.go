@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -17,12 +18,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
+	"awesomeProject/internal/parkingcontrol"
 )
 
 const (
@@ -40,7 +44,12 @@ const (
 	defaultParkingEvaluationLimit  = 45 * time.Second
 	defaultActuatorConfirmTimeout  = 750 * time.Millisecond
 	defaultActuatorConfirmInterval = 10 * time.Millisecond
+	defaultFrameTimingTimeout      = 500 * time.Millisecond
+	framePTSCadenceTolerance       = 2 * time.Millisecond
+	framePTSClockLeadTolerance     = 50 * time.Millisecond
 )
+
+var inferenceShowinfoPattern = regexp.MustCompile(`\bn:\s*([0-9]+)\s+pts:\s*\S+\s+pts_time:\s*(\S+)`)
 
 var (
 	ErrInferenceAlreadyRunning      = errors.New("inference already running")
@@ -63,44 +72,41 @@ type InferenceModelLoadRequest struct {
 }
 
 type InferencePrediction struct {
-	Sequence                      int                         `json:"sequence"`
-	FrameIndex                    int                         `json:"frameIndex"`
-	SourceFPS                     int                         `json:"sourceFps"`
-	InferenceHz                   int                         `json:"inferenceHz"`
-	ModelServerURL                string                      `json:"modelServerUrl"`
-	Checkpoint                    string                      `json:"checkpoint,omitempty"`
-	ModelDevice                   string                      `json:"modelDevice,omitempty"`
-	PlannerFormat                 string                      `json:"plannerFormat,omitempty"`
-	CapturedAt                    string                      `json:"capturedAt"`
-	PredictedAt                   string                      `json:"predictedAt"`
-	WindowFrameIndices            []int                       `json:"windowFrameIndices"`
-	WindowFrameHashes             []string                    `json:"windowFrameHashes"`
-	WindowFrameTimestampsMs       []int64                     `json:"windowFrameTimestampsMs"`
-	LatestFrameTimestampS         float64                     `json:"latestFrameTimestampS,omitempty"`
-	TelemetryTimestampS           float64                     `json:"telemetryTimestampS,omitempty"`
-	FrameID                       *int64                      `json:"frameId,omitempty"`
-	CaptureLatencyMs              *float64                    `json:"captureLatencyMs,omitempty"`
-	FrameTelemetrySkewMs          float64                     `json:"frameTelemetrySkewMs,omitempty"`
-	FrameTelemetryAligned         bool                        `json:"frameTelemetryAligned"`
-	SelectedTelemetryOffsets      []int                       `json:"selectedTelemetryOffsets"`
-	SelectedTelemetryTimestampsMs []int64                     `json:"selectedTelemetryTimestampsMs"`
-	ImageTensorShape              []int                       `json:"imageTensorShape"`
-	TelemetryTensorShape          []int                       `json:"telemetryTensorShape"`
-	PredControlsShape             []int                       `json:"predControlsShape"`
-	PredAuxShape                  []int                       `json:"predAuxShape,omitempty"`
-	LastTelemetry                 *control.RuntimeTelemetry   `json:"lastTelemetry,omitempty"`
-	RawPredControls               [][]float64                 `json:"rawPredControls"`
-	RawPredAux                    [][]float64                 `json:"rawPredAux,omitempty"`
-	RawStateInputs                map[string]any              `json:"rawStateInputs,omitempty"`
-	NormalizedStateInputs         map[string]float64          `json:"normalizedStateInputs,omitempty"`
-	CollapsedCommand              actuator.ControlCommand     `json:"collapsedCommand"`
-	PostProcessedCommand          actuator.ControlCommand     `json:"postProcessedCommand"`
-	ThrottleHeld                  bool                        `json:"throttleHeld"`
-	HeldThrottle                  float64                     `json:"heldThrottle"`
-	ProcessorDebug                actuator.ProcessingDebug    `json:"processorDebug"`
-	ProcessorState                actuator.ProcessorState     `json:"processorState"`
-	PredictionHorizon             *actuator.PredictionHorizon `json:"predictionHorizon,omitempty"`
-	FallbackApplied               bool                        `json:"fallbackApplied"`
+	Sequence                      int                       `json:"sequence"`
+	FrameIndex                    int                       `json:"frameIndex"`
+	SourceFPS                     int                       `json:"sourceFps"`
+	InferenceHz                   int                       `json:"inferenceHz"`
+	ModelServerURL                string                    `json:"modelServerUrl"`
+	Checkpoint                    string                    `json:"checkpoint,omitempty"`
+	ModelDevice                   string                    `json:"modelDevice,omitempty"`
+	PlannerFormat                 string                    `json:"plannerFormat,omitempty"`
+	PlannerFormatVersion          int                       `json:"plannerFormatVersion"`
+	ControlContract               parkingControlContract    `json:"controlContract"`
+	ControlHorizonDtMs            []int                     `json:"controlHorizonDtMs"`
+	TelemetrySampleIntervalMs     int                       `json:"telemetrySampleIntervalMs"`
+	CapturedAt                    string                    `json:"capturedAt"`
+	PredictedAt                   string                    `json:"predictedAt"`
+	WindowFrameIndices            []int                     `json:"windowFrameIndices"`
+	WindowFrameHashes             []string                  `json:"windowFrameHashes"`
+	WindowFrameTimestampsMs       []int64                   `json:"windowFrameTimestampsMs"`
+	LatestFrameTimestampS         float64                   `json:"latestFrameTimestampS,omitempty"`
+	TelemetryTimestampS           float64                   `json:"telemetryTimestampS,omitempty"`
+	FrameID                       *int64                    `json:"frameId,omitempty"`
+	CaptureLatencyMs              *float64                  `json:"captureLatencyMs,omitempty"`
+	FrameTelemetrySkewMs          float64                   `json:"frameTelemetrySkewMs,omitempty"`
+	FrameTelemetryAligned         bool                      `json:"frameTelemetryAligned"`
+	SelectedTelemetryOffsets      []int                     `json:"selectedTelemetryOffsets"`
+	SelectedTelemetryTimestampsMs []int64                   `json:"selectedTelemetryTimestampsMs"`
+	ImageTensorShape              []int                     `json:"imageTensorShape"`
+	TelemetryTensorShape          []int                     `json:"telemetryTensorShape"`
+	PredControlsShape             []int                     `json:"predControlsShape"`
+	PredAuxShape                  []int                     `json:"predAuxShape,omitempty"`
+	LastTelemetry                 *control.RuntimeTelemetry `json:"lastTelemetry,omitempty"`
+	RawPredControls               [][]float64               `json:"rawPredControls"`
+	RawPredAux                    [][]float64               `json:"rawPredAux,omitempty"`
+	RawStateInputs                map[string]any            `json:"rawStateInputs,omitempty"`
+	NormalizedStateInputs         map[string]float64        `json:"normalizedStateInputs,omitempty"`
+	SetpointPlan                  *parkingcontrol.Plan      `json:"setpointPlan,omitempty"`
 }
 
 type InferenceStatus struct {
@@ -128,14 +134,16 @@ type InferenceStatus struct {
 }
 
 type inferenceSession struct {
-	cancel    context.CancelFunc
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    io.ReadCloser
-	cmd       *exec.Cmd
-	done      chan error
-	predictQ  chan predictionWindow
-	frameDump *debugFrameDump
+	ctx          context.Context
+	cancel       context.CancelFunc
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	stderr       io.ReadCloser
+	cmd          *exec.Cmd
+	done         chan error
+	predictQ     chan predictionWindow
+	frameTimings chan inferenceFrameTimingEvent
+	frameDump    *debugFrameDump
 }
 
 type debugFrameDump struct {
@@ -159,12 +167,37 @@ type bufferedInferenceFrame struct {
 	image      *image.RGBA
 }
 
+type inferenceFrameTiming struct {
+	index      int
+	pts        time.Duration
+	observedAt time.Time
+}
+
+type inferenceFrameTimingEvent struct {
+	timing inferenceFrameTiming
+	err    error
+}
+
+type inferenceFrameClock struct {
+	frameInterval time.Duration
+	initialized   bool
+	firstPTS      time.Duration
+	anchorAt      time.Time
+	lastIndex     int
+	lastPTS       time.Duration
+	lastObserved  time.Time
+}
+
 type actuatorSubmitter interface {
 	Submit(req actuator.CommandRequest) (actuator.State, error)
 }
 
-type actuatorHorizonSubmitter interface {
-	SubmitPredictionHorizon(plan actuator.PredictionHorizon) (actuator.State, error)
+type actuatorParkingPlanSubmitter interface {
+	SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (actuator.State, error)
+}
+
+type actuatorParkingSafetyStopper interface {
+	RequestParkingSafetyStop() (actuator.State, error)
 }
 
 type actuatorStateProvider interface {
@@ -172,26 +205,31 @@ type actuatorStateProvider interface {
 }
 
 type actuatorApplyExpectation struct {
-	label     string
-	enabled   bool
-	handbrake bool
+	label    string
+	stopping bool
 }
 
 type pythonPredictResponse struct {
-	Checkpoint            string                           `json:"checkpoint"`
-	Device                string                           `json:"device"`
-	PlannerFormat         string                           `json:"planner_format"`
-	ImageOffsets          []int                            `json:"image_offsets"`
-	TelemetryOffsets      []int                            `json:"telemetry_offsets"`
-	TelemetryFeatureNames []string                         `json:"telemetry_feature_names"`
-	ControlTargetNames    []string                         `json:"control_target_names"`
-	AuxTargetNames        []string                         `json:"aux_target_names"`
-	PredControls          [][][]float64                    `json:"pred_controls"`
-	PredAux               [][][]float64                    `json:"pred_aux"`
-	FutureOffsets         []int                            `json:"future_offsets"`
-	StateInputs           map[string]parkingModelInputSpec `json:"state_inputs"`
-	RawStateInputs        map[string]any                   `json:"raw_state_inputs"`
-	NormalizedStateInputs map[string]float64               `json:"normalized_state_inputs"`
+	Checkpoint                string                           `json:"checkpoint"`
+	Device                    string                           `json:"device"`
+	PlannerFormat             string                           `json:"planner_format"`
+	PlannerFormatVersion      int                              `json:"planner_format_version"`
+	ControlContract           parkingControlContract           `json:"control_contract"`
+	ControlHorizonDtMs        []int                            `json:"control_horizon_dt_ms"`
+	TelemetrySampleIntervalMs int                              `json:"telemetry_sample_interval_ms"`
+	SampledAtS                float64                          `json:"sampled_at_s"`
+	Direction                 string                           `json:"direction"`
+	ImageOffsets              []int                            `json:"image_offsets"`
+	TelemetryOffsets          []int                            `json:"telemetry_offsets"`
+	TelemetryFeatureNames     []string                         `json:"telemetry_feature_names"`
+	ControlTargetNames        []string                         `json:"control_target_names"`
+	AuxTargetNames            []string                         `json:"aux_target_names"`
+	PredControls              [][][]float64                    `json:"pred_controls"`
+	PredAux                   [][][]float64                    `json:"pred_aux"`
+	FutureOffsets             []int                            `json:"future_offsets"`
+	StateInputs               map[string]parkingModelInputSpec `json:"state_inputs"`
+	RawStateInputs            map[string]any                   `json:"raw_state_inputs"`
+	NormalizedStateInputs     map[string]float64               `json:"normalized_state_inputs"`
 }
 
 type pythonModelsResponse struct {
@@ -210,7 +248,6 @@ type Inferencer struct {
 	nowFunc                     func() time.Time
 	requestTimeout              time.Duration
 	config                      InferenceConfig
-	actuatorConfig              actuator.Config
 	modelServerURL              string
 	autoLoad                    bool
 	loadedCheckpoint            string
@@ -220,10 +257,6 @@ type Inferencer struct {
 	actuator                    actuatorSubmitter
 	telemetryStaleAfter         time.Duration
 	lastTelemetryWaitLog        time.Time
-	processorState              actuator.ProcessorState
-	throttleHoldUntil           time.Time
-	throttleHoldValue           float64
-	lastDriveDemand             float64
 	telemetryNormalizer         *telemetryNormalizer
 	normalizationErr            error
 	parkingTarget               *parkingInferenceTarget
@@ -241,7 +274,7 @@ type Inferencer struct {
 	active                      *inferenceSession
 }
 
-func NewInferencer(cfg InferenceConfig, actuatorCfg actuator.Config, telemetry *control.Store, actuators ...actuatorSubmitter) *Inferencer {
+func NewInferencer(cfg InferenceConfig, _ actuator.Config, telemetry *control.Store, actuators ...actuatorSubmitter) *Inferencer {
 	if cfg.ModelServerURL == "" {
 		cfg = DefaultInferenceConfig()
 	}
@@ -260,7 +293,6 @@ func NewInferencer(cfg InferenceConfig, actuatorCfg actuator.Config, telemetry *
 		nowFunc:                 time.Now,
 		requestTimeout:          cfg.RequestTimeout,
 		config:                  cfg,
-		actuatorConfig:          actuatorCfg,
 		modelServerURL:          cfg.ModelServerURL,
 		autoLoad:                cfg.AutoLoad,
 		sourceID:                cfg.SourceID,
@@ -282,7 +314,6 @@ func NewInferencer(cfg InferenceConfig, actuatorCfg actuator.Config, telemetry *
 			SourceID:       cfg.SourceID,
 		},
 	}
-	inf.processorState.Stats.HistoryWindow = actuatorCfg.RecentCommandWindow
 	if cfg.TelemetryNormalizationEnabled {
 		inf.telemetryNormalizer, inf.normalizationErr = loadTelemetryNormalizer(cfg.TelemetryNormalizationStatsPath)
 	}
@@ -378,7 +409,6 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		DebugFramesLimit: defaultDebugFrameDumpLimit,
 	}
 	i.status = status
-	i.resetControlStateLocked()
 	i.mu.Unlock()
 
 	spec := monitorCaptureSpec(monitor)
@@ -406,10 +436,10 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	if err := i.armActuatorForParkingInference(); err != nil {
 		cancel()
 		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
-			err = fmt.Errorf("%w; failed to restore the confirmed parking safety hold: %v", err, holdErr)
+			err = fmt.Errorf("%w; failed to establish the actuator-owned parking safety stop: %v", err, holdErr)
 		}
 		i.setInferenceError(err)
-		return InferenceStatus{}, fmt.Errorf("%w: failed to release the parking safety hold: %v", ErrInferenceStartFailed, err)
+		return InferenceStatus{}, fmt.Errorf("%w: failed to establish parking actuator ownership: %v", ErrInferenceStartFailed, err)
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -428,14 +458,16 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	}
 
 	session := &inferenceSession{
-		cancel:    cancel,
-		stdin:     stdin,
-		stdout:    stdout,
-		stderr:    stderr,
-		cmd:       cmd,
-		done:      make(chan error, 1),
-		predictQ:  make(chan predictionWindow, 1),
-		frameDump: frameDump,
+		ctx:          loopCtx,
+		cancel:       cancel,
+		stdin:        stdin,
+		stdout:       stdout,
+		stderr:       stderr,
+		cmd:          cmd,
+		done:         make(chan error, 1),
+		predictQ:     make(chan predictionWindow, 1),
+		frameTimings: make(chan inferenceFrameTimingEvent, inferenceFrameTimingBufferSize(i.config.FPS)),
+		frameDump:    frameDump,
 	}
 
 	i.mu.Lock()
@@ -460,11 +492,11 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	status = cloneInferenceStatus(i.status)
 	i.mu.Unlock()
 
-	go i.waitForInference(session)
 	go i.consumeInferenceStderr(session)
 	go i.runPredictionWorker(loopCtx, session, modelServerURL)
 	go i.consumeInferenceFrames(loopCtx, session)
 	go i.monitorParkingEvaluationDeadline(loopCtx, session)
+	go i.waitForInference(session)
 
 	return status, nil
 }
@@ -569,7 +601,6 @@ func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
 	if shouldHold {
 		i.parkingSafetyTripped = true
 		i.parkingManualStop = true
-		i.resetControlStateLocked()
 		i.status.State = "stopping"
 		i.status.StoppedAt = ""
 	}
@@ -654,7 +685,6 @@ func (i *Inferencer) finishInferenceSession(session *inferenceSession, err error
 		i.parkingTarget = nil
 		i.parkingCheckpoint = ""
 		i.parkingStartEnvelopePending = false
-		i.resetControlStateLocked()
 		i.status.StoppedAt = i.nowFunc().UTC().Format(time.RFC3339Nano)
 		switch {
 		case holdFailed:
@@ -690,26 +720,51 @@ func (i *Inferencer) finishInferenceSession(session *inferenceSession, err error
 }
 
 func (i *Inferencer) consumeInferenceStderr(session *inferenceSession) {
-	defer func() { _ = session.stderr.Close() }()
-	buf, err := io.ReadAll(session.stderr)
-	if err != nil {
-		return
+	defer func() {
+		_ = session.stderr.Close()
+		if session.frameTimings != nil {
+			close(session.frameTimings)
+		}
+	}()
+
+	scanner := bufio.NewScanner(session.stderr)
+	scanner.Buffer(make([]byte, 4096), 256*1024)
+	diagnostics := make([]string, 0, 4)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		timing, matched, err := parseInferenceFrameTiming(line, i.nowFunc().UTC())
+		if matched {
+			if !publishInferenceFrameTiming(session, inferenceFrameTimingEvent{timing: timing, err: err}) {
+				return
+			}
+			continue
+		}
+		if isInferenceFFmpegErrorLine(line) && len(diagnostics) < 4 {
+			diagnostics = append(diagnostics, line)
+		}
 	}
-	message := strings.TrimSpace(string(buf))
-	if message == "" {
-		return
+	if err := scanner.Err(); err != nil {
+		_ = publishInferenceFrameTiming(session, inferenceFrameTimingEvent{
+			err: fmt.Errorf("failed to read FFmpeg frame timing metadata: %w", err),
+		})
+		diagnostics = append(diagnostics, err.Error())
 	}
-	i.mu.Lock()
-	if i.status.LastError == "" && i.status.State != "succeeded" {
-		i.status.LastError = message
+
+	message := strings.TrimSpace(strings.Join(diagnostics, "\n"))
+	if message != "" {
+		i.mu.Lock()
+		if i.status.LastError == "" && i.status.State != "succeeded" {
+			i.status.LastError = message
+		}
+		i.mu.Unlock()
 	}
-	i.mu.Unlock()
 }
 
 func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *inferenceSession) {
 	defer func() { _ = session.stdout.Close() }()
 	frameBytes := make([]byte, inferenceRawFrameBytes(i.config.FrameWidth, i.config.FrameHeight))
 	buffer := make([]bufferedInferenceFrame, 0, requiredFrameCount(i.config.ImageOffsets)+1)
+	frameClock := newInferenceFrameClock(i.config.FPS)
 	frameIndex := 0
 	sequence := 0
 
@@ -727,7 +782,13 @@ func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *infere
 			return
 		}
 
-		capturedAt := i.nowFunc().UTC()
+		capturedAt, err := receiveInferenceFrameTimestamp(ctx, session, frameClock, frameIndex)
+		if err != nil {
+			if ctx.Err() == nil {
+				i.handleSessionPredictionFailure(session, predictionWindow{}, fmt.Errorf("inference frame timing failed: %w", err))
+			}
+			return
+		}
 		frame := bufferedInferenceFrame{
 			index:      frameIndex,
 			capturedAt: capturedAt,
@@ -759,6 +820,185 @@ func (i *Inferencer) consumeInferenceFrames(ctx context.Context, session *infere
 	}
 }
 
+func parseInferenceFrameTiming(line string, observedAt time.Time) (inferenceFrameTiming, bool, error) {
+	match := inferenceShowinfoPattern.FindStringSubmatch(line)
+	if len(match) == 0 {
+		isMalformedTiming := strings.Contains(strings.ToLower(line), "showinfo") &&
+			strings.Contains(line, " n:") &&
+			strings.Contains(line, "pts_time:")
+		if isMalformedTiming {
+			return inferenceFrameTiming{}, true, fmt.Errorf("malformed FFmpeg showinfo timing line: %q", line)
+		}
+		return inferenceFrameTiming{}, false, nil
+	}
+	if observedAt.IsZero() {
+		return inferenceFrameTiming{}, true, errors.New("FFmpeg showinfo timing observation has no wall-clock timestamp")
+	}
+	index, err := strconv.Atoi(match[1])
+	if err != nil || index < 0 {
+		return inferenceFrameTiming{}, true, fmt.Errorf("invalid FFmpeg showinfo frame index %q", match[1])
+	}
+	ptsSeconds, err := strconv.ParseFloat(match[2], 64)
+	if err != nil || math.IsNaN(ptsSeconds) || math.IsInf(ptsSeconds, 0) || ptsSeconds < 0 {
+		return inferenceFrameTiming{}, true, fmt.Errorf("invalid FFmpeg showinfo pts_time %q for frame %d", match[2], index)
+	}
+	if ptsSeconds > float64((24*time.Hour)/time.Second) {
+		return inferenceFrameTiming{}, true, fmt.Errorf("FFmpeg showinfo pts_time %.6f exceeds the supported capture duration", ptsSeconds)
+	}
+	return inferenceFrameTiming{
+		index:      index,
+		pts:        time.Duration(math.Round(ptsSeconds * float64(time.Second))),
+		observedAt: observedAt,
+	}, true, nil
+}
+
+func publishInferenceFrameTiming(session *inferenceSession, event inferenceFrameTimingEvent) bool {
+	if session == nil || session.frameTimings == nil {
+		return false
+	}
+	if session.ctx == nil {
+		session.frameTimings <- event
+		return true
+	}
+	select {
+	case session.frameTimings <- event:
+		return true
+	case <-session.ctx.Done():
+		return false
+	}
+}
+
+func receiveInferenceFrameTimestamp(
+	ctx context.Context,
+	session *inferenceSession,
+	clock *inferenceFrameClock,
+	expectedIndex int,
+) (time.Time, error) {
+	if session == nil || session.frameTimings == nil {
+		return time.Time{}, errors.New("FFmpeg frame timing metadata stream is unavailable")
+	}
+	timer := time.NewTimer(defaultFrameTimingTimeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return time.Time{}, ctx.Err()
+	case <-timer.C:
+		return time.Time{}, fmt.Errorf("timed out waiting for FFmpeg timing metadata for frame %d", expectedIndex)
+	case event, ok := <-session.frameTimings:
+		if !ok {
+			return time.Time{}, fmt.Errorf("FFmpeg timing metadata ended before frame %d", expectedIndex)
+		}
+		if event.err != nil {
+			return time.Time{}, event.err
+		}
+		return clock.resolve(expectedIndex, event.timing)
+	}
+}
+
+func newInferenceFrameClock(fps int) *inferenceFrameClock {
+	if fps < 1 {
+		return &inferenceFrameClock{}
+	}
+	return &inferenceFrameClock{frameInterval: time.Second / time.Duration(fps), lastIndex: -1}
+}
+
+func (c *inferenceFrameClock) resolve(expectedIndex int, timing inferenceFrameTiming) (time.Time, error) {
+	if c == nil || c.frameInterval <= 0 {
+		return time.Time{}, errors.New("inference frame clock has an invalid frame interval")
+	}
+	if expectedIndex < 0 || timing.index != expectedIndex {
+		return time.Time{}, fmt.Errorf(
+			"FFmpeg timing frame index mismatch: got %d, expected %d",
+			timing.index,
+			expectedIndex,
+		)
+	}
+	if timing.observedAt.IsZero() {
+		return time.Time{}, fmt.Errorf("FFmpeg timing for frame %d has no observation timestamp", timing.index)
+	}
+	if !c.initialized {
+		if expectedIndex != 0 {
+			return time.Time{}, fmt.Errorf("FFmpeg timing began at frame %d instead of frame 0", expectedIndex)
+		}
+		c.initialized = true
+		c.firstPTS = timing.pts
+		c.anchorAt = timing.observedAt
+		c.lastIndex = timing.index
+		c.lastPTS = timing.pts
+		c.lastObserved = timing.observedAt
+		return timing.observedAt, nil
+	}
+	if timing.index != c.lastIndex+1 {
+		return time.Time{}, fmt.Errorf(
+			"FFmpeg timing is out of order: got frame %d after frame %d",
+			timing.index,
+			c.lastIndex,
+		)
+	}
+	if timing.pts <= c.lastPTS {
+		return time.Time{}, fmt.Errorf(
+			"FFmpeg PTS is not increasing at frame %d: got %s after %s",
+			timing.index,
+			timing.pts,
+			c.lastPTS,
+		)
+	}
+	if timing.observedAt.Before(c.lastObserved) {
+		return time.Time{}, fmt.Errorf("FFmpeg timing observation moved backwards at frame %d", timing.index)
+	}
+
+	ptsElapsed := timing.pts - c.firstPTS
+	expectedElapsed := time.Duration(timing.index) * c.frameInterval
+	if durationDistance(ptsElapsed, expectedElapsed) > framePTSCadenceTolerance {
+		return time.Time{}, fmt.Errorf(
+			"FFmpeg PTS cadence mismatch at frame %d: got %s elapsed, expected %s",
+			timing.index,
+			ptsElapsed,
+			expectedElapsed,
+		)
+	}
+	capturedAt := c.anchorAt.Add(ptsElapsed)
+	if capturedAt.After(timing.observedAt.Add(framePTSClockLeadTolerance)) {
+		return time.Time{}, fmt.Errorf(
+			"FFmpeg PTS clock leads its observation by %s at frame %d",
+			capturedAt.Sub(timing.observedAt),
+			timing.index,
+		)
+	}
+
+	c.lastIndex = timing.index
+	c.lastPTS = timing.pts
+	c.lastObserved = timing.observedAt
+	return capturedAt, nil
+}
+
+func durationDistance(left, right time.Duration) time.Duration {
+	if left >= right {
+		return left - right
+	}
+	return right - left
+}
+
+func inferenceFrameTimingBufferSize(fps int) int {
+	if fps < 1 {
+		return 2
+	}
+	return fps * 2
+}
+
+func isInferenceFFmpegErrorLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" || strings.Contains(lower, "showinfo") {
+		return false
+	}
+	for _, marker := range []string{"error", "failed", "invalid", "unable", "not found", "no such", "cannot", "could not", "broken pipe"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func (i *Inferencer) enqueuePredictionWindow(session *inferenceSession, window predictionWindow) {
 	select {
 	case session.predictQ <- window:
@@ -786,12 +1026,12 @@ func (i *Inferencer) runPredictionWorker(ctx context.Context, session *inference
 }
 
 func (i *Inferencer) processPredictionWindow(ctx context.Context, session *inferenceSession, modelServerURL string, window predictionWindow) {
-	prediction, command, err := i.requestPrediction(ctx, modelServerURL, window)
+	prediction, err := i.requestPrediction(ctx, modelServerURL, window)
 	if err != nil {
 		i.handleSessionPredictionFailure(session, window, err)
 		return
 	}
-	submitted, err := i.submitActiveParkingPrediction(session, prediction, command)
+	submitted, err := i.submitActiveParkingPrediction(session, prediction)
 	if err != nil {
 		i.handleSessionPredictionFailure(session, window, err)
 		return
@@ -810,17 +1050,17 @@ func (i *Inferencer) processPredictionWindow(ctx context.Context, session *infer
 	i.logPlannerDebug(prediction)
 }
 
-func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL string, window predictionWindow) (*InferencePrediction, actuator.CommandRequest, error) {
+func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL string, window predictionWindow) (*InferencePrediction, error) {
 	selection, err := i.buildPlannerSelection(window)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 	framesBase64 := make([]string, 0, len(window.frames))
 	frameHashes := make([]string, 0, len(window.frames))
 	for _, frame := range window.frames {
 		encoded, err := i.encodeJPEGBase64(frame)
 		if err != nil {
-			return nil, actuator.CommandRequest{}, err
+			return nil, err
 		}
 		framesBase64 = append(framesBase64, encoded)
 		frameHashes = append(frameHashes, hashInferencePayload(encoded))
@@ -828,10 +1068,11 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 
 	bodyPayload := map[string]any{
 		"planner_format":          i.config.PlannerFormat,
+		"control_contract":        i.config.ControlContract,
 		"frames_base64":           framesBase64,
 		"telemetry":               selection.telemetryTensor,
 		"sequence":                window.sequenceNumber,
-		"timestamp_ms":            i.nowFunc().UTC().UnixMilli(),
+		"sampled_at_s":            predictionInputTimestampS(window, selection),
 		"image_offsets":           i.config.ImageOffsets,
 		"telemetry_offsets":       i.config.TelemetryOffsets,
 		"telemetry_feature_names": i.config.TelemetryFeatureNames,
@@ -843,7 +1084,7 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 	}
 	body, err := json.Marshal(bodyPayload)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 
 	requestCtx, cancel := context.WithTimeout(ctx, i.config.PredictionTimeout)
@@ -851,28 +1092,28 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, modelServerURL+"/predict", bytes.NewReader(body))
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.httpClient.Do(req)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		payload, _ := io.ReadAll(resp.Body)
-		return nil, actuator.CommandRequest{}, fmt.Errorf("python predict failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		return nil, fmt.Errorf("python predict failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 
 	var parsed pythonPredictResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 	if err := i.validateParkingPredictionModel(parsed); err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
-	prediction, command, err := i.buildPrediction(
+	prediction, err := i.buildPrediction(
 		parsed,
 		modelServerURL,
 		window,
@@ -880,9 +1121,9 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 		frameHashes,
 	)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
-	return prediction, command, nil
+	return prediction, nil
 }
 
 func addCurrentTelemetryInputs(payload map[string]any, telemetry control.RuntimeTelemetry) {
@@ -912,33 +1153,24 @@ func addCurrentTelemetryInputs(payload map[string]any, telemetry control.Runtime
 	payload["parkingPhase"] = telemetry.ParkingPhase
 }
 
-func (i *Inferencer) submitActuatorCommand(command actuator.CommandRequest) error {
+func (i *Inferencer) submitActuatorPrediction(prediction *InferencePrediction) error {
 	if i.actuator == nil {
 		return errors.New("inference actuator is not configured")
 	}
-	_, err := i.actuator.Submit(command)
-	return err
-}
-
-func (i *Inferencer) submitActuatorPrediction(prediction *InferencePrediction, command actuator.CommandRequest) error {
-	if i.actuatorConfig.TemporalHorizonActuatorEnabled && prediction != nil && prediction.PredictionHorizon != nil {
-		if i.actuator == nil {
-			return errors.New("inference actuator is not configured")
-		}
-		horizonSink, ok := i.actuator.(actuatorHorizonSubmitter)
-		if !ok {
-			return errors.New("inference actuator does not support temporal horizons")
-		}
-		_, err := horizonSink.SubmitPredictionHorizon(*prediction.PredictionHorizon)
-		return err
+	if prediction == nil || prediction.SetpointPlan == nil {
+		return errors.New("parking inference prediction has no setpoint plan")
 	}
-	return i.submitActuatorCommand(command)
+	planSink, ok := i.actuator.(actuatorParkingPlanSubmitter)
+	if !ok {
+		return errors.New("inference actuator does not support parking setpoint plans")
+	}
+	_, err := planSink.SubmitParkingSetpointPlan(*prediction.SetpointPlan)
+	return err
 }
 
 func (i *Inferencer) submitActiveParkingPrediction(
 	session *inferenceSession,
 	prediction *InferencePrediction,
-	command actuator.CommandRequest,
 ) (bool, error) {
 	i.actuationMu.Lock()
 	defer i.actuationMu.Unlock()
@@ -952,7 +1184,7 @@ func (i *Inferencer) submitActiveParkingPrediction(
 	if !allowed {
 		return false, nil
 	}
-	if err := i.submitActuatorPrediction(prediction, command); err != nil {
+	if err := i.submitActuatorPrediction(prediction); err != nil {
 		return true, fmt.Errorf("failed to submit actuator prediction: %w", err)
 	}
 	return true, nil
@@ -995,7 +1227,10 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 		return plannerSelection{}, errors.New("planner telemetry is unavailable")
 	}
 	latest := history[len(history)-1]
-	latestAge := time.Duration(i.nowFunc().UTC().UnixMilli()-telemetryAlignmentTimestampMs(latest)) * time.Millisecond
+	latestAge := time.Duration(i.nowFunc().UTC().UnixMilli()-telemetrySourceTimestampMs(latest)) * time.Millisecond
+	if latestAge < -parkingSourceClockLeadLimit {
+		return plannerSelection{}, fmt.Errorf("planner telemetry source timestamp is %s in the future", -latestAge)
+	}
 	if latestAge > i.telemetryStaleAfter {
 		return plannerSelection{}, fmt.Errorf("planner telemetry is stale: age=%s", latestAge)
 	}
@@ -1004,19 +1239,15 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 	if err != nil {
 		return plannerSelection{}, err
 	}
-	selected := make([]control.RuntimeTelemetry, 0, len(i.config.TelemetryOffsets))
-	times := make([]int64, 0, len(i.config.TelemetryOffsets))
-	for _, offset := range i.config.TelemetryOffsets {
-		index := anchorIndex + offset
-		if index < 0 || index >= len(history) {
-			return plannerSelection{}, fmt.Errorf("planner telemetry window is incomplete for offset %d", offset)
-		}
-		item := history[index]
-		if telemetryAlignmentTimestampMs(item) > anchorMs {
-			return plannerSelection{}, fmt.Errorf("planner telemetry window would use future telemetry at offset %d", offset)
-		}
-		selected = append(selected, item)
-		times = append(times, telemetryAlignmentTimestampMs(item))
+	selected, times, err := selectTelemetryAtOffsets(
+		history,
+		anchorIndex,
+		i.config.TelemetryOffsets,
+		i.config.TelemetrySampleInterval,
+		i.config.AlignmentTolerance,
+	)
+	if err != nil {
+		return plannerSelection{}, err
 	}
 	features := make([][]float64, 0, len(selected))
 	for index := range selected {
@@ -1242,7 +1473,8 @@ func buildInferenceFFmpegArgs(spec captureSpec, cfg InferenceConfig) []string {
 	videoFilter := buildInferenceVideoFilter(spec, cfg)
 	return []string{
 		"-hide_banner",
-		"-loglevel", "error",
+		"-loglevel", "info",
+		"-nostats",
 		"-fflags", "+nobuffer",
 		"-f", spec.inputFormat,
 		"-i", spec.input,
@@ -1254,11 +1486,12 @@ func buildInferenceFFmpegArgs(spec captureSpec, cfg InferenceConfig) []string {
 }
 
 func buildInferenceVideoFilter(spec captureSpec, cfg InferenceConfig) string {
-	base := fmt.Sprintf("scale=%d:%d:flags=lanczos,fps=%d", cfg.FrameWidth, cfg.FrameHeight, cfg.FPS)
+	timing := fmt.Sprintf("fps=%d,showinfo=checksum=0", cfg.FPS)
+	resize := fmt.Sprintf("scale=%d:%d:flags=lanczos,format=rgb24", cfg.FrameWidth, cfg.FrameHeight)
 	if spec.backend == "ddagrab" || spec.inputFormat == "lavfi" {
-		return "hwdownload,format=bgra," + base + ",format=rgb24"
+		return timing + ",hwdownload,format=bgra," + resize
 	}
-	return base + ",format=rgb24"
+	return timing + "," + resize
 }
 
 func shouldDispatchInferenceFrame(frameIndex int, imageOffsets []int, dispatchStride int) bool {
@@ -1360,13 +1593,16 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 		copyPrediction.TelemetryTensorShape = append([]int(nil), status.LastPrediction.TelemetryTensorShape...)
 		copyPrediction.PredControlsShape = append([]int(nil), status.LastPrediction.PredControlsShape...)
 		copyPrediction.PredAuxShape = append([]int(nil), status.LastPrediction.PredAuxShape...)
+		copyPrediction.ControlContract = cloneParkingControlContract(status.LastPrediction.ControlContract)
+		copyPrediction.ControlHorizonDtMs = append([]int(nil), status.LastPrediction.ControlHorizonDtMs...)
 		copyPrediction.RawPredControls = clone2DFloat64(status.LastPrediction.RawPredControls)
 		copyPrediction.RawPredAux = clone2DFloat64(status.LastPrediction.RawPredAux)
 		copyPrediction.RawStateInputs = cloneAnyMap(status.LastPrediction.RawStateInputs)
 		copyPrediction.NormalizedStateInputs = cloneFloat64Map(status.LastPrediction.NormalizedStateInputs)
-		if status.LastPrediction.PredictionHorizon != nil {
-			horizonCopy := cloneActuatorPredictionHorizon(*status.LastPrediction.PredictionHorizon)
-			copyPrediction.PredictionHorizon = &horizonCopy
+		if status.LastPrediction.SetpointPlan != nil {
+			planCopy := *status.LastPrediction.SetpointPlan
+			planCopy.Points = append([]parkingcontrol.Setpoint(nil), status.LastPrediction.SetpointPlan.Points...)
+			copyPrediction.SetpointPlan = &planCopy
 		}
 		if status.LastPrediction.LastTelemetry != nil {
 			telemetryCopy := *status.LastPrediction.LastTelemetry
@@ -1404,94 +1640,54 @@ func (i *Inferencer) buildPrediction(
 	window predictionWindow,
 	selection plannerSelection,
 	frameHashes []string,
-) (*InferencePrediction, actuator.CommandRequest, error) {
-	controlNames, err := resolvePlannerControlNames(parsed.ControlTargetNames, i.config.ControlOutputNames, plannerTensorWidth(parsed.PredControls))
+) (*InferencePrediction, error) {
+	controls, err := validatePlannerTensor(
+		parsed.PredControls,
+		1,
+		i.config.FutureSteps,
+		len(i.config.ControlOutputNames),
+		"pred_controls",
+	)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
-	predictedFutureSteps := plannerTensorHorizon(parsed.PredControls)
-	expectedFutureSteps := i.config.FutureSteps
-	legacyImmediateOutput := predictedFutureSteps == 1 && expectedFutureSteps != 1
-	if legacyImmediateOutput {
-		expectedFutureSteps = 1
-	}
-	controls, err := validatePlannerTensor(parsed.PredControls, 1, expectedFutureSteps, len(controlNames), "pred_controls")
+	aux, auxShape, err := validateOptionalPlannerTensor(
+		parsed.PredAux,
+		1,
+		i.config.FutureSteps,
+		len(i.config.AuxOutputNames),
+		"pred_aux",
+	)
 	if err != nil {
-		return nil, actuator.CommandRequest{}, err
-	}
-	aux, auxShape, err := validateOptionalPlannerTensor(parsed.PredAux, 1, expectedFutureSteps, len(i.config.AuxOutputNames), "pred_aux")
-	if err != nil {
-		return nil, actuator.CommandRequest{}, err
-	}
-	rawCollapsed, err := collapsePlannerCommand(controls[0], controlNames, i.config)
-	if err != nil && legacyImmediateOutput {
-		tPlusOneConfig := i.config
-		tPlusOneConfig.HorizonMode = "t_plus_1_only"
-		rawCollapsed, err = collapsePlannerCommand(controls[0], controlNames, tPlusOneConfig)
-	}
-	if err != nil {
-		return nil, actuator.CommandRequest{}, err
+		return nil, err
 	}
 	predictedAt := i.nowFunc().UTC()
-	inputTimestampS := predictionInputTimestampS(window, selection)
-	var predictionHorizon *actuator.PredictionHorizon
-	if legacyImmediateOutput {
-		legacyPlan := actuator.LegacyPredictionAdapter(
-			rawCollapsed,
-			inputTimestampS,
-			timeToSeconds(predictedAt),
-			nil,
-			"legacy-planner:"+strings.TrimSpace(parsed.PlannerFormat),
-		)
-		normalized, normalizeErr := actuator.NormalizePredictionHorizon(legacyPlan, timeToSeconds(predictedAt))
-		if normalizeErr != nil {
-			err = normalizeErr
-		} else {
-			predictionHorizon = &normalized
-		}
-	} else {
-		predictionHorizon, err = buildPredictionHorizonFromPlanner(
-			controls[0],
-			controlNames,
-			aux,
-			i.config.AuxOutputNames,
-			inputTimestampS,
-			timeToSeconds(predictedAt),
-			"planner:"+strings.TrimSpace(parsed.PlannerFormat),
+	sampledAtS := predictionInputTimestampS(window, selection)
+	if !finiteParkingValue(parsed.SampledAtS) || math.Abs(parsed.SampledAtS-sampledAtS) > 1e-6 {
+		return nil, fmt.Errorf(
+			"prediction sampled_at_s did not echo the requested observation timestamp: got=%.9f want=%.9f",
+			parsed.SampledAtS,
+			sampledAtS,
 		)
 	}
-	if err != nil && i.actuatorConfig.TemporalHorizonActuatorEnabled {
-		return nil, actuator.CommandRequest{}, err
+	points := make([]parkingcontrol.Setpoint, 0, len(controls[0]))
+	for index, row := range controls[0] {
+		points = append(points, parkingcontrol.Setpoint{
+			DtMs:                        i.config.ControlHorizonDtMs[index],
+			DesiredWheelSteerNormalized: row[0],
+			DesiredSpeedMPS:             row[1],
+			StopProbability:             row[2],
+		})
 	}
-	currentSpeed := 0.0
-	if len(selection.selectedTelemetry) > 0 {
-		currentSpeed = selection.selectedTelemetry[len(selection.selectedTelemetry)-1].CurrentSpeed
+	plan := parkingcontrol.Plan{
+		Contract:    parsed.ControlContract.Name,
+		SampledAtS:  parsed.SampledAtS,
+		ReceivedAtS: timeToSeconds(predictedAt),
+		Points:      points,
+		Direction:   parsed.Direction,
 	}
-	commandForSubmit := rawCollapsed
-	throttleHeld := 0.0
-	throttleHoldActive := false
-	var finalCommand actuator.ControlCommand
-	var processorDebug actuator.ProcessingDebug
-	if i.actuatorConfig.TemporalHorizonActuatorEnabled {
-		finalCommand = commandForSubmit
-		processorDebug = actuator.ProcessingDebug{
-			Raw:   commandForSubmit,
-			Final: finalCommand,
-		}
-	} else {
-		throttleHeld, throttleHoldActive = i.stabilizeThrottleCommand(commandForSubmit.Throttle, currentSpeed, predictedAt)
-		commandForSubmit.Throttle = throttleHeld
-		finalCommand, processorDebug = actuator.ProcessActuatorCommand(commandForSubmit, &i.processorState, i.actuatorConfig)
-	}
-	request := actuator.CommandRequest{
-		Steer:            finalCommand.Steering,
-		Throttle:         finalCommand.Throttle,
-		BrakePressureAvg: finalCommand.BrakePressureAvg,
-		InputMode:        actuator.InputModeNormalized,
-		Handbrake:        false,
-		Enabled:          boolPtr(true),
-		Sequence:         int64(window.sequenceNumber),
-		TimestampMs:      predictedAt.UnixMilli(),
+	if err := parkingcontrol.ValidatePlan(plan); err != nil {
+		return nil, err
 	}
 	frameTimesMs := make([]int64, 0, len(window.frameTimes))
 	for _, item := range window.frameTimes {
@@ -1506,6 +1702,10 @@ func (i *Inferencer) buildPrediction(
 		Checkpoint:                    parsed.Checkpoint,
 		ModelDevice:                   parsed.Device,
 		PlannerFormat:                 parsed.PlannerFormat,
+		PlannerFormatVersion:          parsed.PlannerFormatVersion,
+		ControlContract:               cloneParkingControlContract(parsed.ControlContract),
+		ControlHorizonDtMs:            append([]int(nil), parsed.ControlHorizonDtMs...),
+		TelemetrySampleIntervalMs:     parsed.TelemetrySampleIntervalMs,
 		CapturedAt:                    window.capturedAt.Format(time.RFC3339Nano),
 		PredictedAt:                   predictedAt.Format(time.RFC3339Nano),
 		WindowFrameIndices:            append([]int(nil), window.frameIndices...),
@@ -1521,96 +1721,16 @@ func (i *Inferencer) buildPrediction(
 		SelectedTelemetryTimestampsMs: append([]int64(nil), selection.telemetryTimesMs...),
 		ImageTensorShape:              append([]int(nil), selection.frameShape...),
 		TelemetryTensorShape:          append([]int(nil), selection.telemetryShape...),
-		PredControlsShape:             []int{1, len(controls[0]), len(controlNames)},
+		PredControlsShape:             []int{1, len(controls[0]), len(i.config.ControlOutputNames)},
 		PredAuxShape:                  auxShape,
 		LastTelemetry:                 cloneTelemetryPtr(i.latestTelemetryForDebug()),
 		RawPredControls:               clone2DFloat64(controls[0]),
 		RawPredAux:                    clone2DFloat64(aux),
 		RawStateInputs:                cloneAnyMap(parsed.RawStateInputs),
 		NormalizedStateInputs:         cloneFloat64Map(parsed.NormalizedStateInputs),
-		CollapsedCommand:              commandForSubmit,
-		PostProcessedCommand:          finalCommand,
-		ThrottleHeld:                  throttleHoldActive,
-		HeldThrottle:                  throttleHeld,
-		ProcessorDebug:                processorDebug,
-		ProcessorState:                i.processorState,
+		SetpointPlan:                  &plan,
 	}
-	if predictionHorizon != nil {
-		horizonCopy := cloneActuatorPredictionHorizon(*predictionHorizon)
-		prediction.PredictionHorizon = &horizonCopy
-	}
-	return prediction, request, nil
-}
-
-func (i *Inferencer) resetControlStateLocked() {
-	i.processorState = actuator.ProcessorState{}
-	i.processorState.Stats.HistoryWindow = i.actuatorConfig.RecentCommandWindow
-	i.throttleHoldUntil = time.Time{}
-	i.throttleHoldValue = 0
-	i.lastDriveDemand = 0
-}
-
-func (i *Inferencer) buildFallbackPrediction(window predictionWindow, modelServerURL string, cause error) (*InferencePrediction, actuator.CommandRequest, error) {
-	finalCommand, processorDebug := actuator.ApplyFallbackDecay(&i.processorState, i.actuatorConfig)
-	request := actuator.CommandRequest{
-		Steer:            finalCommand.Steering,
-		Throttle:         finalCommand.Throttle,
-		BrakePressureAvg: finalCommand.BrakePressureAvg,
-		InputMode:        actuator.InputModeNormalized,
-		Handbrake:        false,
-		Enabled:          boolPtr(true),
-		Sequence:         int64(window.sequenceNumber),
-		TimestampMs:      i.nowFunc().UTC().UnixMilli(),
-	}
-	frameTimesMs := make([]int64, 0, len(window.frameTimes))
-	for _, item := range window.frameTimes {
-		frameTimesMs = append(frameTimesMs, item.UnixMilli())
-	}
-	latestFrameTime := window.capturedAt
-	for _, item := range window.frameTimes {
-		if item.After(latestFrameTime) {
-			latestFrameTime = item
-		}
-	}
-	frameID := int64(window.frameIndex)
-	captureLatencyMs := math.Max(0, float64(i.nowFunc().UTC().Sub(latestFrameTime))/float64(time.Millisecond))
-	prediction := &InferencePrediction{
-		Sequence:                window.sequenceNumber,
-		FrameIndex:              window.frameIndex,
-		SourceFPS:               i.config.FPS,
-		InferenceHz:             i.config.FPS / i.config.DispatchStride,
-		ModelServerURL:          modelServerURL,
-		Checkpoint:              i.loadedCheckpoint,
-		ModelDevice:             i.loadedModelDevice,
-		PlannerFormat:           i.config.PlannerFormat,
-		CapturedAt:              window.capturedAt.Format(time.RFC3339Nano),
-		PredictedAt:             i.nowFunc().UTC().Format(time.RFC3339Nano),
-		WindowFrameIndices:      append([]int(nil), window.frameIndices...),
-		WindowFrameTimestampsMs: frameTimesMs,
-		LatestFrameTimestampS:   timeToSeconds(latestFrameTime),
-		FrameID:                 &frameID,
-		CaptureLatencyMs:        &captureLatencyMs,
-		FrameTelemetryAligned:   false,
-		ImageTensorShape:        []int{1, len(window.frames), 3, i.config.FrameHeight, i.config.FrameWidth},
-		TelemetryTensorShape:    []int{1, len(i.config.TelemetryOffsets), len(i.config.TelemetryFeatureNames)},
-		LastTelemetry:           cloneTelemetryPtr(i.latestTelemetryForDebug()),
-		CollapsedCommand:        processorDebug.Raw,
-		PostProcessedCommand:    finalCommand,
-		ThrottleHeld:            false,
-		HeldThrottle:            0,
-		ProcessorDebug:          processorDebug,
-		ProcessorState:          i.processorState,
-		FallbackApplied:         true,
-	}
-	if cause != nil {
-		log.Printf("[inference] fallback applied seq=%d reason=%v steer=%.3f throttle=%.3f",
-			window.sequenceNumber,
-			cause,
-			finalCommand.Steering,
-			finalCommand.Throttle,
-		)
-	}
-	return prediction, request, nil
+	return prediction, nil
 }
 
 func (i *Inferencer) handlePredictionFailure(window predictionWindow, cause error) {
@@ -1664,7 +1784,6 @@ func (i *Inferencer) beginParkingTerminalTransition(expectedSession *inferenceSe
 	i.parkingSafetyTripped = true
 	i.parkingManualStop = false
 	i.parkingHoldConfirmed = false
-	i.resetControlStateLocked()
 	if succeeded {
 		i.status.State = "stopping"
 		i.status.LastError = ""
@@ -1692,16 +1811,18 @@ func (i *Inferencer) submitParkingSafetyHold(sequence int) error {
 }
 
 func (i *Inferencer) submitParkingSafetyHoldLocked(sequence int) error {
-	return i.submitAndConfirmActuatorCommand(actuator.CommandRequest{
-		Steer:            0,
-		Throttle:         0,
-		BrakePressureAvg: 0,
-		InputMode:        actuator.InputModeNormalized,
-		Handbrake:        true,
-		Enabled:          boolPtr(false),
-		Sequence:         int64(sequence),
-		TimestampMs:      i.nowFunc().UTC().UnixMilli(),
-	}, actuatorApplyExpectation{label: "parking safety hold", enabled: false, handbrake: true})
+	stopper, ok := i.actuator.(actuatorParkingSafetyStopper)
+	if !ok {
+		return errors.New("parking safety stop cannot be requested because the actuator does not support it")
+	}
+	submittedState, err := stopper.RequestParkingSafetyStop()
+	if err != nil {
+		return err
+	}
+	return i.confirmAppliedParkingStop(submittedState.LastCommandID, actuatorApplyExpectation{
+		label:    "parking safety stop",
+		stopping: true,
+	})
 }
 
 func (i *Inferencer) armActuatorForParkingInference() error {
@@ -1715,20 +1836,24 @@ func (i *Inferencer) armActuatorForParkingInference() error {
 		InputMode:        actuator.InputModeNormalized,
 		Handbrake:        false,
 		Enabled:          &enabled,
+		Owner:            actuator.OwnerParkingInference,
 		TimestampMs:      i.nowFunc().UTC().UnixMilli(),
-	}, actuatorApplyExpectation{label: "parking inference arm", enabled: true, handbrake: false})
+	}, actuatorApplyExpectation{label: "parking inference arm"})
 }
 
 func (i *Inferencer) submitAndConfirmActuatorCommand(command actuator.CommandRequest, expected actuatorApplyExpectation) error {
-	provider, ok := i.actuator.(actuatorStateProvider)
-	if !ok {
-		return fmt.Errorf("%s cannot be confirmed because actuator state is unavailable", expected.label)
-	}
 	submittedState, err := i.actuator.Submit(command)
 	if err != nil {
 		return err
 	}
-	commandID := submittedState.LastCommandID
+	return i.confirmAppliedParkingStop(submittedState.LastCommandID, expected)
+}
+
+func (i *Inferencer) confirmAppliedParkingStop(commandID int64, expected actuatorApplyExpectation) error {
+	provider, ok := i.actuator.(actuatorStateProvider)
+	if !ok {
+		return fmt.Errorf("%s cannot be confirmed because actuator state is unavailable", expected.label)
+	}
 	if commandID <= 0 {
 		return fmt.Errorf("%s did not receive a trackable actuator command ID", expected.label)
 	}
@@ -1770,12 +1895,16 @@ func actuatorStateConfirmsCommand(state actuator.State, expected actuatorApplyEx
 	if _, err := time.Parse(time.RFC3339Nano, state.LastApplySucceededAt); err != nil {
 		return false
 	}
-	return state.Applied.CommandID == commandID &&
-		state.Applied.Enabled == expected.enabled &&
-		state.Applied.Handbrake == expected.handbrake &&
-		state.Applied.Steer == 0 &&
-		state.Applied.Throttle == 0 &&
-		state.Applied.Brake == 0
+	if state.ParkingController.Owner != actuator.OwnerParkingInference || state.ParkingController.Stopping != expected.stopping {
+		return false
+	}
+	if state.Applied.CommandID != commandID || !state.Applied.Enabled || state.Applied.Steer != 0 || state.Applied.Throttle != 0 {
+		return false
+	}
+	if state.Applied.Handbrake {
+		return state.Applied.Brake == 0
+	}
+	return state.Applied.Brake > 0
 }
 
 func (i *Inferencer) recordParkingSafetyHoldError(err error) {
@@ -1818,56 +1947,6 @@ func (i *Inferencer) monitorParkingEvaluationDeadline(ctx context.Context, sessi
 	}
 }
 
-func (i *Inferencer) stabilizeThrottleCommand(rawThrottle float64, currentSpeed float64, now time.Time) (float64, bool) {
-	rawThrottle = clamp(rawThrottle, 0, 1)
-	holdWindow := time.Duration(i.config.ThrottleHoldSeconds * float64(time.Second))
-	if rawThrottle <= 0 {
-		i.throttleHoldUntil = time.Time{}
-		i.throttleHoldValue = 0
-		i.lastDriveDemand = 0
-		return 0, false
-	}
-	if holdWindow <= 0 || i.config.MaxTargetSpeedKPH < 0 {
-		i.throttleHoldUntil = time.Time{}
-		i.throttleHoldValue = rawThrottle
-		i.lastDriveDemand = rawThrottle
-		return rawThrottle, false
-	}
-
-	if !i.throttleHoldUntil.IsZero() && now.Before(i.throttleHoldUntil) {
-		if rawThrottle >= i.throttleHoldValue {
-			i.throttleHoldUntil = time.Time{}
-			i.throttleHoldValue = rawThrottle
-		} else {
-			i.lastDriveDemand = rawThrottle
-			return clamp(i.throttleHoldValue, 0, 1), true
-		}
-	} else {
-		i.throttleHoldUntil = time.Time{}
-	}
-
-	lastDemand := clamp(i.lastDriveDemand, 0, 1)
-	if lastDemand > rawThrottle {
-		i.throttleHoldValue = lastDemand
-		i.throttleHoldUntil = now.Add(holdWindow)
-		i.lastDriveDemand = rawThrottle
-		return clamp(i.throttleHoldValue, 0, 1), true
-	}
-
-	stabilized := rawThrottle
-	currentSpeedKph := math.Max(currentSpeed, 0) * 3.6
-	if i.config.MaxTargetSpeedKPH <= 0 || currentSpeedKph <= i.config.MaxTargetSpeedKPH {
-		minThrottleHold := i.config.ThrottleHoldMin
-		if minThrottleHold > 0 && stabilized > 0 && stabilized < minThrottleHold {
-			stabilized = minThrottleHold
-		}
-	}
-
-	i.throttleHoldValue = clamp(stabilized, 0, 1)
-	i.lastDriveDemand = rawThrottle
-	return i.throttleHoldValue, false
-}
-
 func (i *Inferencer) telemetryFeatureVector(window []control.RuntimeTelemetry, index int) ([]float64, error) {
 	sample := window[index]
 	yawRate := sample.YawRate
@@ -1906,7 +1985,7 @@ func deriveYawRate(window []control.RuntimeTelemetry, index int) float64 {
 	}
 	current := window[index]
 	previous := window[index-1]
-	deltaMs := telemetryAlignmentTimestampMs(current) - telemetryAlignmentTimestampMs(previous)
+	deltaMs := telemetrySourceTimestampMs(current) - telemetrySourceTimestampMs(previous)
 	if deltaMs <= 0 {
 		return 0
 	}
@@ -1930,7 +2009,7 @@ func findAnchorTelemetryIndex(history []control.RuntimeTelemetry, anchorMs int64
 	closestDelta := int64(-1)
 	closestTimestamp := int64(0)
 	for index := len(history) - 1; index >= 0; index-- {
-		timestamp := telemetryAlignmentTimestampMs(history[index])
+		timestamp := telemetrySourceTimestampMs(history[index])
 		if timestamp == 0 || timestamp > anchorMs {
 			continue
 		}
@@ -1956,10 +2035,110 @@ func findAnchorTelemetryIndex(history []control.RuntimeTelemetry, anchorMs int64
 	return bestIndex, nil
 }
 
-func telemetryAlignmentTimestampMs(sample control.RuntimeTelemetry) int64 {
-	if sample.ReceivedAtMs > 0 {
-		return sample.ReceivedAtMs
+func selectTelemetryAtOffsets(
+	history []control.RuntimeTelemetry,
+	anchorIndex int,
+	offsets []int,
+	sampleInterval time.Duration,
+	configuredTolerance time.Duration,
+) ([]control.RuntimeTelemetry, []int64, error) {
+	if anchorIndex < 0 || anchorIndex >= len(history) {
+		return nil, nil, errors.New("planner telemetry anchor is outside the available history")
 	}
+	if len(offsets) == 0 || offsets[len(offsets)-1] != 0 {
+		return nil, nil, errors.New("planner telemetry offsets must be strictly increasing and end at 0")
+	}
+	if sampleInterval <= 0 || sampleInterval%time.Millisecond != 0 {
+		return nil, nil, errors.New("planner telemetry sample interval must be a positive whole number of milliseconds")
+	}
+	if configuredTolerance <= 0 {
+		return nil, nil, errors.New("planner telemetry alignment tolerance must be positive")
+	}
+	for index := 1; index < len(offsets); index++ {
+		if offsets[index] <= offsets[index-1] {
+			return nil, nil, errors.New("planner telemetry offsets must be strictly increasing and end at 0")
+		}
+	}
+
+	anchorTimestampMs := telemetrySourceTimestampMs(history[anchorIndex])
+	if anchorTimestampMs <= 0 {
+		return nil, nil, errors.New("planner telemetry anchor has no source timestamp")
+	}
+	tolerance := configuredTolerance
+	if maximum := sampleInterval / 2; tolerance > maximum {
+		tolerance = maximum
+	}
+	intervalMs := sampleInterval.Milliseconds()
+	selected := make([]control.RuntimeTelemetry, len(offsets))
+	timestamps := make([]int64, len(offsets))
+	lastIndex := len(offsets) - 1
+	selected[lastIndex] = history[anchorIndex]
+	timestamps[lastIndex] = anchorTimestampMs
+
+	nextIndex := anchorIndex
+	nextTimestampMs := anchorTimestampMs
+	for offsetIndex := lastIndex - 1; offsetIndex >= 0; offsetIndex-- {
+		offset := offsets[offsetIndex]
+		expectedTimestampMs := anchorTimestampMs + int64(offset)*intervalMs
+		candidateIndex, candidateTimestampMs, deltaMs := closestEarlierTelemetrySample(
+			history,
+			nextIndex,
+			nextTimestampMs,
+			expectedTimestampMs,
+		)
+		if candidateIndex < 0 {
+			return nil, nil, fmt.Errorf(
+				"planner telemetry window is incomplete for offset %d at source timestamp %d",
+				offset,
+				expectedTimestampMs,
+			)
+		}
+		if time.Duration(deltaMs)*time.Millisecond > tolerance {
+			return nil, nil, fmt.Errorf(
+				"planner telemetry timestamp alignment failed for offset %d: expected=%d nearest=%d delta=%dms tolerance=%s",
+				offset,
+				expectedTimestampMs,
+				candidateTimestampMs,
+				deltaMs,
+				tolerance,
+			)
+		}
+		selected[offsetIndex] = history[candidateIndex]
+		timestamps[offsetIndex] = candidateTimestampMs
+		nextIndex = candidateIndex
+		nextTimestampMs = candidateTimestampMs
+	}
+	return selected, timestamps, nil
+}
+
+func closestEarlierTelemetrySample(
+	history []control.RuntimeTelemetry,
+	upperIndex int,
+	upperTimestampMs int64,
+	targetTimestampMs int64,
+) (int, int64, int64) {
+	bestIndex := -1
+	bestTimestampMs := int64(0)
+	bestDeltaMs := int64(0)
+	for index := upperIndex - 1; index >= 0; index-- {
+		timestampMs := telemetrySourceTimestampMs(history[index])
+		if timestampMs <= 0 || timestampMs >= upperTimestampMs {
+			continue
+		}
+		deltaMs := timestampMs - targetTimestampMs
+		if deltaMs < 0 {
+			deltaMs = -deltaMs
+		}
+		if bestIndex < 0 || deltaMs < bestDeltaMs {
+			bestIndex = index
+			bestTimestampMs = timestampMs
+			bestDeltaMs = deltaMs
+		}
+	}
+	return bestIndex, bestTimestampMs, bestDeltaMs
+}
+
+func telemetrySourceTimestampMs(sample control.RuntimeTelemetry) int64 {
 	return sample.TimestampMs
 }
 
@@ -1989,112 +2168,6 @@ func validateOptionalPlannerTensor(raw [][][]float64, batch, horizon, width int,
 		return nil, nil, err
 	}
 	return validated[0], []int{batch, horizon, width}, nil
-}
-
-func resolvePlannerControlNames(responseNames []string, configNames []string, predictedWidth int) ([]string, error) {
-	if len(responseNames) > 0 {
-		trimmed := make([]string, 0, len(responseNames))
-		for _, name := range responseNames {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			trimmed = append(trimmed, name)
-		}
-		if len(trimmed) < 2 || trimmed[0] != "steering" || trimmed[1] != "acceleration" {
-			return nil, fmt.Errorf("planner control_target_names must start with [steering, acceleration], got=%v", trimmed)
-		}
-		return trimmed, nil
-	}
-	if len(configNames) < 2 {
-		return nil, fmt.Errorf("planner control_output_names must have at least steering and acceleration")
-	}
-	if predictedWidth >= 2 && predictedWidth <= len(configNames) {
-		return append([]string(nil), configNames[:predictedWidth]...), nil
-	}
-	return append([]string(nil), configNames...), nil
-}
-
-func plannerTensorWidth(predicted [][][]float64) int {
-	if len(predicted) == 0 || len(predicted[0]) == 0 {
-		return 0
-	}
-	return len(predicted[0][0])
-}
-
-func plannerTensorHorizon(predicted [][][]float64) int {
-	if len(predicted) == 0 {
-		return 0
-	}
-	return len(predicted[0])
-}
-
-func plannerControlIndex(names []string, target string) int {
-	for index, name := range names {
-		if strings.EqualFold(strings.TrimSpace(name), target) {
-			return index
-		}
-	}
-	return -1
-}
-
-func collapsePlannerCommand(horizon [][]float64, controlNames []string, cfg InferenceConfig) (actuator.ControlCommand, error) {
-	if len(horizon) == 0 {
-		return actuator.ControlCommand{}, nil
-	}
-	steeringIndex := plannerControlIndex(controlNames, "steering")
-	throttleIndex := plannerControlIndex(controlNames, "acceleration")
-	brakeIndex := plannerControlIndex(controlNames, "brakePressureAvg")
-	if steeringIndex < 0 || throttleIndex < 0 {
-		return actuator.ControlCommand{}, fmt.Errorf("planner controls missing steering/acceleration targets: %v", controlNames)
-	}
-	for _, row := range horizon {
-		if steeringIndex >= len(row) || throttleIndex >= len(row) || (brakeIndex >= 0 && brakeIndex >= len(row)) {
-			return actuator.ControlCommand{}, fmt.Errorf("planner control row width mismatch for targets %v", controlNames)
-		}
-	}
-	if cfg.HorizonMode == "t_plus_1_only" {
-		throttleDemand := horizon[0][throttleIndex]
-		brakeDemand := 0.0
-		if throttleDemand < 0 {
-			brakeDemand = clamp(-throttleDemand, 0, 1)
-			throttleDemand = 0
-		}
-		if brakeIndex >= 0 {
-			brakeDemand = clamp(math.Max(brakeDemand, horizon[0][brakeIndex]), 0, 1)
-		}
-		command := actuator.ControlCommand{
-			Steering:         horizon[0][steeringIndex],
-			Throttle:         throttleDemand,
-			BrakePressureAvg: brakeDemand,
-		}
-		return command, nil
-	}
-	weights := cfg.HorizonControlWeights
-	if len(horizon) < 3 {
-		return actuator.ControlCommand{}, fmt.Errorf("weighted_short_horizon requires at least 3 predicted control rows, got=%d", len(horizon))
-	}
-	throttleDemand := (weights[0] * horizon[0][throttleIndex]) + (weights[1] * horizon[1][throttleIndex]) + (weights[2] * horizon[2][throttleIndex])
-	brakeDemand := 0.0
-	if throttleDemand < 0 {
-		brakeDemand = clamp(-throttleDemand, 0, 1)
-		throttleDemand = 0
-	}
-	for _, row := range horizon[:3] {
-		if row[throttleIndex] < 0 {
-			brakeDemand = math.Max(brakeDemand, clamp(-row[throttleIndex], 0, 1))
-		}
-	}
-	if brakeIndex >= 0 {
-		brakeFromModel := (weights[0] * horizon[0][brakeIndex]) + (weights[1] * horizon[1][brakeIndex]) + (weights[2] * horizon[2][brakeIndex])
-		brakeDemand = clamp(math.Max(brakeDemand, brakeFromModel), 0, 1)
-	}
-	command := actuator.ControlCommand{
-		Steering:         (weights[0] * horizon[0][steeringIndex]) + (weights[1] * horizon[1][steeringIndex]) + (weights[2] * horizon[2][steeringIndex]),
-		Throttle:         throttleDemand,
-		BrakePressureAvg: brakeDemand,
-	}
-	return command, nil
 }
 
 func clone2DFloat64(source [][]float64) [][]float64 {
@@ -2138,74 +2211,6 @@ func cloneTelemetryPtr(source *control.RuntimeTelemetry) *control.RuntimeTelemet
 	return &copyValue
 }
 
-func buildPredictionHorizonFromPlanner(
-	controls [][]float64,
-	controlNames []string,
-	aux [][]float64,
-	auxNames []string,
-	inputTimestampS float64,
-	receivedTimestampS float64,
-	source string,
-) (*actuator.PredictionHorizon, error) {
-	if len(controls) == 0 {
-		return nil, fmt.Errorf("planner controls are empty")
-	}
-	steeringIndex := plannerControlIndex(controlNames, "steering")
-	throttleIndex := plannerControlIndex(controlNames, "acceleration")
-	brakeIndex := plannerControlIndex(controlNames, "brakePressureAvg")
-	if steeringIndex < 0 || throttleIndex < 0 {
-		return nil, fmt.Errorf("planner controls missing steering/acceleration targets: %v", controlNames)
-	}
-	futureSpeedIndex := plannerControlIndex(auxNames, "future_speed")
-	futureYawDeltaIndex := plannerControlIndex(auxNames, "future_yaw_delta")
-	bins := actuator.HorizonDtBins(len(controls))
-	points := make([]actuator.FuturePoint, 0, len(controls))
-	for index, row := range controls {
-		if steeringIndex >= len(row) || throttleIndex >= len(row) || (brakeIndex >= 0 && brakeIndex >= len(row)) {
-			return nil, fmt.Errorf("planner control row width mismatch for targets %v", controlNames)
-		}
-		point := actuator.FuturePoint{
-			DtMs:  bins[index],
-			Steer: floatPtr(row[steeringIndex]),
-		}
-		throttleDemand := row[throttleIndex]
-		if throttleDemand >= 0 {
-			point.Throttle = floatPtr(throttleDemand)
-		} else {
-			point.Throttle = floatPtr(0)
-			point.Brake = floatPtr(clamp(-throttleDemand, 0, 1))
-		}
-		if brakeIndex >= 0 {
-			brakeDemand := clamp(row[brakeIndex], 0, 1)
-			if point.Brake == nil || brakeDemand > *point.Brake {
-				point.Brake = floatPtr(brakeDemand)
-			}
-		}
-		if len(aux) > index {
-			auxRow := aux[index]
-			if futureSpeedIndex >= 0 && futureSpeedIndex < len(auxRow) {
-				point.DesiredSpeedMPS = floatPtr(math.Max(auxRow[futureSpeedIndex], 0))
-			}
-			if futureYawDeltaIndex >= 0 && futureYawDeltaIndex < len(auxRow) {
-				point.HeadingRad = floatPtr(auxRow[futureYawDeltaIndex] * math.Pi / 180.0)
-			}
-		}
-		points = append(points, point)
-	}
-	horizon := actuator.PredictionHorizon{
-		InputTimestampS:    inputTimestampS,
-		ReceivedTimestampS: receivedTimestampS,
-		Points:             points,
-		Confidence:         1.0,
-		Source:             strings.TrimSpace(source),
-	}
-	normalized, err := actuator.NormalizePredictionHorizon(horizon, receivedTimestampS)
-	if err != nil {
-		return nil, err
-	}
-	return &normalized, nil
-}
-
 func cloneFloatPtr(value *float64) *float64 {
 	if value == nil {
 		return nil
@@ -2241,40 +2246,6 @@ func predictionInputTimestampS(window predictionWindow, selection plannerSelecti
 	return timeToSeconds(latest)
 }
 
-func cloneActuatorPredictionHorizon(source actuator.PredictionHorizon) actuator.PredictionHorizon {
-	out := source
-	out.Points = make([]actuator.FuturePoint, 0, len(source.Points))
-	for _, point := range source.Points {
-		out.Points = append(out.Points, cloneActuatorFuturePoint(point))
-	}
-	return out
-}
-
-func cloneActuatorFuturePoint(point actuator.FuturePoint) actuator.FuturePoint {
-	return actuator.FuturePoint{
-		DtMs:            point.DtMs,
-		X:               cloneFloat64Ptr(point.X),
-		Y:               cloneFloat64Ptr(point.Y),
-		DesiredSpeedMPS: cloneFloat64Ptr(point.DesiredSpeedMPS),
-		HeadingRad:      cloneFloat64Ptr(point.HeadingRad),
-		Steer:           cloneFloat64Ptr(point.Steer),
-		Throttle:        cloneFloat64Ptr(point.Throttle),
-		Brake:           cloneFloat64Ptr(point.Brake),
-	}
-}
-
-func cloneFloat64Ptr(value *float64) *float64 {
-	if value == nil {
-		return nil
-	}
-	out := *value
-	return &out
-}
-
-func floatPtr(value float64) *float64 {
-	return &value
-}
-
 func timeToSeconds(value time.Time) float64 {
 	return float64(value.UTC().UnixNano()) / float64(time.Second)
 }
@@ -2287,29 +2258,24 @@ func (i *Inferencer) logPlannerDebug(prediction *InferencePrediction) {
 	if prediction == nil || prediction.Sequence > 5 {
 		return
 	}
-	log.Printf("[inference] planner window seq=%d frameTs=%v telemetryTs=%v imageShape=%v telemetryShape=%v predShape=%v final steer=%.3f throttle=%.3f brake=%.3f",
+	first := parkingcontrol.Setpoint{}
+	if prediction.SetpointPlan != nil && len(prediction.SetpointPlan.Points) > 0 {
+		first = prediction.SetpointPlan.Points[0]
+	}
+	log.Printf("[inference] planner window seq=%d frameTs=%v telemetryTs=%v imageShape=%v telemetryShape=%v predShape=%v t+%dms steer=%.3f speed=%.3f stop=%.3f",
 		prediction.Sequence,
 		prediction.WindowFrameTimestampsMs,
 		prediction.SelectedTelemetryTimestampsMs,
 		prediction.ImageTensorShape,
 		prediction.TelemetryTensorShape,
 		prediction.PredControlsShape,
-		prediction.PostProcessedCommand.Steering,
-		prediction.PostProcessedCommand.Throttle,
-		prediction.PostProcessedCommand.BrakePressureAvg,
+		first.DtMs,
+		first.DesiredWheelSteerNormalized,
+		first.DesiredSpeedMPS,
+		first.StopProbability,
 	)
 }
 
 func boolPtr(value bool) *bool {
 	return &value
-}
-
-func clamp(value float64, minimum float64, maximum float64) float64 {
-	if value < minimum {
-		return minimum
-	}
-	if value > maximum {
-		return maximum
-	}
-	return value
 }

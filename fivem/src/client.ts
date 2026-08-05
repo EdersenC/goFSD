@@ -50,6 +50,7 @@ type ControlTelemetryUpdate = {
     steering: number
     acceleration: number
     brakePressureAvg: number
+    vehicleModelHash: number
     vehicleExists: boolean
     isInVehicle: boolean
     positionX?: number
@@ -288,6 +289,7 @@ setTick(() => {
         steering: telemetry.steering,
         acceleration: telemetry.acceleration,
         brakePressureAvg: telemetry.brakePressureAvg,
+        vehicleModelHash: telemetry.vehicleModelHash,
         vehicleExists: telemetry.vehicleExists,
         isInVehicle: telemetry.isInVehicle,
         positionX: telemetry.positionX,

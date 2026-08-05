@@ -37,7 +37,7 @@ early_stopping_metric = "drive_score"
 smooth_l1_beta = 0.1
 
 [training.target_loss_weights]
-steering = 2.2
+desired_wheel_steer_normalized = 2.2
 future_yaw_rate = 1.5
 
 [training.consistency]
@@ -65,9 +65,9 @@ class TrainingRuntimeTests(unittest.TestCase):
             self.assertEqual(page["learningRate"], 0.001)
             self.assertEqual(page["smoothL1Beta"], 0.1)
             self.assertEqual(page["earlyStoppingMetric"], "drive_score")
-            self.assertEqual(page["lossWeights"]["steering"], 2.2)
+            self.assertEqual(page["lossWeights"]["desired_wheel_steer_normalized"], 2.2)
             self.assertEqual(page["lossWeights"]["future_yaw_rate"], 1.5)
-            self.assertEqual(page["lossWeights"]["acceleration"], 1.0)
+            self.assertEqual(page["lossWeights"]["desired_speed_mps"], 1.0)
             self.assertEqual(page["allowedLossWeightKeys"], ALLOWED_LOSS_WEIGHT_KEYS)
             self.assertEqual(page["allowedEarlyStoppingMetrics"], ALLOWED_EARLY_STOPPING_METRICS)
             self.assertNotIn("consistency", page)
@@ -92,7 +92,7 @@ class TrainingRuntimeTests(unittest.TestCase):
             manager = TrainingManager(config_path, start_worker=False)
             page = manager.page_config()
 
-            self.assertEqual(page["lossWeights"]["steering"], 2.2)
+            self.assertEqual(page["lossWeights"]["desired_wheel_steer_normalized"], 2.2)
             self.assertEqual(page["lossWeights"]["future_yaw_rate"], 1.5)
 
     def test_delete_job_removes_terminal_job_and_directory(self) -> None:
@@ -217,7 +217,7 @@ class TrainingRuntimeTests(unittest.TestCase):
                 "earlyStoppingMetric": "drive_score",
                 "trainRunIds": ["run-a"],
                 "valRunIds": ["run-b"],
-                "lossWeights": {"steering": 2.5},
+                "lossWeights": {"desired_wheel_steer_normalized": 2.5},
                 "consistency": {"yaw_delta_vs_yaw_rate_weight": 1.25},
                 "turnOversampling": {"enabled": True},
                 "yawLossWeighting": {"enabled": False},
@@ -318,7 +318,7 @@ class TrainingRuntimeTests(unittest.TestCase):
             "trainRunIds": ["run-a", "run-b"],
             "valRunIds": ["run-c"],
             "lossWeights": {
-                "steering": 2.0,
+                "desired_wheel_steer_normalized": 2.0,
                 "future_yaw_rate": 0.5,
             },
             "turnOversampling": {
@@ -344,7 +344,7 @@ class TrainingRuntimeTests(unittest.TestCase):
         self.assertEqual(job["widthMultiplier"], 1.5)
         self.assertEqual(job["smoothL1Beta"], 0.2)
         self.assertEqual(job["earlyStoppingMetric"], "control_loss")
-        self.assertEqual(job["lossWeights"]["steering"], 2.0)
+        self.assertEqual(job["lossWeights"]["desired_wheel_steer_normalized"], 2.0)
         self.assertEqual(job["lossWeights"]["future_yaw_rate"], 0.5)
         self.assertTrue(job["turnOversampling"]["enabled"])
         self.assertNotIn("heads", job["stateInputs"]["currentSpeed"])

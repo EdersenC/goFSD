@@ -21,6 +21,13 @@ from config import (
     DEFAULT_IMAGE_WIDTH,
     parse_temporal_dataset_config,
 )
+from control_contract import (
+    PARKING_CONTROL_TARGET_NAMES,
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    control_contract_metadata,
+    derive_control_horizon_dt_ms,
+)
 from dataset import FsdDataset, wrap_degrees_delta
 from inference import (
     load_checkpoint,
@@ -47,7 +54,14 @@ from train import (
     update_metric_totals,
     compute_planner_losses,
 )
-from target_transforms import build_target_transform_registry, round_trip_transform_check
+from target_transforms import (
+    build_target_transform_registry,
+    round_trip_transform_check,
+    target_transform_metadata,
+)
+
+
+GENERIC_CONTROL_TARGET_NAMES = ("steering", "acceleration", "brakePressureAvg")
 
 
 def write_jpeg(path: Path, *, image_size: tuple[int, int]) -> None:
@@ -64,7 +78,9 @@ def telemetry_point(
     steering: float,
     acceleration: float,
     brake_pressure_avg: float = 0.0,
-) -> dict[str, float]:
+    parking_phase: str = "parking",
+    parking_parked: bool = False,
+) -> dict[str, object]:
     return {
         "control": {
             "Steering": steering,
@@ -78,6 +94,11 @@ def telemetry_point(
         },
         "raw": {
             "time": speed * 10.0,
+            "wheelSteeringFullLock": 0.733038306,
+            "parkingPhase": parking_phase,
+            "parkingParked": parking_parked,
+            "parkingInsideBay": False,
+            "parkingAligned": False,
         },
     }
 
@@ -98,6 +119,8 @@ def create_temporal_trip_fixture(
         "sceneId": "inner-city-driving",
         "sceneVariant": "default",
         "tripIndex": int(trip_name.split("-")[-1]),
+        "parkingGoal": {"task": "parking", "maneuver": "forward-bay"},
+        "parkingOutcome": {"success": True, "status": "succeeded"},
     }
     if metadata_overrides:
         metadata.update(metadata_overrides)
@@ -184,7 +207,7 @@ checkpoint = ''
             self.assertEqual(resolved.checkpoint, "fresh-parking-model.pt")
             self.assertIsNone(resolved.run_id)
 
-    def test_dataset_excludes_failed_parking_attempts_by_default(self) -> None:
+    def test_dataset_requires_successful_complete_parking_attempts_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             parking_goal = {"task": "parking", "maneuver": "forward-bay"}
@@ -211,7 +234,8 @@ checkpoint = ''
                 run_name="run-a",
                 trip_name="trip-002",
                 metadata_overrides={
-                    "parkingOutcome": {"success": False, "status": "incomplete-metadata"},
+                    "parkingGoal": None,
+                    "parkingOutcome": {"success": True, "status": "incomplete-metadata"},
                 },
             )
             create_temporal_trip_fixture(
@@ -219,6 +243,15 @@ checkpoint = ''
                 run_name="run-a",
                 trip_name="trip-003",
                 metadata_overrides={"parkingGoal": None, "parkingOutcome": None},
+            )
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-004",
+                metadata_overrides={
+                    "parkingGoal": {"task": "parking", "maneuver": "reverse-bay"},
+                    "parkingOutcome": {"success": True, "status": "succeeded"},
+                },
             )
 
             successful_only = FsdDataset(
@@ -228,13 +261,13 @@ checkpoint = ''
             with_failures = FsdDataset(
                 run_paths=[root / "runs" / "run-a"],
                 image_size=(32, 32),
-                include_failed_parking_attempts=True,
+                include_failed_or_nonparking_trips=True,
             )
 
-            self.assertEqual(successful_only.trip_count, 2)
-            self.assertEqual(successful_only.excluded_failed_parking_trip_count, 2)
-            self.assertEqual(with_failures.trip_count, 4)
-            self.assertEqual(with_failures.excluded_failed_parking_trip_count, 0)
+            self.assertEqual(successful_only.trip_count, 1)
+            self.assertEqual(successful_only.excluded_failed_or_nonparking_trip_count, 4)
+            self.assertEqual(with_failures.trip_count, 5)
+            self.assertEqual(with_failures.excluded_failed_or_nonparking_trip_count, 0)
 
     def test_parse_temporal_dataset_config_reads_explicit_sequence_fields(self) -> None:
         raw = {
@@ -243,7 +276,7 @@ checkpoint = ''
                 "telemetry_offsets": [-8, -7, -6, -5, -4, -3, -2, -1, 0],
                 "future_offsets": [1, 2, 3, 4, 5, 6],
                 "telemetry_feature_names": ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"],
-                "control_target_names": ["steering", "acceleration", "brakePressureAvg"],
+                "control_target_names": list(PARKING_CONTROL_TARGET_NAMES),
                 "aux_target_names": ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"],
             }
         }
@@ -316,7 +349,7 @@ checkpoint = ''
             self.assertAlmostEqual(float(first_history[1].item()), 0.173648, places=5)
             self.assertAlmostEqual(float(first_history[2].item()), 0.984807, places=5)
             self.assertAlmostEqual(float(target_controls[0, 0].item()), 0.5, places=6)
-            self.assertAlmostEqual(float(target_controls[0, 1].item()), 0.7, places=6)
+            self.assertAlmostEqual(float(target_controls[0, 1].item()), 1.0, places=6)
             self.assertAlmostEqual(float(target_controls[0, 2].item()), 0.0, places=6)
 
             aux_transform_names = dataset.aux_target_names
@@ -376,6 +409,7 @@ checkpoint = ''
             target_aux,
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0, 0.5),
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
 
@@ -397,6 +431,7 @@ checkpoint = ''
             target_aux,
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0,),
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
         weighted = compute_planner_losses(
@@ -407,6 +442,7 @@ checkpoint = ''
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0,),
             target_loss_weights={"acceleration": 3.0, "future_speed": 5.0},
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
 
@@ -432,6 +468,7 @@ checkpoint = ''
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0,),
             target_loss_weights={"steering": 0.0},
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
 
@@ -453,6 +490,7 @@ checkpoint = ''
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0,),
             target_loss_weights={"steering": 2.0},
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
         explicit = compute_planner_losses(
@@ -471,6 +509,7 @@ checkpoint = ''
                 "future_yaw_delta": 1.0,
                 "future_yaw_rate": 1.0,
             },
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=1.0,
         )
 
@@ -491,6 +530,7 @@ checkpoint = ''
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0,),
             target_loss_weights={"steering": 1.0, "acceleration": 0.0, "brakePressureAvg": 0.0},
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             smooth_l1_beta=0.1,
         )
 
@@ -499,7 +539,7 @@ checkpoint = ''
     def test_finalize_metrics_reports_new_overall_and_per_horizon_maes(self) -> None:
         totals = initialize_metric_totals(
             2,
-            control_target_names=DEFAULT_CONTROL_TARGET_NAMES,
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             aux_target_names=DEFAULT_AUX_TARGET_NAMES,
         )
         pred_controls = torch.zeros((1, 2, 3), dtype=torch.float32)
@@ -513,6 +553,7 @@ checkpoint = ''
             target_aux,
             aux_loss_weight=0.3,
             horizon_loss_weights=(1.0, 1.0),
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
         )
 
         update_metric_totals(
@@ -522,13 +563,13 @@ checkpoint = ''
             pred_aux=pred_aux,
             target_aux=target_aux,
             losses=losses,
-            control_target_names=DEFAULT_CONTROL_TARGET_NAMES,
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             aux_target_names=DEFAULT_AUX_TARGET_NAMES,
         )
         metrics = finalize_metrics(
             totals,
             (1, 2),
-            control_target_names=DEFAULT_CONTROL_TARGET_NAMES,
+            control_target_names=GENERIC_CONTROL_TARGET_NAMES,
             aux_target_names=DEFAULT_AUX_TARGET_NAMES,
         )
 
@@ -778,14 +819,23 @@ checkpoint = ''
     def test_inference_load_checkpoint_accepts_temporal_planner_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             checkpoint_path = Path(tmp) / "epoch-001.pt"
+            future_offsets = list(DEFAULT_FUTURE_OFFSETS)
+            transforms = build_target_transform_registry(PARKING_CONTROL_TARGET_NAMES)
             torch.save({
-                "planner_format": "temporal_telemetry_gru_v1",
+                "planner_format": PLANNER_FORMAT,
+                "planner_format_version": PLANNER_FORMAT_VERSION,
+                "control_contract": control_contract_metadata(),
+                "control_target_names": list(PARKING_CONTROL_TARGET_NAMES),
+                "future_offsets": future_offsets,
+                "telemetry_sample_interval_ms": 50,
+                "control_horizon_dt_ms": list(derive_control_horizon_dt_ms(future_offsets, 50)),
+                "target_transforms": target_transform_metadata(transforms),
                 "model_state_dict": {},
             }, checkpoint_path)
 
             checkpoint = load_checkpoint(checkpoint_path, torch.device("cpu"))
 
-            self.assertEqual(checkpoint["planner_format"], "temporal_telemetry_gru_v1")
+            self.assertEqual(checkpoint["planner_format"], PLANNER_FORMAT)
 
     def test_temporal_defaults_keep_training_at_480_square(self) -> None:
         self.assertEqual(DEFAULT_IMAGE_WIDTH, 480)

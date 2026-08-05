@@ -25,6 +25,7 @@ const (
 	parkingTargetHeadingDriftDeg = 1.0
 	parkingMaximumTiltDeg        = 5.0
 	parkingReverseSpeedLimitMPS  = -0.1
+	parkingSourceClockLeadLimit  = 50 * time.Millisecond
 )
 
 func (i *Inferencer) validateParkingInferenceStart() error {
@@ -33,18 +34,18 @@ func (i *Inferencer) validateParkingInferenceStart() error {
 }
 
 func (i *Inferencer) validateInferenceActuatorReady() error {
-	if i.actuatorConfig.TemporalHorizonActuatorEnabled {
-		return fmt.Errorf(
-			"%w: temporal-horizon actuation is disabled for parking until checkpoint future offsets are mapped to exact control timing",
-			ErrInferenceActuatorUnavailable,
-		)
-	}
 	if i.actuator == nil {
 		return fmt.Errorf("%w: actuator service is not configured", ErrInferenceActuatorUnavailable)
 	}
 	provider, ok := i.actuator.(actuatorStateProvider)
 	if !ok {
 		return fmt.Errorf("%w: actuator does not expose readiness state", ErrInferenceActuatorUnavailable)
+	}
+	if _, ok := i.actuator.(actuatorParkingPlanSubmitter); !ok {
+		return fmt.Errorf("%w: actuator does not support parking setpoint plans", ErrInferenceActuatorUnavailable)
+	}
+	if _, ok := i.actuator.(actuatorParkingSafetyStopper); !ok {
+		return fmt.Errorf("%w: actuator does not support parking safety stops", ErrInferenceActuatorUnavailable)
 	}
 	state := provider.State()
 	if !state.Supported {
@@ -59,6 +60,38 @@ func (i *Inferencer) validateInferenceActuatorReady() error {
 	}
 	if detail := strings.TrimSpace(state.LastApplyError); detail != "" {
 		return fmt.Errorf("%w: virtual controller has an active apply fault: %s", ErrInferenceActuatorUnavailable, detail)
+	}
+	if !state.ParkingController.Ready {
+		return fmt.Errorf(
+			"%w: parking controller requires a verified vehicle calibration profile",
+			ErrInferenceActuatorUnavailable,
+		)
+	}
+	if state.ParkingController.Contract != i.config.ControlContract {
+		return fmt.Errorf(
+			"%w: actuator control contract %q does not match inference contract %q",
+			ErrInferenceActuatorUnavailable,
+			state.ParkingController.Contract,
+			i.config.ControlContract,
+		)
+	}
+	if err := validateOrderedInts("actuator control horizon timing", state.ParkingController.ExpectedHorizonDtMs, i.config.ControlHorizonDtMs); err != nil {
+		return fmt.Errorf("%w: %v", ErrInferenceActuatorUnavailable, err)
+	}
+	if i.telemetry == nil {
+		return fmt.Errorf("%w: current vehicle identity is unavailable", ErrInferenceActuatorUnavailable)
+	}
+	ego, _ := i.telemetry.LatestEgoTelemetrySnapshot()
+	if ego == nil || ego.VehicleModelHash == 0 {
+		return fmt.Errorf("%w: current vehicle model hash is unavailable", ErrInferenceActuatorUnavailable)
+	}
+	if ego.VehicleModelHash != state.ParkingController.Calibration.VehicleModelHash {
+		return fmt.Errorf(
+			"%w: current vehicle model hash %d does not match calibrated hash %d",
+			ErrInferenceActuatorUnavailable,
+			ego.VehicleModelHash,
+			state.ParkingController.Calibration.VehicleModelHash,
+		)
 	}
 	return nil
 }
@@ -124,8 +157,12 @@ func (i *Inferencer) currentParkingInferenceTelemetry() (*control.RuntimeTelemet
 	if telemetry == nil {
 		return nil, parkingInferenceError("FiveM telemetry is unavailable")
 	}
-	if telemetryAt.IsZero() || telemetryAge(i.nowFunc().UTC(), telemetryAt) > i.telemetryStaleAfter {
+	now := i.nowFunc().UTC()
+	if telemetryAt.IsZero() || telemetryAge(now, telemetryAt) > i.telemetryStaleAfter {
 		return nil, parkingInferenceError("FiveM telemetry is stale")
+	}
+	if err := validateParkingSourceTimestamp("FiveM telemetry", now, float64(telemetry.TimestampMs)/1000.0, i.telemetryStaleAfter); err != nil {
+		return nil, parkingInferenceError("%v", err)
 	}
 	if !telemetry.ParkingTargetConfigured {
 		return nil, parkingInferenceError("parking target is not configured; calibrate a bay before starting inference")
@@ -135,8 +172,11 @@ func (i *Inferencer) currentParkingInferenceTelemetry() (*control.RuntimeTelemet
 	if ego == nil {
 		return nil, parkingInferenceError("active ego telemetry is unavailable")
 	}
-	if egoAt.IsZero() || telemetryAge(i.nowFunc().UTC(), egoAt) > i.telemetryStaleAfter {
+	if egoAt.IsZero() || telemetryAge(now, egoAt) > i.telemetryStaleAfter {
 		return nil, parkingInferenceError("active ego telemetry is stale")
+	}
+	if err := validateParkingSourceTimestamp("active ego telemetry", now, ego.TimestampS, i.telemetryStaleAfter); err != nil {
+		return nil, parkingInferenceError("%v", err)
 	}
 	if !ego.Valid {
 		reason := ego.InvalidReason
@@ -149,6 +189,24 @@ func (i *Inferencer) currentParkingInferenceTelemetry() (*control.RuntimeTelemet
 		return nil, err
 	}
 	return telemetry, nil
+}
+
+func validateParkingSourceTimestamp(label string, now time.Time, timestampS float64, maxAge time.Duration) error {
+	if !finiteParkingValue(timestampS) || timestampS <= 0 {
+		return fmt.Errorf("%s source timestamp is unavailable", label)
+	}
+	if maxAge <= 0 {
+		return fmt.Errorf("%s source timestamp age limit is invalid", label)
+	}
+	sourceAt := time.Unix(0, int64(timestampS*float64(time.Second))).UTC()
+	age := now.Sub(sourceAt)
+	if age < -parkingSourceClockLeadLimit {
+		return fmt.Errorf("%s source timestamp is %s in the future", label, -age)
+	}
+	if age > maxAge {
+		return fmt.Errorf("%s source telemetry is stale: age=%s", label, age)
+	}
+	return nil
 }
 
 func validateParkingOperatingState(telemetry control.RuntimeTelemetry) error {

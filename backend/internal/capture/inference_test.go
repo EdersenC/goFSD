@@ -9,12 +9,14 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
+	"awesomeProject/internal/parkingcontrol"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -25,6 +27,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 type recordingInferenceActuator struct {
 	commands      []actuator.CommandRequest
+	plans         []parkingcontrol.Plan
 	err           error
 	state         actuator.State
 	nextCommandID int64
@@ -37,11 +40,14 @@ type statefulInferenceActuator struct {
 	state actuator.State
 }
 
+const testParkingModelHash int64 = 424242
+
 func (a *statefulInferenceActuator) State() actuator.State {
 	state := a.recordingInferenceActuator.State()
 	state.Supported = a.state.Supported
 	state.Ready = a.state.Ready
 	state.Platform = a.state.Platform
+	state.ParkingController = a.state.ParkingController
 	if a.state.LastError != "" {
 		state.LastError = a.state.LastError
 	}
@@ -74,9 +80,17 @@ func (a *recordingInferenceActuator) Submit(req actuator.CommandRequest) (actuat
 		appliedAt = time.Unix(1, 0).UTC()
 	}
 	enabled := req.Enabled == nil || *req.Enabled
+	if req.Owner == actuator.OwnerParkingInference && enabled {
+		a.state.ParkingController.Owner = actuator.OwnerParkingInference
+		a.state.ParkingController.Stopping = false
+	}
+	if !enabled {
+		a.state.ParkingController.Owner = ""
+		a.state.ParkingController.Stopping = false
+	}
 	a.state.Applied.CommandID = a.nextCommandID
 	a.state.Applied.Enabled = enabled
-	a.state.Applied.Handbrake = req.Handbrake
+	a.state.Applied.Handbrake = req.Handbrake || req.Owner == actuator.OwnerParkingInference && enabled
 	a.state.Applied.Steer = req.Steer
 	a.state.Applied.Throttle = req.Throttle
 	a.state.Applied.Brake = req.BrakePressureAvg
@@ -85,8 +99,51 @@ func (a *recordingInferenceActuator) Submit(req actuator.CommandRequest) (actuat
 	return a.state, nil
 }
 
+func (a *recordingInferenceActuator) RequestParkingSafetyStop() (actuator.State, error) {
+	enabled := true
+	state, err := a.Submit(actuator.CommandRequest{
+		Enabled:   &enabled,
+		InputMode: actuator.InputModeNormalized,
+		Owner:     actuator.OwnerParkingInference,
+	})
+	if err != nil {
+		return state, err
+	}
+	a.state.ParkingController.Owner = actuator.OwnerParkingInference
+	a.state.ParkingController.Stopping = true
+	return a.state, nil
+}
+
 func (a *recordingInferenceActuator) State() actuator.State {
 	return a.state
+}
+
+func (a *recordingInferenceActuator) SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (actuator.State, error) {
+	a.plans = append(a.plans, plan)
+	if a.err != nil {
+		return a.state, a.err
+	}
+	a.state.ParkingController.LastPlanID++
+	return a.state, nil
+}
+
+func assertParkingSafetyStopRequested(t *testing.T, actuatorSink *recordingInferenceActuator) {
+	t.Helper()
+	if len(actuatorSink.commands) != 1 {
+		t.Fatalf("expected exactly one actuator-owned parking safety stop, got=%+v", actuatorSink.commands)
+	}
+	command := actuatorSink.commands[0]
+	if command.Enabled == nil || !*command.Enabled || command.Owner != actuator.OwnerParkingInference ||
+		command.Steer != 0 || command.Throttle != 0 || command.BrakePressureAvg != 0 || command.Handbrake {
+		t.Fatalf("expected a neutral enabled ownership command with no direct handbrake, got=%+v", command)
+	}
+	if !actuatorSink.state.ParkingController.Stopping {
+		t.Fatalf("expected the actuator-owned speed-aware stop state, got=%+v", actuatorSink.state.ParkingController)
+	}
+}
+
+func floatPtr(value float64) *float64 {
+	return &value
 }
 
 func validParkingTelemetryUpdate(now time.Time, longitudinal float64) control.TelemetryUpdate {
@@ -95,6 +152,7 @@ func validParkingTelemetryUpdate(now time.Time, longitudinal float64) control.Te
 	return control.TelemetryUpdate{
 		VehicleExists:            true,
 		IsInVehicle:              true,
+		VehicleModelHash:         testParkingModelHash,
 		PositionX:                &zero,
 		PositionY:                floatPtr(longitudinal),
 		PositionZ:                &zero,
@@ -144,10 +202,15 @@ func validParkingModelStatus(cfg InferenceConfig) parkingModelStatus {
 		inputs[name] = parkingModelInputSpec{Enabled: true}
 	}
 	return parkingModelStatus{
-		Loaded:        true,
-		Checkpoint:    "C:/models/parking/epoch-001.pt",
-		PlannerFormat: cfg.PlannerFormat,
-		ImageSize:     parkingModelImageSize{Width: cfg.FrameWidth, Height: cfg.FrameHeight},
+		Loaded:                    true,
+		Checkpoint:                "C:/models/parking/epoch-001.pt",
+		PlannerFormat:             cfg.PlannerFormat,
+		PlannerFormatVersion:      requiredParkingPlannerFormatVersion,
+		ControlContract:           validParkingControlContract(),
+		ControlHorizonDtMs:        append([]int(nil), cfg.ControlHorizonDtMs...),
+		TelemetrySampleIntervalMs: int(cfg.TelemetrySampleInterval.Milliseconds()),
+		Direction:                 parkingcontrol.ParkingDirectionForward,
+		ImageSize:                 parkingModelImageSize{Width: cfg.FrameWidth, Height: cfg.FrameHeight},
 		FrameWindow: parkingModelFrameWindow{
 			Size:          cfg.WindowSize,
 			FrameStride:   cfg.FrameStride,
@@ -160,6 +223,68 @@ func validParkingModelStatus(cfg InferenceConfig) parkingModelStatus {
 		ControlTargetNames: append([]string(nil), cfg.ControlOutputNames...),
 		AuxTargetNames:     append([]string(nil), cfg.AuxOutputNames...),
 		StateInputs:        inputs,
+	}
+}
+
+func validParkingControlContract() parkingControlContract {
+	return parkingControlContract{
+		Name:      parkingcontrol.ParkingSetpointContractV1,
+		Version:   1,
+		Direction: parkingcontrol.ParkingDirectionForward,
+		Targets:   append([]string(nil), requiredParkingControlHeads...),
+		OutputActivations: map[string]string{
+			"desired_wheel_steer_normalized": "tanh",
+			"desired_speed_mps":              "sigmoid",
+			"stop_probability":               "sigmoid",
+		},
+		OutputRanges: map[string][]float64{
+			"desired_wheel_steer_normalized": {-1, 1},
+			"desired_speed_mps":              {0, parkingcontrol.ParkingSetpointMaxSpeedMPS},
+			"stop_probability":               {0, 1},
+		},
+	}
+}
+
+func validParkingPredictResponse(cfg InferenceConfig, checkpoint string, sampledAtS float64) pythonPredictResponse {
+	controls := make([][]float64, cfg.FutureSteps)
+	for index := range controls {
+		controls[index] = []float64{0.25, 1.0, 0.05}
+	}
+	return pythonPredictResponse{
+		Checkpoint:                checkpoint,
+		Device:                    "cuda",
+		PlannerFormat:             cfg.PlannerFormat,
+		PlannerFormatVersion:      requiredParkingPlannerFormatVersion,
+		ControlContract:           validParkingControlContract(),
+		ControlHorizonDtMs:        append([]int(nil), cfg.ControlHorizonDtMs...),
+		TelemetrySampleIntervalMs: int(cfg.TelemetrySampleInterval.Milliseconds()),
+		SampledAtS:                sampledAtS,
+		Direction:                 parkingcontrol.ParkingDirectionForward,
+		ImageOffsets:              append([]int(nil), cfg.ImageOffsets...),
+		TelemetryOffsets:          append([]int(nil), cfg.TelemetryOffsets...),
+		FutureOffsets:             append([]int(nil), cfg.FutureOffsets...),
+		TelemetryFeatureNames:     append([]string(nil), cfg.TelemetryFeatureNames...),
+		ControlTargetNames:        append([]string(nil), cfg.ControlOutputNames...),
+		AuxTargetNames:            append([]string(nil), cfg.AuxOutputNames...),
+		StateInputs:               validParkingModelStatus(cfg).StateInputs,
+		PredControls:              [][][]float64{controls},
+	}
+}
+
+func readyParkingActuatorState(cfg InferenceConfig) actuator.State {
+	return actuator.State{
+		Supported: true,
+		Ready:     true,
+		Platform:  "windows",
+		ParkingController: actuator.ParkingControllerState{
+			Ready:               true,
+			Contract:            cfg.ControlContract,
+			ExpectedHorizonDtMs: append([]int(nil), cfg.ControlHorizonDtMs...),
+			Calibration: actuator.ParkingCalibration{
+				Verified:         true,
+				VehicleModelHash: testParkingModelHash,
+			},
+		},
 	}
 }
 
@@ -242,12 +367,156 @@ func TestBuildInferenceFFmpegArgsUsesConfiguredFrameSize(t *testing.T) {
 	args := buildInferenceFFmpegArgs(spec, cfg)
 	found := false
 	for _, arg := range args {
-		if arg == "hwdownload,format=bgra,scale=480:480:flags=lanczos,fps=30,format=rgb24" {
+		if arg == "fps=30,showinfo=checksum=0,hwdownload,format=bgra,scale=480:480:flags=lanczos,format=rgb24" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("expected configured inference filter, args=%v", args)
+	}
+	if !strings.Contains(strings.Join(args, " "), "-loglevel info -nostats") {
+		t.Fatalf("expected showinfo log output without progress stats, args=%v", args)
+	}
+}
+
+func TestParseInferenceFrameTimingReadsShowinfoPTS(t *testing.T) {
+	observedAt := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	line := "[Parsed_showinfo_5 @ 000001] n:  12 pts:     20 pts_time:0.666667 duration:1"
+	timing, matched, err := parseInferenceFrameTiming(line, observedAt)
+	if err != nil {
+		t.Fatalf("parse timing: %v", err)
+	}
+	if !matched || timing.index != 12 || timing.pts != 666667*time.Microsecond || !timing.observedAt.Equal(observedAt) {
+		t.Fatalf("unexpected timing: matched=%v timing=%+v", matched, timing)
+	}
+
+	if _, matched, err := parseInferenceFrameTiming("[Parsed_showinfo_5] config in time_base: 1/30", observedAt); matched || err != nil {
+		t.Fatalf("expected showinfo configuration line to be ignored, matched=%v err=%v", matched, err)
+	}
+	if _, matched, err := parseInferenceFrameTiming("[Parsed_showinfo_5] n: bad pts: 0 pts_time:NOPTS", observedAt); !matched || err == nil {
+		t.Fatalf("expected malformed frame timing to fail closed, matched=%v err=%v", matched, err)
+	}
+}
+
+func TestInferenceFrameClockUsesPTSInsteadOfMetadataArrival(t *testing.T) {
+	clock := newInferenceFrameClock(30)
+	anchor := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	first, err := clock.resolve(0, inferenceFrameTiming{index: 0, pts: 250 * time.Millisecond, observedAt: anchor})
+	if err != nil {
+		t.Fatalf("resolve first frame: %v", err)
+	}
+	if !first.Equal(anchor) {
+		t.Fatalf("unexpected first timestamp: got=%s want=%s", first, anchor)
+	}
+
+	lateArrival := anchor.Add(800 * time.Millisecond)
+	second, err := clock.resolve(1, inferenceFrameTiming{
+		index:      1,
+		pts:        283333333 * time.Nanosecond,
+		observedAt: lateArrival,
+	})
+	if err != nil {
+		t.Fatalf("resolve delayed second frame: %v", err)
+	}
+	want := anchor.Add(33333333 * time.Nanosecond)
+	if !second.Equal(want) {
+		t.Fatalf("expected PTS-derived timestamp, got=%s want=%s", second, want)
+	}
+	if second.Equal(lateArrival) {
+		t.Fatal("frame timestamp must not use delayed metadata or stdout arrival time")
+	}
+}
+
+func TestInferenceFrameClockRejectsMismatchedMetadata(t *testing.T) {
+	anchor := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		timing inferenceFrameTiming
+		want   string
+	}{
+		{
+			name:   "missing frame index",
+			timing: inferenceFrameTiming{index: 2, pts: 33333333 * time.Nanosecond, observedAt: anchor.Add(time.Second)},
+			want:   "index mismatch",
+		},
+		{
+			name:   "non-increasing pts",
+			timing: inferenceFrameTiming{index: 1, pts: 0, observedAt: anchor.Add(time.Second)},
+			want:   "not increasing",
+		},
+		{
+			name:   "wrong cadence",
+			timing: inferenceFrameTiming{index: 1, pts: 100 * time.Millisecond, observedAt: anchor.Add(time.Second)},
+			want:   "cadence mismatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newInferenceFrameClock(30)
+			if _, err := clock.resolve(0, inferenceFrameTiming{index: 0, pts: 0, observedAt: anchor}); err != nil {
+				t.Fatalf("resolve first frame: %v", err)
+			}
+			if _, err := clock.resolve(1, tc.timing); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got=%v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestConsumeInferenceStderrPublishesOrderedFrameTiming(t *testing.T) {
+	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil)
+	observedAt := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	inferencer.nowFunc = func() time.Time { return observedAt }
+	session := &inferenceSession{
+		ctx: context.Background(),
+		stderr: io.NopCloser(strings.NewReader(strings.Join([]string{
+			"Input #0, lavfi, from 'ddagrab':",
+			"[Parsed_showinfo_5] n: 0 pts: 0 pts_time:0 duration:1",
+			"[Parsed_showinfo_5] n: 1 pts: 1 pts_time:0.0333333 duration:1",
+		}, "\n"))),
+		frameTimings: make(chan inferenceFrameTimingEvent, 2),
+	}
+
+	inferencer.consumeInferenceStderr(session)
+	first, ok := <-session.frameTimings
+	if !ok || first.err != nil || first.timing.index != 0 {
+		t.Fatalf("unexpected first timing event: ok=%v event=%+v", ok, first)
+	}
+	second, ok := <-session.frameTimings
+	if !ok || second.err != nil || second.timing.index != 1 {
+		t.Fatalf("unexpected second timing event: ok=%v event=%+v", ok, second)
+	}
+	if _, ok := <-session.frameTimings; ok {
+		t.Fatal("expected timing stream to close with FFmpeg stderr")
+	}
+}
+
+func TestCompleteInferenceFrameWithoutTimingMetadataTripsSafetyStop(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	cfg.FrameWidth = 1
+	cfg.FrameHeight = 1
+	actuatorSink := &recordingInferenceActuator{}
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil, actuatorSink)
+	loopCtx, cancel := context.WithCancel(context.Background())
+	timingStream := make(chan inferenceFrameTimingEvent)
+	close(timingStream)
+	session := &inferenceSession{
+		ctx:          loopCtx,
+		cancel:       cancel,
+		stdout:       io.NopCloser(bytes.NewReader([]byte{0, 0, 0})),
+		frameTimings: timingStream,
+	}
+	inferencer.active = session
+	inferencer.status.State = "running"
+	inferencer.status.Active = true
+
+	inferencer.consumeInferenceFrames(loopCtx, session)
+	status := inferencer.Status()
+	if status.State != "error" || !strings.Contains(status.LastError, "timing metadata ended before frame 0") {
+		t.Fatalf("expected missing timing metadata to be terminal, got=%+v", status)
+	}
+	if len(actuatorSink.commands) != 1 || !actuatorSink.state.ParkingController.Stopping {
+		t.Fatalf("expected missing timing metadata to issue one parking safety stop, commands=%+v state=%+v", actuatorSink.commands, actuatorSink.state)
 	}
 }
 
@@ -305,6 +574,7 @@ func TestInferenceLifecycleRejectsModelChangesWhileRunning(t *testing.T) {
 
 func TestInferenceStartRequiresReadyActuatorBeforeSourceDiscovery(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	cfg := DefaultInferenceConfig()
 	tests := []struct {
 		name        string
 		state       actuator.State
@@ -327,7 +597,7 @@ func TestInferenceStartRequiresReadyActuatorBeforeSourceDiscovery(t *testing.T) 
 		},
 		{
 			name:  "ready",
-			state: actuator.State{Supported: true, Ready: true, Platform: "windows"},
+			state: readyParkingActuatorState(cfg),
 		},
 	}
 
@@ -336,7 +606,7 @@ func TestInferenceStartRequiresReadyActuatorBeforeSourceDiscovery(t *testing.T) 
 			store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
 			store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
 			actuatorSink := &statefulInferenceActuator{state: tc.state}
-			inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store, actuatorSink)
+			inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
 			inferencer.nowFunc = func() time.Time { return now }
 			discoveryErr := errors.New("source discovery reached")
 			discoveryCalled := false
@@ -362,13 +632,44 @@ func TestInferenceStartRequiresReadyActuatorBeforeSourceDiscovery(t *testing.T) 
 	}
 }
 
-func TestParkingInferenceRejectsTemporalActuationUntilOffsetsAreTimedExactly(t *testing.T) {
-	actuatorCfg := actuator.DefaultConfig()
-	actuatorCfg.TemporalHorizonActuatorEnabled = true
-	actuatorSink := &statefulInferenceActuator{state: actuator.State{Supported: true, Ready: true, Platform: "windows"}}
-	inferencer := NewInferencer(DefaultInferenceConfig(), actuatorCfg, nil, actuatorSink)
-	if err := inferencer.validateInferenceActuatorReady(); err == nil || !errors.Is(err, ErrInferenceActuatorUnavailable) || !strings.Contains(err.Error(), "future offsets") {
-		t.Fatalf("expected temporal parking actuation to fail closed, got=%v", err)
+func TestParkingInferenceRejectsActuatorWithDifferentSetpointTiming(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	state := readyParkingActuatorState(cfg)
+	state.ParkingController.ExpectedHorizonDtMs = []int{50, 100, 150, 200, 250, 350}
+	actuatorSink := &statefulInferenceActuator{state: state}
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil, actuatorSink)
+	if err := inferencer.validateInferenceActuatorReady(); err == nil || !errors.Is(err, ErrInferenceActuatorUnavailable) || !strings.Contains(err.Error(), "actuator control horizon timing") {
+		t.Fatalf("expected mismatched setpoint timing to fail closed, got=%v", err)
+	}
+}
+
+func TestParkingInferenceRejectsVehicleDifferentFromCalibrationProfile(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	cfg := DefaultInferenceConfig()
+	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
+	telemetry := validParkingTelemetryUpdate(now, -12)
+	telemetry.VehicleModelHash = testParkingModelHash + 1
+	store.UpdateTelemetry(telemetry)
+	actuatorSink := &statefulInferenceActuator{state: readyParkingActuatorState(cfg)}
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
+
+	err := inferencer.validateInferenceActuatorReady()
+	if err == nil || !errors.Is(err, ErrInferenceActuatorUnavailable) || !strings.Contains(err.Error(), "does not match calibrated hash") {
+		t.Fatalf("expected current vehicle identity mismatch to fail before arming, got=%v", err)
+	}
+}
+
+func TestParkingInferenceRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T) {
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	now := base.Add(defaultTelemetryStaleAfter + time.Millisecond)
+	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
+	store.UpdateTelemetry(validParkingTelemetryUpdate(base, -12))
+	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store)
+	inferencer.nowFunc = func() time.Time { return now }
+
+	err := inferencer.validateParkingInferenceStart()
+	if err == nil || !strings.Contains(err.Error(), "source telemetry is stale") {
+		t.Fatalf("expected stale source timestamp to fail despite a fresh backend receipt, got=%v", err)
 	}
 }
 
@@ -498,14 +799,9 @@ func TestParkingTargetLossDisablesActuatorWithoutFallbackDecay(t *testing.T) {
 	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
 
 	actuatorSink := &recordingInferenceActuator{}
-	actuatorCfg := actuator.DefaultConfig()
-	actuatorCfg.TemporalHorizonActuatorEnabled = true
-	inferencer := NewInferencer(DefaultInferenceConfig(), actuatorCfg, store, actuatorSink)
+	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return now }
 	bindInferenceToCurrentParkingTarget(t, inferencer, store)
-	inferencer.processorState.PrevSteering = 0.8
-	inferencer.processorState.PrevThrottle = 0.9
-	inferencer.processorState.PrevBrake = 0.7
 
 	now = now.Add(50 * time.Millisecond)
 	lostTarget := validParkingTelemetryUpdate(now, -12)
@@ -517,16 +813,7 @@ func TestParkingTargetLossDisablesActuatorWithoutFallbackDecay(t *testing.T) {
 	}
 
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 17}, cause)
-	if len(actuatorSink.commands) != 1 {
-		t.Fatalf("expected exactly one fail-safe actuator command, got=%+v", actuatorSink.commands)
-	}
-	command := actuatorSink.commands[0]
-	if command.Enabled == nil || *command.Enabled || command.Steer != 0 || command.Throttle != 0 || command.BrakePressureAvg != 0 || !command.Handbrake {
-		t.Fatalf("expected disabled drive controls plus a safety handbrake hold after target loss, got=%+v", command)
-	}
-	if inferencer.processorState.PrevSteering != 0 || inferencer.processorState.PrevThrottle != 0 || inferencer.processorState.PrevBrake != 0 {
-		t.Fatalf("expected fallback history to be cleared, got=%+v", inferencer.processorState)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 
 	now = now.Add(50 * time.Millisecond)
 	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
@@ -544,18 +831,9 @@ func TestPredictionErrorHardDisablesInsteadOfDecayingControls(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
-	inferencer.processorState.PrevSteering = -0.7
-	inferencer.processorState.PrevThrottle = 0.8
-	inferencer.processorState.PrevBrake = 0.6
 
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 23}, errors.New("planner request timed out"))
-	if len(actuatorSink.commands) != 1 {
-		t.Fatalf("expected one fail-stop command, got=%+v", actuatorSink.commands)
-	}
-	command := actuatorSink.commands[0]
-	if command.Enabled == nil || *command.Enabled || command.Steer != 0 || command.Throttle != 0 || command.BrakePressureAvg != 0 || !command.Handbrake {
-		t.Fatalf("expected generic prediction error to disable drive controls and hold the handbrake, got=%+v", command)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 	if !inferencer.parkingSafetyTripped {
 		t.Fatal("expected generic prediction error to latch the parking safety interlock")
 	}
@@ -567,13 +845,7 @@ func TestParkingSuccessNeutralizesDriveAndSurfacesSucceededState(t *testing.T) {
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(3000).UTC() }
 
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 24}, ErrParkingInferenceComplete)
-	if len(actuatorSink.commands) != 1 {
-		t.Fatalf("expected one terminal safety command, got=%+v", actuatorSink.commands)
-	}
-	command := actuatorSink.commands[0]
-	if command.Enabled == nil || *command.Enabled || command.Steer != 0 || command.Throttle != 0 || command.BrakePressureAvg != 0 || !command.Handbrake {
-		t.Fatalf("expected parking success to disable drive controls and hold the handbrake, got=%+v", command)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 	status := inferencer.Status()
 	if status.State != "succeeded" || status.LastError != "" || !inferencer.parkingCompleted {
 		t.Fatalf("expected a latched succeeded state, got status=%+v completed=%v", status, inferencer.parkingCompleted)
@@ -604,9 +876,7 @@ func TestParkingTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T)
 	if status.State != "error" || status.LastError != cause.Error() || status.StoppedAt != "" || !status.Active {
 		t.Fatalf("expected terminal reason with cleanup still active, got=%+v", status)
 	}
-	if len(actuatorSink.commands) != 1 || actuatorSink.commands[0].Enabled == nil || *actuatorSink.commands[0].Enabled || !actuatorSink.commands[0].Handbrake {
-		t.Fatalf("expected one disabled handbrake command, got=%+v", actuatorSink.commands)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 
 	inferencer.handleSessionPredictionFailure(session, predictionWindow{sequenceNumber: 26}, errors.New("duplicate failure"))
 	if len(actuatorSink.commands) != 1 || inferencer.Status().LastError != cause.Error() {
@@ -706,9 +976,7 @@ func TestLiveFrameStreamTerminationAlwaysLatchesOneErrorHold(t *testing.T) {
 			if status.State != "error" || status.Active || !strings.Contains(status.LastError, "frame stream ended unexpectedly") {
 				t.Fatalf("expected live frame stream termination to remain a terminal error, got=%+v", status)
 			}
-			if len(actuatorSink.commands) != 1 || actuatorSink.commands[0].Enabled == nil || *actuatorSink.commands[0].Enabled || !actuatorSink.commands[0].Handbrake {
-				t.Fatalf("expected exactly one persistent error hold, got=%+v", actuatorSink.commands)
-			}
+			assertParkingSafetyStopRequested(t, actuatorSink)
 		})
 	}
 }
@@ -776,9 +1044,7 @@ func TestParkingEvaluationDeadlineUsesTerminalSafetyStop(t *testing.T) {
 	if status.State != "error" || !strings.Contains(status.LastError, ErrParkingInferenceDeadlineExceeded.Error()) || status.StoppedAt != "" {
 		t.Fatalf("expected deadline reason while process cleanup remains active, got=%+v", status)
 	}
-	if len(actuatorSink.commands) != 1 || actuatorSink.commands[0].Enabled == nil || *actuatorSink.commands[0].Enabled || !actuatorSink.commands[0].Handbrake {
-		t.Fatalf("expected deadline to issue one latched safety hold, got=%+v", actuatorSink.commands)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 }
 
 func TestInferenceStopLatchesSafetyHoldBeforeCancel(t *testing.T) {
@@ -799,9 +1065,7 @@ func TestInferenceStopLatchesSafetyHoldBeforeCancel(t *testing.T) {
 	default:
 		t.Fatal("expected Stop to cancel capture after applying the hold")
 	}
-	if len(actuatorSink.commands) != 1 || actuatorSink.commands[0].Enabled == nil || *actuatorSink.commands[0].Enabled || !actuatorSink.commands[0].Handbrake {
-		t.Fatalf("expected Stop to issue one disabled handbrake command, got=%+v", actuatorSink.commands)
-	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 }
 
 func TestParkingOperatingStateRejectsExpertPhasesAndVehicleHazards(t *testing.T) {
@@ -929,9 +1193,10 @@ func TestActiveParkingInferenceBindsTargetIdentity(t *testing.T) {
 		t.Fatalf("expected target replacement error, got=%v", cause)
 	}
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 31}, cause)
-	if !inferencer.parkingSafetyTripped || len(actuatorSink.commands) != 1 || actuatorSink.commands[0].Enabled == nil || *actuatorSink.commands[0].Enabled {
+	if !inferencer.parkingSafetyTripped {
 		t.Fatalf("expected target replacement to latch-disable actuation, commands=%+v", actuatorSink.commands)
 	}
+	assertParkingSafetyStopRequested(t, actuatorSink)
 }
 
 func TestValidateParkingModelStatusRejectsTargetBlindCheckpoints(t *testing.T) {
@@ -946,10 +1211,10 @@ func TestValidateParkingModelStatusRejectsTargetBlindCheckpoints(t *testing.T) {
 		t.Fatalf("expected disabled parking input rejection, got=%v", err)
 	}
 
-	missingBrake := validParkingModelStatus(cfg)
-	missingBrake.ControlTargetNames = []string{"steering", "acceleration"}
-	if err := validateParkingModelStatus(missingBrake, cfg); err == nil || !strings.Contains(err.Error(), "brakePressureAvg") {
-		t.Fatalf("expected missing brake head rejection, got=%v", err)
+	missingStopProbability := validParkingModelStatus(cfg)
+	missingStopProbability.ControlTargetNames = []string{"desired_wheel_steer_normalized", "desired_speed_mps"}
+	if err := validateParkingModelStatus(missingStopProbability, cfg); err == nil || !strings.Contains(err.Error(), "stop_probability") {
+		t.Fatalf("expected missing stop probability head rejection, got=%v", err)
 	}
 
 	unloaded := validParkingModelStatus(cfg)
@@ -975,23 +1240,51 @@ func TestPredictionModelMustRemainBoundToSessionCheckpoint(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil)
 	inferencer.parkingCheckpoint = "C:/models/parking/epoch-001.pt"
-	compatible := pythonPredictResponse{
-		Checkpoint:            inferencer.parkingCheckpoint,
-		PlannerFormat:         cfg.PlannerFormat,
-		ImageOffsets:          append([]int(nil), cfg.ImageOffsets...),
-		TelemetryOffsets:      append([]int(nil), cfg.TelemetryOffsets...),
-		FutureOffsets:         append([]int(nil), cfg.FutureOffsets...),
-		TelemetryFeatureNames: append([]string(nil), cfg.TelemetryFeatureNames...),
-		ControlTargetNames:    append([]string(nil), cfg.ControlOutputNames...),
-		AuxTargetNames:        append([]string(nil), cfg.AuxOutputNames...),
-		StateInputs:           validParkingModelStatus(cfg).StateInputs,
-	}
+	compatible := validParkingPredictResponse(cfg, inferencer.parkingCheckpoint, 1)
 	if err := inferencer.validateParkingPredictionModel(compatible); err != nil {
 		t.Fatalf("expected bound prediction model, got=%v", err)
 	}
-	compatible.Checkpoint = "C:/models/legacy-driving/epoch-099.pt"
-	if err := inferencer.validateParkingPredictionModel(compatible); err == nil || !errors.Is(err, ErrParkingModelIncompatible) {
+
+	hotSwapped := compatible
+	hotSwapped.Checkpoint = "C:/models/legacy-driving/epoch-099.pt"
+	if err := inferencer.validateParkingPredictionModel(hotSwapped); err == nil || !errors.Is(err, ErrParkingModelIncompatible) {
 		t.Fatalf("expected hot-swapped prediction checkpoint rejection, got=%v", err)
+	}
+
+	legacyContract := compatible
+	legacyContract.ControlContract.Name = "direct_controller_v0"
+	if err := inferencer.validateParkingPredictionModel(legacyContract); err == nil || !strings.Contains(err.Error(), parkingcontrol.ParkingSetpointContractV1) {
+		t.Fatalf("expected legacy control contract rejection, got=%v", err)
+	}
+
+	legacyPlannerVersion := compatible
+	legacyPlannerVersion.PlannerFormatVersion = 1
+	if err := inferencer.validateParkingPredictionModel(legacyPlannerVersion); err == nil || !strings.Contains(err.Error(), "planner format version") {
+		t.Fatalf("expected legacy planner version rejection, got=%v", err)
+	}
+
+	wrongDirection := compatible
+	wrongDirection.Direction = "reverse"
+	if err := inferencer.validateParkingPredictionModel(wrongDirection); err == nil || !strings.Contains(err.Error(), "direction") {
+		t.Fatalf("expected reverse direction rejection, got=%v", err)
+	}
+
+	wrongContractDirection := compatible
+	wrongContractDirection.ControlContract.Direction = "reverse"
+	if err := inferencer.validateParkingPredictionModel(wrongContractDirection); err == nil || !strings.Contains(err.Error(), "control contract direction") {
+		t.Fatalf("expected nested reverse contract direction rejection, got=%v", err)
+	}
+
+	wrongTiming := compatible
+	wrongTiming.ControlHorizonDtMs = []int{50, 100, 150, 200, 250, 301}
+	if err := inferencer.validateParkingPredictionModel(wrongTiming); err == nil || !strings.Contains(err.Error(), "control horizon timing") {
+		t.Fatalf("expected noncanonical setpoint timing rejection, got=%v", err)
+	}
+
+	wrongSampleInterval := compatible
+	wrongSampleInterval.TelemetrySampleIntervalMs = 51
+	if err := inferencer.validateParkingPredictionModel(wrongSampleInterval); err == nil || !strings.Contains(err.Error(), "telemetry sample interval") {
+		t.Fatalf("expected mismatched telemetry cadence rejection, got=%v", err)
 	}
 }
 
@@ -1027,20 +1320,19 @@ func TestInferencerModelsProxiesPythonServer(t *testing.T) {
 	}
 }
 
-func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
+func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = "http://planner.local"
 	cfg.ImageOffsets = []int{-4, -2, 0}
 	cfg.WindowSize = len(cfg.ImageOffsets)
 	cfg.TelemetryOffsets = []int{-2, -1, 0}
 	cfg.FutureSteps = 6
-	cfg.HorizonControlWeights = []float64{0.60, 0.30, 0.10}
 	cfg.PredictionTimeout = time.Second
-	nowValue := time.UnixMilli(1000).UTC()
+	nowValue := time.UnixMilli(966).UTC()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return nowValue }))
-	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.0, CurrentYaw: 10.0, YawRate: 0.1, Steering: 0.1, Acceleration: 0.2, TimestampMs: 1000})
-	nowValue = time.UnixMilli(1033).UTC()
-	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.5, CurrentYaw: 11.0, YawRate: 0.2, Steering: 0.2, Acceleration: 0.3, TimestampMs: 1033})
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.0, CurrentYaw: 10.0, YawRate: 0.1, Steering: 0.1, Acceleration: 0.2, TimestampMs: 966})
+	nowValue = time.UnixMilli(1016).UTC()
+	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.5, CurrentYaw: 11.0, YawRate: 0.2, Steering: 0.2, Acceleration: 0.3, TimestampMs: 1016})
 	nowValue = time.UnixMilli(1066).UTC()
 	current := validParkingTelemetryUpdate(nowValue, -1.2)
 	current.CurrentSpeed = 5.0
@@ -1073,6 +1365,16 @@ func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
 			var payload map[string]any
 			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode payload: %v", err)
+			}
+			if got := payload["planner_format"]; got != cfg.PlannerFormat {
+				t.Fatalf("unexpected planner contract: got=%#v want=%q", got, cfg.PlannerFormat)
+			}
+			if got := payload["control_contract"]; got != parkingcontrol.ParkingSetpointContractV1 {
+				t.Fatalf("unexpected control contract: got=%#v want=%q", got, parkingcontrol.ParkingSetpointContractV1)
+			}
+			sampledAtS, ok := payload["sampled_at_s"].(float64)
+			if !ok || math.Abs(sampledAtS-1.066) > 1e-9 {
+				t.Fatalf("unexpected sampled_at_s: got=%#v want=1.066", payload["sampled_at_s"])
 			}
 			expectedCurrentInputs := map[string]any{
 				"currentSpeed":                  5.0,
@@ -1109,34 +1411,24 @@ func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
 			if !ok || len(telemetry) != 1 {
 				t.Fatalf("expected telemetry batch, got=%T %+v", payload["telemetry"], payload["telemetry"])
 			}
-			body, _ := json.Marshal(map[string]any{
-				"checkpoint":              "C:/models/run-1/epoch-006.pt",
-				"device":                  "cuda",
-				"planner_format":          "temporal_telemetry_gru_v1",
-				"image_offsets":           cfg.ImageOffsets,
-				"telemetry_offsets":       cfg.TelemetryOffsets,
-				"future_offsets":          cfg.FutureOffsets,
-				"telemetry_feature_names": cfg.TelemetryFeatureNames,
-				"control_target_names":    []string{"steering", "acceleration", "brakePressureAvg"},
-				"aux_target_names":        cfg.AuxOutputNames,
-				"state_inputs":            validParkingModelStatus(cfg).StateInputs,
-				"pred_controls": [][][]float64{{
-					{0.50, 0.40, 0.00},
-					{0.30, 0.20, 0.00},
-					{0.10, -0.10, 0.10},
-					{0.00, 0.00, 0.00},
-					{0.00, 0.00, 0.00},
-					{0.00, 0.00, 0.00},
-				}},
-				"pred_aux": [][][]float64{{
-					{5, 0.0, 1, 0.1},
-					{6, 1.0, 2, 0.2},
-					{7, 2.0, 3, 0.3},
-					{8, 3.0, 4, 0.4},
-					{9, 4.0, 5, 0.5},
-					{10, 5.0, 6, 0.6},
-				}},
-			})
+			response := validParkingPredictResponse(cfg, "C:/models/run-1/epoch-006.pt", sampledAtS)
+			response.PredControls = [][][]float64{{
+				{0.50, 1.40, 0.05},
+				{0.30, 1.20, 0.05},
+				{0.10, 0.90, 0.10},
+				{0.00, 0.60, 0.20},
+				{0.00, 0.30, 0.50},
+				{0.00, 0.00, 0.90},
+			}}
+			response.PredAux = [][][]float64{{
+				{5, 0.0, 1, 0.1},
+				{6, 1.0, 2, 0.2},
+				{7, 2.0, 3, 0.3},
+				{8, 3.0, 4, 0.4},
+				{9, 4.0, 5, 0.5},
+				{10, 5.0, 6, 0.6},
+			}}
+			body, _ := json.Marshal(response)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -1158,33 +1450,37 @@ func TestRequestPredictionBuildsPlannerCommand(t *testing.T) {
 		sequenceNumber: 9,
 	}
 
-	prediction, command, err := inferencer.requestPrediction(t.Context(), cfg.ModelServerURL, window)
+	prediction, err := inferencer.requestPrediction(t.Context(), cfg.ModelServerURL, window)
 	if err != nil {
 		t.Fatalf("requestPrediction returned error: %v", err)
 	}
 	if prediction == nil {
 		t.Fatal("expected prediction")
 	}
-	if got := prediction.CollapsedCommand.Steering; got <= 0.3 || got >= 0.5 {
-		t.Fatalf("unexpected collapsed steering: %+v", prediction.CollapsedCommand)
-	}
-	if prediction.PostProcessedCommand.Throttle < 0 {
-		t.Fatalf("expected non-negative throttle after processing, got=%+v", prediction.PostProcessedCommand)
-	}
-	if command.InputMode != actuator.InputModeNormalized {
-		t.Fatalf("expected normalized command, got=%+v", command)
-	}
 	if len(prediction.RawPredControls) != 6 || len(prediction.RawPredAux) != 6 {
 		t.Fatalf("unexpected raw planner outputs: %+v", prediction)
 	}
-	if prediction.PredictionHorizon == nil {
-		t.Fatal("expected temporal prediction horizon to be recorded")
+	if prediction.ControlContract.Name != parkingcontrol.ParkingSetpointContractV1 || prediction.ControlContract.Version != 1 {
+		t.Fatalf("unexpected prediction control contract: %+v", prediction.ControlContract)
 	}
-	if len(prediction.PredictionHorizon.Points) != 6 || prediction.PredictionHorizon.Points[0].DtMs != 100 {
-		t.Fatalf("unexpected temporal horizon bins: %+v", prediction.PredictionHorizon.Points)
+	if prediction.SetpointPlan == nil {
+		t.Fatal("expected physical parking setpoint plan")
 	}
-	if point := prediction.PredictionHorizon.Points[0]; point.DesiredSpeedMPS == nil || math.Abs(*point.DesiredSpeedMPS-5) > 1e-9 {
-		t.Fatalf("expected future_speed aux to populate desired speed, got=%+v", point)
+	plan := prediction.SetpointPlan
+	if plan.Contract != parkingcontrol.ParkingSetpointContractV1 || plan.Direction != parkingcontrol.ParkingDirectionForward {
+		t.Fatalf("unexpected setpoint plan identity: %+v", plan)
+	}
+	if math.Abs(plan.SampledAtS-1.066) > 1e-9 || len(plan.Points) != 6 {
+		t.Fatalf("unexpected setpoint plan timestamp/length: %+v", plan)
+	}
+	for index, point := range plan.Points {
+		if point.DtMs != cfg.ControlHorizonDtMs[index] {
+			t.Fatalf("unexpected point timing at %d: got=%d want=%d", index, point.DtMs, cfg.ControlHorizonDtMs[index])
+		}
+	}
+	first := plan.Points[0]
+	if math.Abs(first.DesiredWheelSteerNormalized-0.5) > 1e-9 || math.Abs(first.DesiredSpeedMPS-1.4) > 1e-9 || math.Abs(first.StopProbability-0.05) > 1e-9 {
+		t.Fatalf("unexpected first physical setpoint: %+v", first)
 	}
 }
 
@@ -1196,6 +1492,7 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 	cfg.TelemetryOffsets = []int{0}
 	cfg.FutureOffsets = []int{1}
 	cfg.FutureSteps = 1
+	cfg.ControlHorizonDtMs = []int{50}
 	now := time.UnixMilli(1000).UTC()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
 	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
@@ -1211,25 +1508,20 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 	inferencer.status.Active = true
 	inferencer.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			var payload map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			sampledAtS, ok := payload["sampled_at_s"].(float64)
+			if !ok {
+				t.Fatalf("expected sampled_at_s request field, got=%#v", payload["sampled_at_s"])
+			}
 			now = now.Add(10 * time.Millisecond)
 			hazard := validParkingTelemetryUpdate(now, -12)
 			hazard.CollisionState = "vehicle"
 			store.UpdateTelemetry(hazard)
-			body, _ := json.Marshal(map[string]any{
-				"checkpoint":              inferencer.parkingCheckpoint,
-				"device":                  "cuda",
-				"planner_format":          cfg.PlannerFormat,
-				"image_offsets":           cfg.ImageOffsets,
-				"telemetry_offsets":       cfg.TelemetryOffsets,
-				"future_offsets":          cfg.FutureOffsets,
-				"telemetry_feature_names": cfg.TelemetryFeatureNames,
-				"control_target_names":    cfg.ControlOutputNames,
-				"aux_target_names":        cfg.AuxOutputNames,
-				"state_inputs":            validParkingModelStatus(cfg).StateInputs,
-				"pred_controls": [][][]float64{{
-					{0.4, 0.5, 0},
-				}},
-			})
+			response := validParkingPredictResponse(cfg, inferencer.parkingCheckpoint, sampledAtS)
+			body, _ := json.Marshal(response)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -1247,12 +1539,9 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 		sequenceNumber: 41,
 	})
 
-	if len(actuatorSink.commands) != 1 {
-		t.Fatalf("expected exactly one safety hold and no stale enabled command, got=%+v", actuatorSink.commands)
-	}
-	command := actuatorSink.commands[0]
-	if command.Enabled == nil || *command.Enabled || !command.Handbrake {
-		t.Fatalf("expected request-time hazard to discard the prediction and latch the handbrake, got=%+v", command)
+	assertParkingSafetyStopRequested(t, actuatorSink)
+	if len(actuatorSink.plans) != 0 {
+		t.Fatalf("expected the stale setpoint plan to be discarded, got=%+v", actuatorSink.plans)
 	}
 	select {
 	case <-loopCtx.Done():
@@ -1309,22 +1598,16 @@ func TestBuildPlannerSelectionEnforcesFrameTelemetrySkewLimit(t *testing.T) {
 	}
 }
 
-func TestBuildPredictionAdaptsLegacyImmediateControlToTemporalHorizon(t *testing.T) {
+func TestBuildPredictionRejectsLegacyImmediateOutputShape(t *testing.T) {
 	cfg := DefaultInferenceConfig()
-	cfg.FutureSteps = 6
-	actuatorCfg := actuator.DefaultConfig()
-	actuatorCfg.TemporalHorizonActuatorEnabled = true
-	inferencer := NewInferencer(cfg, actuatorCfg, control.NewStore())
-	now := time.UnixMilli(2000).UTC()
-	inferencer.nowFunc = func() time.Time { return now }
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
+	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
+	response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.9)
+	response.PredControls = [][][]float64{{
+		{0.2, 0.4, 0.1},
+	}}
 
-	prediction, _, err := inferencer.buildPrediction(pythonPredictResponse{
-		PlannerFormat:      "temporal_telemetry_gru_v1",
-		ControlTargetNames: []string{"steering", "acceleration", "brakePressureAvg"},
-		PredControls: [][][]float64{{
-			{0.2, 0.4, 0.1},
-		}},
-	}, "http://planner.local", predictionWindow{
+	_, err := inferencer.buildPrediction(response, "http://planner.local", predictionWindow{
 		frameIndex:     1,
 		frameIndices:   []int{1},
 		frameTimes:     []time.Time{time.UnixMilli(1900).UTC()},
@@ -1336,29 +1619,73 @@ func TestBuildPredictionAdaptsLegacyImmediateControlToTemporalHorizon(t *testing
 		frameShape:        []int{1, 1, 3, cfg.FrameHeight, cfg.FrameWidth},
 		telemetryShape:    []int{1, 1, len(cfg.TelemetryFeatureNames)},
 	}, nil)
-	if err != nil {
-		t.Fatalf("buildPrediction returned error: %v", err)
-	}
-	if prediction.PredictionHorizon == nil {
-		t.Fatal("expected legacy immediate output to produce a temporal horizon")
-	}
-	if len(prediction.PredictionHorizon.Points) != len(actuator.DefaultPredictionHorizonDtMs) {
-		t.Fatalf("unexpected adapted horizon length: %+v", prediction.PredictionHorizon.Points)
-	}
-	first := prediction.PredictionHorizon.Points[0]
-	if first.Steer == nil || *first.Steer != 0.2 || first.Throttle == nil || *first.Throttle != 0.4 || first.Brake == nil || *first.Brake != 0.1 {
-		t.Fatalf("unexpected adapted point: %+v", first)
+	if err == nil || !strings.Contains(err.Error(), "pred_controls horizon mismatch") {
+		t.Fatalf("expected legacy one-step output to be rejected, got=%v", err)
 	}
 }
 
-func TestFindAnchorTelemetryIndexPrefersBackendReceiveTimestamp(t *testing.T) {
+func TestBuildPredictionRejectsOutOfRangePhysicalSetpoints(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
+	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
+	window := predictionWindow{
+		frameIndex:     1,
+		frameIndices:   []int{1},
+		frameTimes:     []time.Time{time.UnixMilli(1900).UTC()},
+		capturedAt:     time.UnixMilli(1900).UTC(),
+		sequenceNumber: 1,
+	}
+	selection := plannerSelection{
+		selectedTelemetry: []control.RuntimeTelemetry{{CurrentSpeed: 3}},
+		telemetryTimesMs:  []int64{1900},
+		frameShape:        []int{1, 1, 3, cfg.FrameHeight, cfg.FrameWidth},
+		telemetryShape:    []int{1, 1, len(cfg.TelemetryFeatureNames)},
+	}
+	tests := []struct {
+		name       string
+		column     int
+		value      float64
+		wantDetail string
+	}{
+		{name: "wheel steer", column: 0, value: 1.01, wantDetail: "desired_wheel_steer_normalized"},
+		{name: "speed", column: 1, value: parkingcontrol.ParkingSetpointMaxSpeedMPS + 0.01, wantDetail: "desired_speed_mps"},
+		{name: "stop probability", column: 2, value: -0.01, wantDetail: "stop_probability"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.9)
+			response.PredControls[0][2][tc.column] = tc.value
+			_, err := inferencer.buildPrediction(response, "http://planner.local", window, selection, nil)
+			if err == nil || !errors.Is(err, parkingcontrol.ErrInvalidPlan) || !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("expected out-of-range %s rejection, got=%v", tc.wantDetail, err)
+			}
+		})
+	}
+}
+
+func TestBuildPredictionRequiresSampleTimestampEcho(t *testing.T) {
+	cfg := DefaultInferenceConfig()
+	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
+	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
+	response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.901)
+
+	_, err := inferencer.buildPrediction(response, "http://planner.local", predictionWindow{
+		frameTimes: []time.Time{time.UnixMilli(1900).UTC()},
+		capturedAt: time.UnixMilli(1900).UTC(),
+	}, plannerSelection{telemetryTimesMs: []int64{1900}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "sampled_at_s did not echo") {
+		t.Fatalf("expected mismatched observation timestamp rejection, got=%v", err)
+	}
+}
+
+func TestFindAnchorTelemetryIndexPrefersSourceTimestamp(t *testing.T) {
 	history := []control.RuntimeTelemetry{
 		{TimestampMs: 1000, ReceivedAtMs: 5000},
 		{TimestampMs: 1033, ReceivedAtMs: 5067},
 		{TimestampMs: 1066, ReceivedAtMs: 5134},
 	}
 
-	index, err := findAnchorTelemetryIndex(history, 5135, 75*time.Millisecond)
+	index, err := findAnchorTelemetryIndex(history, 1067, 75*time.Millisecond)
 	if err != nil {
 		t.Fatalf("findAnchorTelemetryIndex returned error: %v", err)
 	}
@@ -1367,92 +1694,53 @@ func TestFindAnchorTelemetryIndexPrefersBackendReceiveTimestamp(t *testing.T) {
 	}
 }
 
-func TestCollapsePlannerCommandIncludesBrakePressureAvgWhenPresent(t *testing.T) {
-	cfg := DefaultInferenceConfig()
-	cfg.HorizonMode = "weighted_short_horizon"
-	cfg.HorizonControlWeights = []float64{0.60, 0.30, 0.10}
+func TestSelectTelemetryAtOffsetsUsesConfiguredSourceTimestamps(t *testing.T) {
+	history := []control.RuntimeTelemetry{
+		{TimestampMs: 850, CurrentSpeed: 0.5},
+		{TimestampMs: 900, CurrentSpeed: 1.0},
+		{TimestampMs: 926, CurrentSpeed: 99.0},
+		{TimestampMs: 951, CurrentSpeed: 2.0},
+		{TimestampMs: 978, CurrentSpeed: 99.0},
+		{TimestampMs: 1000, CurrentSpeed: 3.0},
+	}
 
-	command, err := collapsePlannerCommand([][]float64{
-		{0.50, 0.40, 0.20},
-		{0.30, 0.20, 0.40},
-		{0.10, 0.10, 0.80},
-	}, []string{"steering", "acceleration", "brakePressureAvg"}, cfg)
+	selected, timestamps, err := selectTelemetryAtOffsets(
+		history,
+		len(history)-1,
+		[]int{-2, -1, 0},
+		50*time.Millisecond,
+		125*time.Millisecond,
+	)
 	if err != nil {
-		t.Fatalf("collapsePlannerCommand returned error: %v", err)
+		t.Fatalf("selectTelemetryAtOffsets returned error: %v", err)
 	}
-	if diff := command.BrakePressureAvg - 0.32; diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("unexpected collapsed brake: %+v", command)
+	wantTimestamps := []int64{900, 951, 1000}
+	wantSpeeds := []float64{1, 2, 3}
+	if !reflect.DeepEqual(timestamps, wantTimestamps) {
+		t.Fatalf("unexpected source timestamps: got=%v want=%v", timestamps, wantTimestamps)
 	}
-	if diff := command.Throttle - 0.31; diff < -1e-9 || diff > 1e-9 {
-		t.Fatalf("unexpected collapsed throttle: %+v", command)
-	}
-}
-
-func TestCollapsePlannerCommandConvertsNegativeThrottleToBrakePressureWhenPresent(t *testing.T) {
-	cfg := DefaultInferenceConfig()
-	cfg.HorizonMode = "weighted_short_horizon"
-	cfg.HorizonControlWeights = []float64{0.60, 0.30, 0.10}
-
-	command, err := collapsePlannerCommand([][]float64{
-		{0.40, -0.50, 0.10},
-		{0.20, -0.30, 0.80},
-		{-0.10, -0.10, 0.20},
-	}, []string{"steering", "acceleration", "brakePressureAvg"}, cfg)
-	if err != nil {
-		t.Fatalf("collapsePlannerCommand returned error: %v", err)
-	}
-	if math.Abs(command.Throttle-0.0) > 1e-9 {
-		t.Fatalf("expected no throttle when model requests reverse, got=%+v", command.Throttle)
-	}
-	if command.BrakePressureAvg < 0.5-1e-9 || command.BrakePressureAvg > 0.5+1e-9 {
-		t.Fatalf("expected brake from max abs(reverse demand) to dominate, got=%+v", command)
+	for index, sample := range selected {
+		if sample.CurrentSpeed != wantSpeeds[index] {
+			t.Fatalf("unexpected sample at offset %d: got speed=%f want=%f", index, sample.CurrentSpeed, wantSpeeds[index])
+		}
 	}
 }
 
-func TestStabilizeThrottleCommandHoldsOnDemandDrop(t *testing.T) {
-	cfg := DefaultInferenceConfig()
-	cfg.ThrottleHoldSeconds = 2
-	inf := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
-
-	now := time.UnixMilli(1000).UTC()
-	inf.nowFunc = func() time.Time { return now }
-	value, held := inf.stabilizeThrottleCommand(0.6, 8, now)
-	if held {
-		t.Fatalf("expected hold disabled on first throttle demand, got=%v value=%f", held, value)
-	}
-	if math.Abs(value-0.6) > 1e-9 {
-		t.Fatalf("unexpected throttled value: %f", value)
+func TestSelectTelemetryAtOffsetsFailsWhenTimestampSlotExceedsHalfIntervalTolerance(t *testing.T) {
+	history := []control.RuntimeTelemetry{
+		{TimestampMs: 900},
+		{TimestampMs: 924},
+		{TimestampMs: 1000},
 	}
 
-	now = now.Add(500 * time.Millisecond)
-	value, held = inf.stabilizeThrottleCommand(0.3, 8, now)
-	if !held {
-		t.Fatalf("expected throttle hold after demand drop, got=%v value=%f", held, value)
-	}
-	if math.Abs(value-0.6) > 1e-9 {
-		t.Fatalf("expected held throttle to remain at previous peak, got=%f", value)
-	}
-
-	now = now.Add(2500 * time.Millisecond)
-	value, held = inf.stabilizeThrottleCommand(0.3, 8, now)
-	if held {
-		t.Fatalf("expected hold to expire, got=%v value=%f", held, value)
-	}
-	if math.Abs(value-0.3) > 1e-9 {
-		t.Fatalf("unexpected throttled value after hold window: %f", value)
-	}
-}
-
-func TestStabilizeThrottleCommandEnforcesMinWhenBelowFloor(t *testing.T) {
-	cfg := DefaultInferenceConfig()
-	cfg.ThrottleHoldMin = 0.12
-	inf := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
-
-	value, held := inf.stabilizeThrottleCommand(0.05, 0, time.UnixMilli(1200).UTC())
-	if held {
-		t.Fatalf("expected no hold when applying low throttle for first time")
-	}
-	if math.Abs(value-0.12) > 1e-9 {
-		t.Fatalf("expected throttle floor to apply below hold min, got=%f", value)
+	_, _, err := selectTelemetryAtOffsets(
+		history,
+		len(history)-1,
+		[]int{-2, -1, 0},
+		50*time.Millisecond,
+		125*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), "offset -1") || !strings.Contains(err.Error(), "tolerance=25ms") {
+		t.Fatalf("expected missing 50ms source slot to fail closed at the bounded tolerance, got=%v", err)
 	}
 }

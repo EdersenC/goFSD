@@ -10,13 +10,20 @@ from typing import Any, Mapping
 import torch
 
 from config import (
-    DEFAULT_CONTROL_TARGET_NAMES,
     DEFAULT_AUX_TARGET_NAMES,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
     normalize_windows_drive_path,
     parse_dataset_window,
     resolve_optional_data_root,
+)
+from control_contract import (
+    PLANNER_FORMAT,
+    PLANNER_FORMAT_VERSION,
+    control_contract_metadata,
+    require_parking_control_target_names,
+    resolve_checkpoint_control_horizon_dt_ms,
+    validate_checkpoint_control_contract,
 )
 from dataset import FsdDataset
 from models.planner import DrivingCNN
@@ -31,12 +38,12 @@ from target_transforms import (
     denormalize_target_tensor,
     target_transform_metadata,
     resolve_checkpoint_target_transforms,
+    validate_parking_control_target_transforms,
 )
 
 
 SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "train_config.toml"
-PLANNER_FORMAT = "temporal_telemetry_gru_v1"
 LEGACY_SCALAR_HEAD_ERROR = (
     "Legacy scalar-head planner has been removed. "
     "Use temporal planner outputs pred_controls/pred_aux."
@@ -220,9 +227,13 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
         raise ValueError(f"Unexpected checkpoint payload in {checkpoint_path}")
     if "model_state_dict" not in checkpoint:
         raise KeyError(f"Checkpoint is missing model_state_dict: {checkpoint_path}")
-    planner_format = str(checkpoint.get("planner_format", "")).strip()
-    if planner_format != PLANNER_FORMAT:
-        raise ValueError(f"{LEGACY_SCALAR_HEAD_ERROR} checkpoint={checkpoint_path}")
+    try:
+        validate_checkpoint_control_contract(checkpoint)
+        validate_parking_control_target_transforms(
+            resolve_checkpoint_target_transform_registry(checkpoint)
+        )
+    except ValueError as exc:
+        raise ValueError(f"{exc} checkpoint={checkpoint_path}") from exc
     return checkpoint
 
 
@@ -330,10 +341,13 @@ def resolve_checkpoint_target_transform_registry(checkpoint: dict[str, Any]) -> 
     future_steps = len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
     control_target_names, aux_target_names = resolve_checkpoint_target_names(checkpoint, future_steps=future_steps)
     target_names = tuple(control_target_names) + tuple(aux_target_names)
-    return resolve_checkpoint_target_transforms(checkpoint, target_names)
+    transforms = resolve_checkpoint_target_transforms(checkpoint, target_names)
+    validate_parking_control_target_transforms(transforms)
+    return transforms
 
 
 def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
+    validate_checkpoint_control_contract(checkpoint)
     planner_format = str(checkpoint.get("planner_format", "")).strip()
     width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
     if planner_format == PLANNER_FORMAT:
@@ -367,6 +381,7 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
             telemetry_sequence_length=len(telemetry_offsets),
             horizon=len(future_offsets),
             control_dim=len(control_target_names),
+            control_target_names=tuple(control_target_names),
             aux_dim=len(aux_target_names),
             state_input_dim=len(state_input_config.enabled_keys()),
             width_multiplier=width_multiplier,
@@ -393,18 +408,12 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
 
 def resolve_checkpoint_control_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
     names = checkpoint.get("control_target_names")
-    if isinstance(names, list) and names:
-        return [str(name).strip() for name in names if str(name).strip()]
-
-    state_dict = checkpoint.get("model_state_dict", {})
-    control_decoder_bias = _decoder_output_bias(state_dict, "control_decoder.")
-    if isinstance(control_decoder_bias, torch.Tensor) and control_decoder_bias.ndim == 1:
-        control_dim = int(control_decoder_bias.numel())
-        if control_dim == len(DEFAULT_CONTROL_TARGET_NAMES):
-            return list(DEFAULT_CONTROL_TARGET_NAMES)
-        if control_dim == 2:
-            return ["steering", "acceleration"]
-    return ["steering", "acceleration"]
+    if not isinstance(names, list):
+        raise ValueError("parking checkpoint must include control_target_names")
+    return list(require_parking_control_target_names(
+        names,
+        source="checkpoint control_target_names",
+    ))
 
 
 def resolve_checkpoint_frame_count(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
@@ -533,6 +542,8 @@ def build_output(
         "device": str(device),
         "epoch": int(checkpoint.get("epoch", 0)),
         "planner_format": PLANNER_FORMAT,
+        "planner_format_version": PLANNER_FORMAT_VERSION,
+        "control_contract": control_contract_metadata(),
         "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
         "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
         "sample_stride": checkpoint_sample_stride(checkpoint),
@@ -546,6 +557,8 @@ def build_output(
         "target_transforms": target_transform_metadata(target_transforms),
         "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config_from_metadata(None))),
         "future_offsets": list(future_offsets),
+        "telemetry_sample_interval_ms": int(checkpoint["telemetry_sample_interval_ms"]),
+        "control_horizon_dt_ms": list(resolve_checkpoint_control_horizon_dt_ms(checkpoint)),
         "telemetry_feature_names": list(checkpoint.get("telemetry_feature_names", [])),
         "control_target_names": list(control_target_names),
         "aux_target_names": list(aux_target_names),

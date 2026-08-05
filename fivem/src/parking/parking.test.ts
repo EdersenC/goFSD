@@ -372,7 +372,7 @@ test("expert input guards cover driving controls and require applied neutral sta
     );
 });
 
-test("physical wheel steering normalizes to the controller contract", () => {
+test("physical wheel steering normalizes to the parking setpoint contract", () => {
     const fullLock = resolveSteeringFullLockRadians(42);
     const halfLeft = normalizeVehicleSteering(fullLock / 2, 42);
     assertApproximately(halfLeft.normalized, 0.5, "half-lock steering should normalize to 0.5");
@@ -399,6 +399,7 @@ test("no-ego heartbeat clears stale readiness and route state", () => {
     assert(!telemetry.vehicleExists, "no-ego heartbeat must clear vehicle existence");
     assert(!telemetry.isInVehicle, "no-ego heartbeat must clear player readiness");
     assert(telemetry.currentSpeed === 0, "no-ego heartbeat must clear speed");
+    assert(telemetry.vehicleModelHash === 0, "no-ego heartbeat must clear vehicle identity");
     assert(telemetry.routeDirectionUnknown === 1, "no-ego route should be explicitly unknown");
     assert(telemetry.routeForwardDelta === 0, "no-ego heartbeat must clear route forward delta");
     assert(telemetry.routeHeadingError === 0, "no-ego heartbeat must clear route heading error");

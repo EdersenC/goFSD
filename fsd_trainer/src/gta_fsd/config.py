@@ -4,6 +4,12 @@ import os
 from pathlib import Path
 from typing import Any
 
+from control_contract import (
+    DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    PARKING_CONTROL_TARGET_NAMES,
+    require_parking_control_target_names,
+)
+
 DEFAULT_IMAGE_WIDTH = 480
 DEFAULT_IMAGE_HEIGHT = 480
 DEFAULT_WINDOW_SIZE = 3
@@ -21,7 +27,7 @@ DEFAULT_TELEMETRY_FEATURE_NAMES = (
     "steering",
     "acceleration",
 )
-DEFAULT_CONTROL_TARGET_NAMES = ("steering", "acceleration", "brakePressureAvg")
+DEFAULT_CONTROL_TARGET_NAMES = PARKING_CONTROL_TARGET_NAMES
 DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate")
 DEFAULT_AUX_LOSS_WEIGHT = 0.3
 DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
@@ -175,6 +181,10 @@ def parse_temporal_dataset_config(
         dataset_raw.get("control_target_names", list(DEFAULT_CONTROL_TARGET_NAMES)),
         key="dataset.control_target_names",
     )
+    require_parking_control_target_names(
+        control_target_names,
+        source="dataset.control_target_names",
+    )
     aux_target_names = _parse_name_list(
         dataset_raw.get("aux_target_names", list(DEFAULT_AUX_TARGET_NAMES)),
         key="dataset.aux_target_names",
@@ -187,3 +197,20 @@ def parse_temporal_dataset_config(
         control_target_names,
         aux_target_names,
     )
+
+
+def parse_telemetry_sample_interval_ms(raw: dict[str, Any]) -> int:
+    dataset_raw = raw.get("dataset", {})
+    raw_value = dataset_raw.get(
+        "telemetry_sample_interval_ms",
+        DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    )
+    if isinstance(raw_value, bool):
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer")
+    try:
+        numeric = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer") from exc
+    if not numeric.is_integer() or numeric <= 0:
+        raise ValueError("dataset.telemetry_sample_interval_ms must be a positive integer")
+    return int(numeric)

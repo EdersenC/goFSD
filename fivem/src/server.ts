@@ -143,6 +143,7 @@ type ControlTelemetryUpdate = {
     steering: number
     acceleration: number
     brakePressureAvg: number
+    vehicleModelHash: number
     vehicleExists: boolean
     isInVehicle: boolean
     positionX?: number
@@ -454,6 +455,7 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             steering: update?.steering ?? 0,
             acceleration: update?.acceleration ?? 0,
             brakePressureAvg: update?.brakePressureAvg ?? 0,
+            vehicleModelHash: update?.vehicleModelHash ?? 0,
             vehicleExists: Boolean(update?.vehicleExists),
             isInVehicle: Boolean(update?.isInVehicle),
             positionX: update?.positionX,

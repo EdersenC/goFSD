@@ -72,6 +72,7 @@ type TelemetryUpdate struct {
 	BrakePressureAvg              float64  `json:"brakePressureAvg"`
 	VehicleExists                 bool     `json:"vehicleExists"`
 	IsInVehicle                   bool     `json:"isInVehicle"`
+	VehicleModelHash              int64    `json:"vehicleModelHash"`
 	PositionX                     *float64 `json:"positionX,omitempty"`
 	PositionY                     *float64 `json:"positionY,omitempty"`
 	PositionZ                     *float64 `json:"positionZ,omitempty"`
@@ -125,6 +126,7 @@ type RuntimeTelemetry struct {
 	BrakePressureAvg              float64  `json:"brakePressureAvg"`
 	VehicleExists                 bool     `json:"vehicleExists"`
 	IsInVehicle                   bool     `json:"isInVehicle"`
+	VehicleModelHash              int64    `json:"vehicleModelHash"`
 	PositionX                     *float64 `json:"positionX,omitempty"`
 	PositionY                     *float64 `json:"positionY,omitempty"`
 	PositionZ                     *float64 `json:"positionZ,omitempty"`
@@ -384,6 +386,7 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		BrakePressureAvg:              update.BrakePressureAvg,
 		VehicleExists:                 update.VehicleExists,
 		IsInVehicle:                   update.IsInVehicle,
+		VehicleModelHash:              update.VehicleModelHash,
 		PositionX:                     cloneFloatPtr(update.PositionX),
 		PositionY:                     cloneFloatPtr(update.PositionY),
 		PositionZ:                     cloneFloatPtr(update.PositionZ),

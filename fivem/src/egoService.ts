@@ -656,6 +656,7 @@ export class EgoService {
         const currentSpeed = GetEntitySpeed(id);
         const acceleration = GetVehicleCurrentAcceleration(id);
         const brakePressureAvg = this.averageBrakePressure(id);
+        const vehicleModelHash = Math.trunc(GetEntityModel(id));
         const steering = this.readVehicleSteering(id);
         const rotationVelocity = this.toVector3(GetEntityRotationVelocity(id)) ?? [0, 0, 0];
         const gear = GetVehicleCurrentGear(id);
@@ -675,6 +676,7 @@ export class EgoService {
             steering: steering.normalized,
             acceleration,
             brakePressureAvg,
+            vehicleModelHash,
             vehicleExists: true,
             isInVehicle: IsPedInVehicle(PlayerPedId(), id, false),
             positionX: coords[0],

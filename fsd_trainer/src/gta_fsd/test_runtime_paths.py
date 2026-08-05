@@ -76,6 +76,12 @@ class RuntimePathTests(unittest.TestCase):
         self.assertEqual(config.state_inputs.spec(PARKING_LONGITUDINAL_ERROR_KEY).cap, 17.0)
         self.assertEqual(config.state_inputs.spec(PARKING_LATERAL_ERROR_KEY).cap, 3.0)
         self.assertEqual(config.state_inputs.spec(PARKING_HEADING_ERROR_KEY).cap, 20.0)
+        self.assertFalse(config.dataset.include_failed_or_nonparking_trips)
+        self.assertEqual(config.dataset.telemetry_sample_interval_ms, 50)
+        self.assertEqual(
+            config.dataset.target_transforms["desired_speed_mps"].range_max,
+            2.22,
+        )
 
 
 if __name__ == "__main__":
