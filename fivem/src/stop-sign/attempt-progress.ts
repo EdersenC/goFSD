@@ -25,12 +25,12 @@ export function nextFixedIntervalDeadlineMs(previousDeadlineMs: number, nowMs: n
 
 export function shouldReportStoppedTooEarly(
     departureObserved: boolean,
-    dwellStartedAtMs: number | null,
+    stopStartedAtMs: number | null,
     speedMps: number,
     remainingDistanceM: number,
 ): boolean {
     return departureObserved
-        && dwellStartedAtMs === null
+        && stopStartedAtMs === null
         && speedMps <= STOP_SIGN_STOP_SPEED_MPS
         && remainingDistanceM > 3;
 }

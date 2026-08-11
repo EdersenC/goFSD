@@ -30,7 +30,7 @@ func main() {
 }
 
 func runBackend(args []string, output io.Writer) error {
-	const backendBuildID = "2026-08-09-safety-barrier-v9"
+	const backendBuildID = "2026-08-11-stop-sign-stage-clips-v10"
 	handled, err := dispatchBackendCommand(args, output)
 	if err != nil {
 		return err

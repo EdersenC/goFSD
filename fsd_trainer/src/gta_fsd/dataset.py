@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from io import BufferedReader
 from pathlib import Path
@@ -37,7 +38,7 @@ from target_transforms import (
 )
 from state_inputs import build_state_input_vector_from_mapping, state_input_config_from_metadata
 from stop_sign_contract import (
-    inverse_frequency_phase_weights,
+    normalize_stop_sign_clip_stage,
     stop_location_key_from_metadata,
     stop_sign_phase_from_telemetry,
 )
@@ -294,6 +295,7 @@ class DatasetSampleRef:
     run_path: Path
     trip_key: str
     phase: str
+    clip_stage: str
     stop_location_key: str
 
     def load(self) -> dict[str, Any]:
@@ -407,10 +409,11 @@ def _is_successful_stop_sign_attempt(trip_dir: Path) -> bool:
         and str(metadata.get("sceneVariant", "")).strip().lower() == "temporal-v1"
         and isinstance(goal, Mapping)
         and str(goal.get("task", "")).strip().lower() == "stop-sign"
-        and str(goal.get("contract", "")).strip().lower() == "stop-sign-goal.v1"
+        and str(goal.get("contract", "")).strip().lower() == "stop-sign-goal.v2"
+        and str(goal.get("clipStage", "")).strip().lower() in {"approach", "brake_stop", "release"}
         and all(
             _is_complete_stop_sign_pose(goal.get(key))
-            for key in ("signPose", "stopLinePose", "egoStopPose", "startPose")
+            for key in ("signPose", "stopLinePose", "egoStopPose", "startPose", "exitPose")
         )
         and isinstance(outcome, Mapping)
         and outcome.get("success") is True
@@ -713,6 +716,15 @@ class FsdDataset(Dataset[DatasetItem]):
                 if not self.include_failed_or_non_stop_sign_trips:
                     raise
                 location_key = f"unscored:{trip.trip_key}"
+            goal = metadata.get("stopSignGoal")
+            try:
+                clip_stage = normalize_stop_sign_clip_stage(
+                    goal.get("clipStage") if isinstance(goal, Mapping) else None
+                )
+            except ValueError:
+                if not self.include_failed_or_non_stop_sign_trips:
+                    raise
+                clip_stage = "unscored"
             with dataset_path.open("rb") as handle:
                 while True:
                     byte_offset = handle.tell()
@@ -734,6 +746,7 @@ class FsdDataset(Dataset[DatasetItem]):
                         run_path=trip.run_path,
                         trip_key=trip.trip_key,
                         phase=phase,
+                        clip_stage=clip_stage,
                         stop_location_key=location_key,
                     ))
         return samples
@@ -784,7 +797,9 @@ class FsdDataset(Dataset[DatasetItem]):
         return tuple(sample.phase for sample in self.samples)
 
     def phase_balanced_sample_weights(self) -> tuple[float, ...]:
-        return inverse_frequency_phase_weights(self.sample_phases())
+        groups = tuple((sample.clip_stage, sample.phase) for sample in self.samples)
+        counts = Counter(groups)
+        return tuple(1.0 / counts[group] for group in groups)
 
     def stop_location_keys(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(sample.stop_location_key for sample in self.samples))

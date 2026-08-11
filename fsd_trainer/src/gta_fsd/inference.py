@@ -11,6 +11,7 @@ import torch
 
 from config import (
     DEFAULT_AUX_TARGET_NAMES,
+    DEFAULT_FUTURE_OFFSETS,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
     STOP_SIGN_AUX_TARGET_NAMES,
@@ -428,7 +429,7 @@ def resolve_checkpoint_aux_target_names(checkpoint: dict[str, Any], *, future_st
 
 
 def resolve_checkpoint_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+    future_offsets = checkpoint.get("future_offsets") or list(DEFAULT_FUTURE_OFFSETS)
     control_target_names = resolve_checkpoint_control_target_names(
         checkpoint,
         future_steps=len(future_offsets) if future_steps <= 0 else future_steps,
@@ -441,7 +442,7 @@ def resolve_checkpoint_target_names(checkpoint: dict[str, Any], *, future_steps:
 
 
 def resolve_checkpoint_target_transform_registry(checkpoint: dict[str, Any]) -> dict[str, TargetTransform]:
-    future_steps = len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+    future_steps = len(checkpoint.get("future_offsets") or DEFAULT_FUTURE_OFFSETS)
     control_target_names, aux_target_names = resolve_checkpoint_target_names(checkpoint, future_steps=future_steps)
     target_names = tuple(control_target_names) + tuple(aux_target_names)
     transforms = resolve_checkpoint_target_transforms(checkpoint, target_names)

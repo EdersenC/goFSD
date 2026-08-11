@@ -2,6 +2,8 @@
 package stopsignbatch
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -10,32 +12,36 @@ import (
 
 const (
 	MaximumEntries      = 100
-	MaximumExpandedJobs = 100
+	MaximumExpandedJobs = 5000
 	MaximumAttemptCount = 50
+	MaximumAutoVariants = 100
 
-	DefaultStopDistanceM    = 3.0
-	DefaultEgoCenterOffsetM = 2.5
-	DefaultStartDistanceM   = 40.0
-	DefaultExitDistanceM    = 8.0
-	DefaultTargetSpeedMPS   = 8.0
-	DefaultDwellMS          = 5000
-	DefaultAttemptCount     = 1
-	DefaultWeather          = "EXTRASUNNY"
-	DefaultHour             = 12
-	DefaultMinute           = 0
+	DefaultStopDistanceM      = 3.0
+	DefaultEgoCenterOffsetM   = 2.5
+	DefaultStartDistanceM     = 40.0
+	DefaultExitDistanceM      = 8.0
+	DefaultTargetSpeedMPS     = 8.0
+	DefaultStopConfirmationMS = 250
+	DefaultAttemptCount       = 1
+	DefaultWeather            = "EXTRASUNNY"
+	DefaultHour               = 12
+	DefaultMinute             = 0
 
-	minimumStopDistanceM    = 0.5
-	maximumStopDistanceM    = 15.0
-	minimumEgoCenterOffsetM = 0.5
-	maximumEgoCenterOffsetM = 8.0
-	minimumStartDistanceM   = 5.0
-	maximumStartDistanceM   = 250.0
-	minimumExitDistanceM    = 2.0
-	maximumExitDistanceM    = 50.0
-	minimumTargetSpeedMPS   = 0.5
-	maximumTargetSpeedMPS   = 8.0
-	minimumDwellMS          = 500
-	maximumDwellMS          = 30_000
+	minimumStopDistanceM      = 0.5
+	maximumStopDistanceM      = 15.0
+	minimumEgoCenterOffsetM   = 0.5
+	maximumEgoCenterOffsetM   = 8.0
+	minimumStartDistanceM     = 5.0
+	maximumStartDistanceM     = 250.0
+	minimumExitDistanceM      = 2.0
+	maximumExitDistanceM      = 50.0
+	minimumTargetSpeedMPS     = 0.5
+	maximumTargetSpeedMPS     = 8.0
+	minimumStopConfirmationMS = 100
+	maximumStopConfirmationMS = 1_000
+	maximumMotionVariancePct  = 25.0
+	minimumCapturedStartM     = 16.0
+	minimumCapturedExitM      = 8.0
 )
 
 var (
@@ -54,6 +60,14 @@ type Pose struct {
 	Y       float64 `json:"y"`
 	Z       float64 `json:"z"`
 	Heading float64 `json:"heading"`
+}
+
+// WorldPosition identifies the physical catalog prop. It is deliberately
+// separate from the lane poses captured by the operator.
+type WorldPosition struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
 }
 
 type TimeOfDay struct {
@@ -77,35 +91,49 @@ type VehicleVariant struct {
 // Variation overrides collection conditions for one sign. Geometry remains
 // sign-relative so every job has one unambiguous stop line and approach.
 type Variation struct {
-	ID               string          `json:"id"`
-	StopDistanceM    *float64        `json:"stopDistanceM,omitempty"`
-	EgoCenterOffsetM *float64        `json:"egoCenterOffsetM,omitempty"`
-	StartDistanceM   *float64        `json:"startDistanceM,omitempty"`
-	ExitDistanceM    *float64        `json:"exitDistanceM,omitempty"`
-	TargetSpeedMPS   *float64        `json:"targetSpeedMps,omitempty"`
-	DwellMS          *int            `json:"dwellMs,omitempty"`
-	AttemptCount     *int            `json:"attemptCount,omitempty"`
-	Weather          *string         `json:"weather,omitempty"`
-	Time             *TimeOfDay      `json:"time,omitempty"`
-	Vehicle          *VehicleVariant `json:"vehicle,omitempty"`
+	ID                 string          `json:"id"`
+	StopDistanceM      *float64        `json:"stopDistanceM,omitempty"`
+	EgoCenterOffsetM   *float64        `json:"egoCenterOffsetM,omitempty"`
+	StartDistanceM     *float64        `json:"startDistanceM,omitempty"`
+	ExitDistanceM      *float64        `json:"exitDistanceM,omitempty"`
+	TargetSpeedMPS     *float64        `json:"targetSpeedMps,omitempty"`
+	StopConfirmationMS *int            `json:"stopConfirmationMs,omitempty"`
+	AttemptCount       *int            `json:"attemptCount,omitempty"`
+	Weather            *string         `json:"weather,omitempty"`
+	Time               *TimeOfDay      `json:"time,omitempty"`
+	Vehicle            *VehicleVariant `json:"vehicle,omitempty"`
+}
+
+// AutoVariationSpec expands one captured scene into deterministic collection
+// jobs. MotionVariancePct bounds route-distance and speed changes; the stop
+// target itself only receives a small absolute tolerance jitter.
+type AutoVariationSpec struct {
+	Count             int     `json:"count"`
+	MotionVariancePct float64 `json:"motionVariancePct"`
 }
 
 // Entry defines one ordered stop sign plus optional base collection settings.
 // Missing settings use the package defaults exported above.
 type Entry struct {
-	ID               string          `json:"id"`
-	SignPose         Pose            `json:"signPose"`
-	StopDistanceM    *float64        `json:"stopDistanceM,omitempty"`
-	EgoCenterOffsetM *float64        `json:"egoCenterOffsetM,omitempty"`
-	StartDistanceM   *float64        `json:"startDistanceM,omitempty"`
-	ExitDistanceM    *float64        `json:"exitDistanceM,omitempty"`
-	TargetSpeedMPS   *float64        `json:"targetSpeedMps,omitempty"`
-	DwellMS          *int            `json:"dwellMs,omitempty"`
-	AttemptCount     *int            `json:"attemptCount,omitempty"`
-	Weather          *string         `json:"weather,omitempty"`
-	Time             *TimeOfDay      `json:"time,omitempty"`
-	Vehicle          *VehicleVariant `json:"vehicle,omitempty"`
-	Variations       []Variation     `json:"variations,omitempty"`
+	ID                 string             `json:"id"`
+	SignPose           Pose               `json:"signPose"`
+	CatalogID          string             `json:"catalogId,omitempty"`
+	CatalogPosition    *WorldPosition     `json:"catalogPosition,omitempty"`
+	StartPose          *Pose              `json:"startPose,omitempty"`
+	EgoStopPose        *Pose              `json:"egoStopPose,omitempty"`
+	ExitPose           *Pose              `json:"exitPose,omitempty"`
+	AutoVariations     *AutoVariationSpec `json:"autoVariations,omitempty"`
+	StopDistanceM      *float64           `json:"stopDistanceM,omitempty"`
+	EgoCenterOffsetM   *float64           `json:"egoCenterOffsetM,omitempty"`
+	StartDistanceM     *float64           `json:"startDistanceM,omitempty"`
+	ExitDistanceM      *float64           `json:"exitDistanceM,omitempty"`
+	TargetSpeedMPS     *float64           `json:"targetSpeedMps,omitempty"`
+	StopConfirmationMS *int               `json:"stopConfirmationMs,omitempty"`
+	AttemptCount       *int               `json:"attemptCount,omitempty"`
+	Weather            *string            `json:"weather,omitempty"`
+	Time               *TimeOfDay         `json:"time,omitempty"`
+	Vehicle            *VehicleVariant    `json:"vehicle,omitempty"`
+	Variations         []Variation        `json:"variations,omitempty"`
 }
 
 type Plan struct {
@@ -114,41 +142,43 @@ type Plan struct {
 	Entries []Entry `json:"entries"`
 }
 
-// Job is a fully explicit collection unit. StopLinePose, EgoStopPose,
-// StartPose, and ExitPose are derived from SignPose and cannot diverge from it.
+// Job is a fully explicit collection unit. Catalog scenes preserve the three
+// operator-captured poses; compatibility scenes remain sign-relative.
 type Job struct {
-	ID               string         `json:"id"`
-	EntryID          string         `json:"entryId"`
-	VariationID      string         `json:"variationId"`
-	SignPose         Pose           `json:"signPose"`
-	StopLinePose     Pose           `json:"stopLinePose"`
-	EgoStopPose      Pose           `json:"egoStopPose"`
-	StartPose        Pose           `json:"startPose"`
-	ExitPose         Pose           `json:"exitPose"`
-	StopDistanceM    float64        `json:"stopDistanceM"`
-	EgoCenterOffsetM float64        `json:"egoCenterOffsetM"`
-	StartDistanceM   float64        `json:"startDistanceM"`
-	ExitDistanceM    float64        `json:"exitDistanceM"`
-	TargetSpeedMPS   float64        `json:"targetSpeedMps"`
-	DwellMS          int            `json:"dwellMs"`
-	AttemptCount     int            `json:"attemptCount"`
-	Weather          string         `json:"weather"`
-	Time             TimeOfDay      `json:"time"`
-	Vehicle          VehicleVariant `json:"vehicle"`
-	Seed             string         `json:"seed"`
+	ID                 string         `json:"id"`
+	EntryID            string         `json:"entryId"`
+	VariationID        string         `json:"variationId"`
+	CatalogID          string         `json:"catalogId,omitempty"`
+	CatalogPosition    *WorldPosition `json:"catalogPosition,omitempty"`
+	SignPose           Pose           `json:"signPose"`
+	StopLinePose       Pose           `json:"stopLinePose"`
+	EgoStopPose        Pose           `json:"egoStopPose"`
+	StartPose          Pose           `json:"startPose"`
+	ExitPose           Pose           `json:"exitPose"`
+	StopDistanceM      float64        `json:"stopDistanceM"`
+	EgoCenterOffsetM   float64        `json:"egoCenterOffsetM"`
+	StartDistanceM     float64        `json:"startDistanceM"`
+	ExitDistanceM      float64        `json:"exitDistanceM"`
+	TargetSpeedMPS     float64        `json:"targetSpeedMps"`
+	StopConfirmationMS int            `json:"stopConfirmationMs"`
+	AttemptCount       int            `json:"attemptCount"`
+	Weather            string         `json:"weather"`
+	Time               TimeOfDay      `json:"time"`
+	Vehicle            VehicleVariant `json:"vehicle"`
+	Seed               string         `json:"seed"`
 }
 
 type settings struct {
-	stopDistanceM    float64
-	egoCenterOffsetM float64
-	startDistanceM   float64
-	exitDistanceM    float64
-	targetSpeedMPS   float64
-	dwellMS          int
-	attemptCount     int
-	weather          string
-	time             TimeOfDay
-	vehicle          VehicleVariant
+	stopDistanceM      float64
+	egoCenterOffsetM   float64
+	startDistanceM     float64
+	exitDistanceM      float64
+	targetSpeedMPS     float64
+	stopConfirmationMS int
+	attemptCount       int
+	weather            string
+	time               TimeOfDay
+	vehicle            VehicleVariant
 }
 
 // Expand validates a plan and emits jobs in entry order, then variation order.
@@ -178,6 +208,23 @@ func Expand(plan Plan) ([]Job, error) {
 			return nil, invalid("entry id %q is duplicated", entryID)
 		}
 		entryIDs[entryID] = struct{}{}
+		if capturedEntry(entry) {
+			capturedJobs, err := expandCapturedEntry(seed, entryID, entry, entryIndex)
+			if err != nil {
+				return nil, err
+			}
+			for _, job := range capturedJobs {
+				if _, exists := jobIDs[job.ID]; exists {
+					return nil, invalid("expanded job id %q is duplicated", job.ID)
+				}
+				jobIDs[job.ID] = struct{}{}
+				jobs = append(jobs, job)
+				if len(jobs) > MaximumExpandedJobs {
+					return nil, invalid("plan expands to more than %d jobs", MaximumExpandedJobs)
+				}
+			}
+			continue
+		}
 		if err := validateSignPose(fmt.Sprintf("entries[%d].signPose", entryIndex), entry.SignPose); err != nil {
 			return nil, err
 		}
@@ -229,25 +276,25 @@ func Expand(plan Plan) ([]Job, error) {
 			}
 			jobIDs[jobID] = struct{}{}
 			jobs = append(jobs, Job{
-				ID:               jobID,
-				EntryID:          entryID,
-				VariationID:      variationID,
-				SignPose:         entry.SignPose,
-				StopLinePose:     stopLinePose,
-				EgoStopPose:      egoStopPose,
-				StartPose:        startPose,
-				ExitPose:         exitPose,
-				StopDistanceM:    resolved.stopDistanceM,
-				EgoCenterOffsetM: resolved.egoCenterOffsetM,
-				StartDistanceM:   resolved.startDistanceM,
-				ExitDistanceM:    resolved.exitDistanceM,
-				TargetSpeedMPS:   resolved.targetSpeedMPS,
-				DwellMS:          resolved.dwellMS,
-				AttemptCount:     resolved.attemptCount,
-				Weather:          resolved.weather,
-				Time:             resolved.time,
-				Vehicle:          resolved.vehicle,
-				Seed:             seed + ":" + jobID,
+				ID:                 jobID,
+				EntryID:            entryID,
+				VariationID:        variationID,
+				SignPose:           entry.SignPose,
+				StopLinePose:       stopLinePose,
+				EgoStopPose:        egoStopPose,
+				StartPose:          startPose,
+				ExitPose:           exitPose,
+				StopDistanceM:      resolved.stopDistanceM,
+				EgoCenterOffsetM:   resolved.egoCenterOffsetM,
+				StartDistanceM:     resolved.startDistanceM,
+				ExitDistanceM:      resolved.exitDistanceM,
+				TargetSpeedMPS:     resolved.targetSpeedMPS,
+				StopConfirmationMS: resolved.stopConfirmationMS,
+				AttemptCount:       resolved.attemptCount,
+				Weather:            resolved.weather,
+				Time:               resolved.time,
+				Vehicle:            resolved.vehicle,
+				Seed:               seed + ":" + jobID,
 			})
 			if len(jobs) > MaximumExpandedJobs {
 				return nil, invalid("plan expands to more than %d jobs", MaximumExpandedJobs)
@@ -256,6 +303,248 @@ func Expand(plan Plan) ([]Job, error) {
 	}
 
 	return jobs, nil
+}
+
+func capturedEntry(entry Entry) bool {
+	return entry.CatalogPosition != nil || entry.StartPose != nil || entry.EgoStopPose != nil ||
+		entry.ExitPose != nil || entry.AutoVariations != nil || strings.TrimSpace(entry.CatalogID) != ""
+}
+
+func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]Job, error) {
+	label := fmt.Sprintf("entries[%d]", entryIndex)
+	catalogID := strings.TrimSpace(entry.CatalogID)
+	if catalogID == "" || len(catalogID) > 120 {
+		return nil, invalid("%s.catalogId must contain between 1 and 120 characters", label)
+	}
+	if err := validateWorldPosition(label+".catalogPosition", entry.CatalogPosition); err != nil {
+		return nil, err
+	}
+	if entry.StartPose == nil || entry.EgoStopPose == nil || entry.ExitPose == nil {
+		return nil, invalid("%s requires captured startPose, egoStopPose, and exitPose", label)
+	}
+	if entry.AutoVariations == nil {
+		return nil, invalid("%s.autoVariations is required for a captured scene", label)
+	}
+	if len(entry.Variations) != 0 {
+		return nil, invalid("%s cannot combine autoVariations with manual variations", label)
+	}
+	for poseLabel, pose := range map[string]Pose{
+		"startPose": *entry.StartPose, "egoStopPose": *entry.EgoStopPose, "exitPose": *entry.ExitPose,
+	} {
+		if err := validateSignPose(label+"."+poseLabel, pose); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateCapturedBaseRoute(label, *entry.StartPose, *entry.EgoStopPose, *entry.ExitPose); err != nil {
+		return nil, err
+	}
+	spec := *entry.AutoVariations
+	if spec.Count < 1 || spec.Count > MaximumAutoVariants {
+		return nil, invalid("%s.autoVariations.count must be between 1 and %d", label, MaximumAutoVariants)
+	}
+	if math.IsNaN(spec.MotionVariancePct) || math.IsInf(spec.MotionVariancePct, 0) ||
+		spec.MotionVariancePct < 0 || spec.MotionVariancePct > maximumMotionVariancePct {
+		return nil, invalid("%s.autoVariations.motionVariancePct must be between 0 and %.0f", label, maximumMotionVariancePct)
+	}
+
+	base := defaultSettings()
+	if err := applyEntrySettings(&base, entry, label); err != nil {
+		return nil, err
+	}
+	jobs := make([]Job, 0, spec.Count)
+	for variantIndex := 0; variantIndex < spec.Count; variantIndex++ {
+		variationID := fmt.Sprintf("auto-%03d", variantIndex+1)
+		variantSeed := seed + ":" + entryID + ":" + variationID
+		startPose, stopPose, exitPose := capturedVariantPoses(
+			variantSeed,
+			*entry.StartPose,
+			*entry.EgoStopPose,
+			*entry.ExitPose,
+			spec.MotionVariancePct,
+			variantIndex == 0,
+		)
+		resolved := capturedVariantSettings(base, variantSeed, spec.MotionVariancePct, variantIndex == 0)
+		startDistanceM := planarDistance(startPose, stopPose)
+		exitDistanceM := planarDistance(stopPose, exitPose)
+		resolved.startDistanceM = startDistanceM
+		resolved.exitDistanceM = exitDistanceM
+		if err := validateSettings(resolved, label+"."+variationID); err != nil {
+			return nil, err
+		}
+		if err := validateCapturedRoute(label+"."+variationID, startPose, stopPose, exitPose); err != nil {
+			return nil, err
+		}
+		stopLinePose := poseAhead(stopPose, resolved.egoCenterOffsetM)
+		signPose := poseAhead(stopLinePose, resolved.stopDistanceM)
+		catalogPosition := *entry.CatalogPosition
+		jobs = append(jobs, Job{
+			ID:                 entryID + ":" + variationID,
+			EntryID:            entryID,
+			VariationID:        variationID,
+			CatalogID:          catalogID,
+			CatalogPosition:    &catalogPosition,
+			SignPose:           signPose,
+			StopLinePose:       stopLinePose,
+			EgoStopPose:        stopPose,
+			StartPose:          startPose,
+			ExitPose:           exitPose,
+			StopDistanceM:      resolved.stopDistanceM,
+			EgoCenterOffsetM:   resolved.egoCenterOffsetM,
+			StartDistanceM:     startDistanceM,
+			ExitDistanceM:      exitDistanceM,
+			TargetSpeedMPS:     resolved.targetSpeedMPS,
+			StopConfirmationMS: resolved.stopConfirmationMS,
+			AttemptCount:       resolved.attemptCount,
+			Weather:            resolved.weather,
+			Time:               resolved.time,
+			Vehicle:            cloneVehicle(resolved.vehicle),
+			Seed:               variantSeed,
+		})
+	}
+	return jobs, nil
+}
+
+func capturedVariantPoses(seed string, start, stop, exit Pose, variancePct float64, baseline bool) (Pose, Pose, Pose) {
+	if baseline || variancePct == 0 {
+		return start, stop, exit
+	}
+	strength := variancePct / maximumMotionVariancePct
+	motionFraction := variancePct / 100
+	stopForward, stopRight := headingBasis(stop.Heading)
+	stop = translatePose(
+		stop,
+		stopForward,
+		stopRight,
+		centeredVariant(seed, "stop-longitudinal")*0.25*strength,
+		centeredVariant(seed, "stop-lateral")*0.15*strength,
+	)
+	stop.Heading = normalizedHeading(stop.Heading + centeredVariant(seed, "stop-heading")*2*strength)
+	start = scalePoseFromAnchor(start, stop, 1+centeredVariant(seed, "start-distance")*motionFraction)
+	exit = scalePoseFromAnchor(exit, stop, 1+centeredVariant(seed, "exit-distance")*motionFraction)
+	startForward, startRight := headingBasis(start.Heading)
+	exitForward, exitRight := headingBasis(exit.Heading)
+	start = translatePose(start, startForward, startRight, 0, centeredVariant(seed, "start-lateral")*0.5*strength)
+	exit = translatePose(exit, exitForward, exitRight, 0, centeredVariant(seed, "exit-lateral")*0.5*strength)
+	start.Heading = normalizedHeading(start.Heading + centeredVariant(seed, "start-heading")*3*strength)
+	exit.Heading = normalizedHeading(exit.Heading + centeredVariant(seed, "exit-heading")*3*strength)
+	return start, stop, exit
+}
+
+func capturedVariantSettings(base settings, seed string, variancePct float64, baseline bool) settings {
+	resolved := cloneSettings(base)
+	if baseline {
+		return resolved
+	}
+	resolved.targetSpeedMPS *= 1 + centeredVariant(seed, "target-speed")*(variancePct/100)
+	weatherPool := []string{"CLEAR", "EXTRASUNNY", "CLOUDS", "OVERCAST", "RAIN", "FOGGY", "SMOG", "THUNDER"}
+	resolved.weather = weatherPool[variantIndex(seed, "weather", len(weatherPool))]
+	resolved.time = TimeOfDay{
+		Hour:   variantIndex(seed, "hour", 24),
+		Minute: variantIndex(seed, "minute", 4) * 15,
+	}
+	colorPool := []RGBColor{
+		{R: 26, G: 86, B: 219}, {R: 230, G: 230, B: 230}, {R: 35, G: 35, B: 40},
+		{R: 180, G: 35, B: 35}, {R: 35, G: 145, B: 80}, {R: 210, G: 150, B: 30},
+	}
+	color := colorPool[variantIndex(seed, "vehicle-color", len(colorPool))]
+	resolved.vehicle.Color = &color
+	return resolved
+}
+
+func validateCapturedRoute(label string, start, stop, exit Pose) error {
+	startRelative := poseRelativeTo(start, stop)
+	exitRelative := poseRelativeTo(exit, stop)
+	if startRelative.longitudinal > -minimumStartDistanceM {
+		return invalid("%s.startPose must be at least %.1fm before egoStopPose", label, minimumStartDistanceM)
+	}
+	if exitRelative.longitudinal < minimumExitDistanceM {
+		return invalid("%s.exitPose must be at least %.1fm beyond egoStopPose", label, minimumExitDistanceM)
+	}
+	if planarDistance(start, stop) > maximumStartDistanceM {
+		return invalid("%s start-to-stop distance exceeds %.1fm", label, maximumStartDistanceM)
+	}
+	if planarDistance(stop, exit) > maximumExitDistanceM {
+		return invalid("%s stop-to-end distance exceeds %.1fm", label, maximumExitDistanceM)
+	}
+	if math.Abs(startRelative.lateral) > 8 || math.Abs(exitRelative.lateral) > 8 {
+		return invalid("%s captured points must stay within 8m of one approach lane", label)
+	}
+	return nil
+}
+
+func validateCapturedBaseRoute(label string, start, stop, exit Pose) error {
+	if err := validateCapturedRoute(label, start, stop, exit); err != nil {
+		return err
+	}
+	startRelative := poseRelativeTo(start, stop)
+	exitRelative := poseRelativeTo(exit, stop)
+	if startRelative.longitudinal > -minimumCapturedStartM {
+		return invalid("%s.startPose must be at least %.1fm before egoStopPose so the approach clip has temporal context", label, minimumCapturedStartM)
+	}
+	if exitRelative.longitudinal < minimumCapturedExitM {
+		return invalid("%s.exitPose must be at least %.1fm beyond egoStopPose so the release clip has temporal context", label, minimumCapturedExitM)
+	}
+	return nil
+}
+
+type relativePose struct {
+	longitudinal float64
+	lateral      float64
+}
+
+func poseRelativeTo(pose, origin Pose) relativePose {
+	forward, right := headingBasis(origin.Heading)
+	deltaX, deltaY := pose.X-origin.X, pose.Y-origin.Y
+	return relativePose{
+		longitudinal: deltaX*forward[0] + deltaY*forward[1],
+		lateral:      deltaX*right[0] + deltaY*right[1],
+	}
+}
+
+func scalePoseFromAnchor(pose, anchor Pose, scale float64) Pose {
+	pose.X = anchor.X + (pose.X-anchor.X)*scale
+	pose.Y = anchor.Y + (pose.Y-anchor.Y)*scale
+	pose.Z = anchor.Z + (pose.Z-anchor.Z)*scale
+	return pose
+}
+
+func translatePose(pose Pose, forward, right [2]float64, longitudinal, lateral float64) Pose {
+	pose.X += forward[0]*longitudinal + right[0]*lateral
+	pose.Y += forward[1]*longitudinal + right[1]*lateral
+	return pose
+}
+
+func headingBasis(heading float64) ([2]float64, [2]float64) {
+	radians := heading * math.Pi / 180
+	return [2]float64{-math.Sin(radians), math.Cos(radians)}, [2]float64{math.Cos(radians), math.Sin(radians)}
+}
+
+func planarDistance(first, second Pose) float64 {
+	return math.Hypot(first.X-second.X, first.Y-second.Y)
+}
+
+func normalizedHeading(value float64) float64 {
+	return math.Mod(math.Mod(value, 360)+360, 360)
+}
+
+func centeredVariant(seed, field string) float64 {
+	return variantUnit(seed, field)*2 - 1
+}
+
+func variantIndex(seed, field string, count int) int {
+	if count < 1 {
+		panic("stop-sign variant invariant violated: variant choice count must be positive")
+	}
+	index := int(math.Floor(variantUnit(seed, field) * float64(count)))
+	if index >= count {
+		return count - 1
+	}
+	return index
+}
+
+func variantUnit(seed, field string) float64 {
+	digest := sha256.Sum256([]byte(seed + ":" + field))
+	return float64(binary.BigEndian.Uint64(digest[:8])) / float64(^uint64(0))
 }
 
 // ValidateExpandedJob protects command consumers from manually constructed
@@ -282,16 +571,16 @@ func ValidateExpandedJob(job Job) error {
 		return err
 	}
 	resolved := settings{
-		stopDistanceM:    job.StopDistanceM,
-		egoCenterOffsetM: job.EgoCenterOffsetM,
-		startDistanceM:   job.StartDistanceM,
-		exitDistanceM:    job.ExitDistanceM,
-		targetSpeedMPS:   job.TargetSpeedMPS,
-		dwellMS:          job.DwellMS,
-		attemptCount:     job.AttemptCount,
-		weather:          job.Weather,
-		time:             job.Time,
-		vehicle:          cloneVehicle(job.Vehicle),
+		stopDistanceM:      job.StopDistanceM,
+		egoCenterOffsetM:   job.EgoCenterOffsetM,
+		startDistanceM:     job.StartDistanceM,
+		exitDistanceM:      job.ExitDistanceM,
+		targetSpeedMPS:     job.TargetSpeedMPS,
+		stopConfirmationMS: job.StopConfirmationMS,
+		attemptCount:       job.AttemptCount,
+		weather:            job.Weather,
+		time:               job.Time,
+		vehicle:            cloneVehicle(job.Vehicle),
 	}
 	if err := validateSettings(resolved, "expanded job"); err != nil {
 		return err
@@ -301,6 +590,32 @@ func ValidateExpandedJob(job Job) error {
 	}
 	if job.Vehicle.Model != strings.ToLower(strings.TrimSpace(job.Vehicle.Model)) {
 		return invalid("expanded job vehicle.model must be canonical lowercase")
+	}
+	if strings.TrimSpace(job.CatalogID) != "" || job.CatalogPosition != nil {
+		if catalogID := strings.TrimSpace(job.CatalogID); catalogID == "" || len(catalogID) > 120 {
+			return invalid("expanded job catalogId must contain between 1 and 120 characters")
+		}
+		if err := validateWorldPosition("expanded job catalogPosition", job.CatalogPosition); err != nil {
+			return err
+		}
+		if err := validateCapturedRoute("expanded job", job.StartPose, job.EgoStopPose, job.ExitPose); err != nil {
+			return err
+		}
+		expectedStopLine := poseAhead(job.EgoStopPose, job.EgoCenterOffsetM)
+		expectedSign := poseAhead(expectedStopLine, job.StopDistanceM)
+		if !posesNear(job.StopLinePose, expectedStopLine, 1e-6) {
+			return invalid("expanded job stopLinePose contradicts captured ego stop pose")
+		}
+		if !posesNear(job.SignPose, expectedSign, 1e-6) {
+			return invalid("expanded job signPose contradicts captured stop geometry")
+		}
+		if math.Abs(job.StartDistanceM-planarDistance(job.StartPose, job.EgoStopPose)) > 1e-6 {
+			return invalid("expanded job startDistanceM contradicts captured start pose")
+		}
+		if math.Abs(job.ExitDistanceM-planarDistance(job.EgoStopPose, job.ExitPose)) > 1e-6 {
+			return invalid("expanded job exitDistanceM contradicts captured end pose")
+		}
+		return nil
 	}
 	expectedStopLine := poseBehind(job.SignPose, job.StopDistanceM)
 	expectedEgoStop := poseBehind(expectedStopLine, job.EgoCenterOffsetM)
@@ -321,15 +636,15 @@ func ValidateExpandedJob(job Job) error {
 
 func defaultSettings() settings {
 	return settings{
-		stopDistanceM:    DefaultStopDistanceM,
-		egoCenterOffsetM: DefaultEgoCenterOffsetM,
-		startDistanceM:   DefaultStartDistanceM,
-		exitDistanceM:    DefaultExitDistanceM,
-		targetSpeedMPS:   DefaultTargetSpeedMPS,
-		dwellMS:          DefaultDwellMS,
-		attemptCount:     DefaultAttemptCount,
-		weather:          DefaultWeather,
-		time:             TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute},
+		stopDistanceM:      DefaultStopDistanceM,
+		egoCenterOffsetM:   DefaultEgoCenterOffsetM,
+		startDistanceM:     DefaultStartDistanceM,
+		exitDistanceM:      DefaultExitDistanceM,
+		targetSpeedMPS:     DefaultTargetSpeedMPS,
+		stopConfirmationMS: DefaultStopConfirmationMS,
+		attemptCount:       DefaultAttemptCount,
+		weather:            DefaultWeather,
+		time:               TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute},
 	}
 }
 
@@ -341,18 +656,18 @@ func cloneSettings(source settings) settings {
 
 func applyEntrySettings(destination *settings, entry Entry, label string) error {
 	return applySettings(destination, entry.StopDistanceM, entry.EgoCenterOffsetM, entry.StartDistanceM, entry.ExitDistanceM, entry.TargetSpeedMPS,
-		entry.DwellMS, entry.AttemptCount, entry.Weather, entry.Time, entry.Vehicle, label)
+		entry.StopConfirmationMS, entry.AttemptCount, entry.Weather, entry.Time, entry.Vehicle, label)
 }
 
 func applyVariationSettings(destination *settings, variation Variation, label string) error {
 	return applySettings(destination, variation.StopDistanceM, variation.EgoCenterOffsetM, variation.StartDistanceM, variation.ExitDistanceM, variation.TargetSpeedMPS,
-		variation.DwellMS, variation.AttemptCount, variation.Weather, variation.Time, variation.Vehicle, label)
+		variation.StopConfirmationMS, variation.AttemptCount, variation.Weather, variation.Time, variation.Vehicle, label)
 }
 
 func applySettings(
 	destination *settings,
 	stopDistanceM, egoCenterOffsetM, startDistanceM, exitDistanceM, targetSpeedMPS *float64,
-	dwellMS, attemptCount *int,
+	stopConfirmationMS, attemptCount *int,
 	weather *string,
 	timeOfDay *TimeOfDay,
 	vehicle *VehicleVariant,
@@ -373,8 +688,8 @@ func applySettings(
 	if targetSpeedMPS != nil {
 		destination.targetSpeedMPS = *targetSpeedMPS
 	}
-	if dwellMS != nil {
-		destination.dwellMS = *dwellMS
+	if stopConfirmationMS != nil {
+		destination.stopConfirmationMS = *stopConfirmationMS
 	}
 	if attemptCount != nil {
 		destination.attemptCount = *attemptCount
@@ -407,8 +722,8 @@ func validateSettings(value settings, label string) error {
 	if err := validateRange(label+".targetSpeedMps", value.targetSpeedMPS, minimumTargetSpeedMPS, maximumTargetSpeedMPS); err != nil {
 		return err
 	}
-	if value.dwellMS < minimumDwellMS || value.dwellMS > maximumDwellMS {
-		return invalid("%s.dwellMs must be between %d and %d", label, minimumDwellMS, maximumDwellMS)
+	if value.stopConfirmationMS < minimumStopConfirmationMS || value.stopConfirmationMS > maximumStopConfirmationMS {
+		return invalid("%s.stopConfirmationMs must be between %d and %d", label, minimumStopConfirmationMS, maximumStopConfirmationMS)
 	}
 	if value.attemptCount < 1 || value.attemptCount > MaximumAttemptCount {
 		return invalid("%s.attemptCount must be between 1 and %d", label, MaximumAttemptCount)
@@ -460,6 +775,22 @@ func validatePose(label string, pose Pose) error {
 	}
 	if pose.Heading < 0 || pose.Heading >= 360 {
 		return invalid("%s.heading must be in [0, 360)", label)
+	}
+	return nil
+}
+
+func validateWorldPosition(label string, position *WorldPosition) error {
+	if position == nil {
+		return invalid("%s is required", label)
+	}
+	for _, value := range []float64{position.X, position.Y, position.Z} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return invalid("%s must contain only finite values", label)
+		}
+	}
+	if position.X < -10_000 || position.X > 10_000 || position.Y < -10_000 || position.Y > 10_000 ||
+		position.Z < -1_000 || position.Z > 3_000 {
+		return invalid("%s is outside the supported GTA world bounds", label)
 	}
 	return nil
 }

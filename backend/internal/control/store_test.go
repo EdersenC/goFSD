@@ -713,21 +713,21 @@ func TestUpdateTelemetryCopiesStopSignTemporalStateAndGeometry(t *testing.T) {
 	egoStop := &StopSignPose{X: 106.5, Y: 200, Z: 8, Heading: 90}
 
 	updated := store.UpdateTelemetry(TelemetryUpdate{
-		StopSignTargetConfigured:   true,
-		StopSignPose:               sign,
-		StopLinePose:               line,
-		StopSignEgoStopPose:        egoStop,
-		StopSignDistanceM:          6.5,
-		StopLineDistanceM:          0.4,
-		StopSignLongitudinalErrorM: -0.3,
-		StopSignLateralErrorM:      0.1,
-		StopSignHeadingErrorDeg:    -1.5,
-		StopSignDwellElapsedMS:     3200,
-		StopSignDwellTargetMS:      5000,
-		StopSignStopped:            true,
-		StopSignAttemptIndex:       2,
-		StopSignAttemptCount:       4,
-		StopSignPhase:              StopSignPhaseStopHold,
+		StopSignTargetConfigured:      true,
+		StopSignPose:                  sign,
+		StopLinePose:                  line,
+		StopSignEgoStopPose:           egoStop,
+		StopSignDistanceM:             6.5,
+		StopLineDistanceM:             0.4,
+		StopSignLongitudinalErrorM:    -0.3,
+		StopSignLateralErrorM:         0.1,
+		StopSignHeadingErrorDeg:       -1.5,
+		StopSignConfirmationElapsedMS: 200,
+		StopSignConfirmationTargetMS:  250,
+		StopSignStopped:               true,
+		StopSignAttemptIndex:          2,
+		StopSignAttemptCount:          4,
+		StopSignPhase:                 StopSignPhaseStopHold,
 	})
 	if !updated.StopSignTargetConfigured || updated.StopSignPhase != StopSignPhaseStopHold || !updated.StopSignStopped {
 		t.Fatalf("unexpected stop-sign temporal telemetry: %+v", updated)
@@ -735,8 +735,8 @@ func TestUpdateTelemetryCopiesStopSignTemporalStateAndGeometry(t *testing.T) {
 	if updated.StopSignPose == nil || updated.StopLinePose == nil || updated.StopSignEgoStopPose == nil {
 		t.Fatalf("expected all canonical stop-sign poses: %+v", updated)
 	}
-	if updated.StopSignDwellElapsedMS != 3200 || updated.StopSignDwellTargetMS != 5000 {
-		t.Fatalf("unexpected dwell telemetry: %+v", updated)
+	if updated.StopSignConfirmationElapsedMS != 200 || updated.StopSignConfirmationTargetMS != 250 {
+		t.Fatalf("unexpected stop-confirmation telemetry: %+v", updated)
 	}
 	sign.X = -999
 	updated.StopLinePose.X = -999
@@ -1011,23 +1011,23 @@ func validStopSignBatchCommandRequest(safetyEpoch *uint64) CommandRequest {
 		StopSignBatchID: "city-stops",
 		PlanFingerprint: "sha256:72f8a2a4127d2c515e46c6bd9f6543a2ecfdf8a16df376cf231428edd459fac5",
 		StopSignJobs: []StopSignBatchJob{{
-			ID:               "alta:base",
-			EntryID:          "alta",
-			VariationID:      "base",
-			SignPose:         StopSignPose{X: 10, Y: 20, Z: 2, Heading: 0},
-			StopLinePose:     StopSignPose{X: 10, Y: 17, Z: 2, Heading: 0},
-			EgoStopPose:      StopSignPose{X: 10, Y: 14.5, Z: 2, Heading: 0},
-			StartPose:        StopSignPose{X: 10, Y: -25.5, Z: 2, Heading: 0},
-			ExitPose:         StopSignPose{X: 10, Y: 28, Z: 2, Heading: 0},
-			StopDistanceM:    3,
-			EgoCenterOffsetM: 2.5,
-			StartDistanceM:   40,
-			ExitDistanceM:    8,
-			TargetSpeedMPS:   8,
-			DwellMS:          5000,
-			AttemptCount:     3,
-			Weather:          "EXTRASUNNY",
-			Time:             StopSignTime{Hour: 12, Minute: 0},
+			ID:                 "alta:base",
+			EntryID:            "alta",
+			VariationID:        "base",
+			SignPose:           StopSignPose{X: 10, Y: 20, Z: 2, Heading: 0},
+			StopLinePose:       StopSignPose{X: 10, Y: 17, Z: 2, Heading: 0},
+			EgoStopPose:        StopSignPose{X: 10, Y: 14.5, Z: 2, Heading: 0},
+			StartPose:          StopSignPose{X: 10, Y: -25.5, Z: 2, Heading: 0},
+			ExitPose:           StopSignPose{X: 10, Y: 28, Z: 2, Heading: 0},
+			StopDistanceM:      3,
+			EgoCenterOffsetM:   2.5,
+			StartDistanceM:     40,
+			ExitDistanceM:      8,
+			TargetSpeedMPS:     8,
+			StopConfirmationMS: 250,
+			AttemptCount:       3,
+			Weather:            "EXTRASUNNY",
+			Time:               StopSignTime{Hour: 12, Minute: 0},
 			Vehicle: StopSignVehicle{
 				Model: "sultan",
 				Color: &StopSignColor{R: 255, G: 128, B: 64},

@@ -3,14 +3,14 @@ import {
     STOP_SIGN_PLAN_VERSION,
     StopSignPlan,
     StopSignPlanEntry,
-    StopSignVariation,
 } from "./types";
 
-export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-plan.v2";
-const VALID_WEATHER = new Set([
-    "BLIZZARD", "CLEAR", "CLEARING", "CLOUDS", "EXTRASUNNY", "FOGGY", "HALLOWEEN", "NEUTRAL",
-    "OVERCAST", "RAIN", "SMOG", "SNOW", "SNOWLIGHT", "THUNDER", "XMAS",
-]);
+export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v4";
+export const DEFAULT_VARIANT_COUNT = 50;
+export const DEFAULT_MOTION_VARIANCE_PCT = 20;
+export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
+
+export type ScenePoseField = "startPose" | "egoStopPose" | "exitPose";
 
 export type StopSignPlanStats = {
     signCount: number
@@ -19,41 +19,36 @@ export type StopSignPlanStats = {
     attemptCount: number
 };
 
+type CatalogLocation = {id: string, x: number, y: number, z: number};
+
 export function createStopSignPlan(): StopSignPlan {
     return {
         version: STOP_SIGN_PLAN_VERSION,
-        id: "stop-sign-baseline",
-        seed: "stop-sign-001",
-        entries: [createStopSignEntry(1)],
+        id: "stop-sign-scenes",
+        seed: createStopSignSeed(),
+        entries: [],
     };
 }
 
-export function createStopSignEntry(index: number): StopSignPlanEntry {
+export function createStopSignEntry(index: number, location?: CatalogLocation): StopSignPlanEntry {
     return {
-        id: `sign-${String(index).padStart(2, "0")}`,
+        id: location?.id ?? `scene-${String(index).padStart(2, "0")}`,
+        catalogId: location?.id,
+        catalogPosition: location ? {x: location.x, y: location.y, z: location.z} : undefined,
         signPose: {x: 0, y: 0, z: 0, heading: 0},
+        autoVariations: {count: DEFAULT_VARIANT_COUNT, motionVariancePct: DEFAULT_MOTION_VARIANCE_PCT},
         stopDistanceM: 4,
         egoCenterOffsetM: 2.5,
         startDistanceM: 35,
         exitDistanceM: 8,
         targetSpeedMps: 5,
-        dwellMs: 5000,
-        attemptCount: 3,
+        stopConfirmationMs: 250,
+        attemptCount: 1,
         weather: "EXTRASUNNY",
         time: {hour: 12, minute: 0},
         vehicle: {model: "sultan", color: {r: 26, g: 86, b: 219}},
-        variations: [{id: "base"}],
+        variations: [],
     };
-}
-
-export function createProofVariations(): StopSignVariation[] {
-    const vehicle = () => ({model: "sultan", color: {r: 26, g: 86, b: 219}});
-    return [
-        {id: "clear-baseline", startDistanceM: 35, targetSpeedMps: 5, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
-        {id: "short-slow", startDistanceM: 25, targetSpeedMps: 4, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
-        {id: "long-brisk", startDistanceM: 55, targetSpeedMps: 6, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
-        {id: "rain-approach", startDistanceM: 40, targetSpeedMps: 4.5, attemptCount: 3, weather: "RAIN", vehicle: vehicle()},
-    ];
 }
 
 export function cloneStopSignPlan(plan: StopSignPlan): StopSignPlan {
@@ -67,97 +62,138 @@ export function cloneStopSignPlan(plan: StopSignPlan): StopSignPlan {
 
 export function stopSignPlanStats(plan: StopSignPlan): StopSignPlanStats {
     return plan.entries.reduce<StopSignPlanStats>((stats, entry) => {
-        const variations = effectiveVariations(entry);
+        const variations = entry.autoVariations?.count ?? Math.max(1, entry.variations.length);
         return {
             signCount: stats.signCount + 1,
-            variationCount: stats.variationCount + variations.length,
-            jobCount: stats.jobCount + variations.length,
-            attemptCount: stats.attemptCount + variations.reduce((count, variation) => count + (variation.attemptCount ?? entry.attemptCount), 0),
+            variationCount: stats.variationCount + variations,
+            jobCount: stats.jobCount + variations,
+            attemptCount: stats.attemptCount + variations * entry.attemptCount,
         };
     }, {signCount: 0, variationCount: 0, jobCount: 0, attemptCount: 0});
 }
 
-export function stageStopSignCatalogLocation(plan: StopSignPlan, catalogId: string): StopSignPlan {
-    const id = catalogId.trim();
-    if (!id) {
-        throw new Error("Catalog location id is required");
+export function stageStopSignCatalogLocation(plan: StopSignPlan, location: CatalogLocation): {plan: StopSignPlan, entryIndex: number} {
+    const next = cloneStopSignPlan(plan);
+    const existingIndex = next.entries.findIndex((entry) => entry.catalogId === location.id);
+    if (existingIndex >= 0) {
+        next.entries[existingIndex] = {
+            ...next.entries[existingIndex]!,
+            catalogPosition: {x: location.x, y: location.y, z: location.z},
+        };
+        return {plan: next, entryIndex: existingIndex};
     }
-    const staged = cloneStopSignPlan(plan);
-    if (staged.entries.some((entry) => entry.id.trim() === id)) {
-        return staged;
+    next.entries.push(createStopSignEntry(next.entries.length + 1, location));
+    return {plan: next, entryIndex: next.entries.length - 1};
+}
+
+export function captureScenePose(
+    plan: StopSignPlan,
+    entryIndex: number,
+    field: ScenePoseField,
+    pose: Pose,
+): StopSignPlan {
+    if (!validPose(pose)) {
+        throw new Error("The setup car did not report a valid world pose");
     }
-    const placeholder = staged.entries.find((entry) => isPlaceholderPose(entry.signPose));
-    if (placeholder) {
-        placeholder.id = id;
-        return staged;
+    const next = cloneStopSignPlan(plan);
+    const entry = next.entries[entryIndex];
+    if (!entry) {
+        throw new Error("Select a stop-sign scene before capturing a point");
     }
-    staged.entries.push({...createStopSignEntry(staged.entries.length + 1), id});
-    return staged;
+    next.entries[entryIndex] = {...entry, [field]: {...pose}};
+    return next;
+}
+
+export function planForScene(plan: StopSignPlan, entryIndex: number): StopSignPlan {
+    const entry = plan.entries[entryIndex];
+    if (!entry) {
+        throw new Error("Select a saved scene before collecting");
+    }
+    return {
+        version: STOP_SIGN_PLAN_VERSION,
+        id: `${plan.id}-${entry.id}`.slice(0, 120),
+        seed: plan.seed,
+        entries: [cloneEntry(entry)],
+    };
 }
 
 export function validateStopSignPlan(plan: StopSignPlan): string[] {
     const errors: string[] = [];
     if (plan.version !== STOP_SIGN_PLAN_VERSION) {
-        errors.push(`Plan version must be ${STOP_SIGN_PLAN_VERSION}.`);
+        errors.push(`Scene library version must be ${STOP_SIGN_PLAN_VERSION}.`);
     }
     if (!plan.id.trim()) {
-        errors.push("Plan id is required.");
+        errors.push("Scene library id is required.");
     }
     if (!plan.seed.trim()) {
         errors.push("Seed is required.");
     }
     if (plan.entries.length === 0) {
-        errors.push("Add at least one stop sign.");
+        errors.push("Teleport to a stop sign to create the first scene.");
     }
     if (plan.entries.length > 100) {
-        errors.push("A plan can contain at most 100 stop signs.");
+        errors.push("A scene library can contain at most 100 stop signs.");
     }
-    if (stopSignPlanStats(plan).jobCount > 100) {
-        errors.push("A plan can expand to at most 100 jobs.");
+    if (stopSignPlanStats(plan).jobCount > 5000) {
+        errors.push("The saved scenes can contain at most 5,000 generated variants.");
     }
-    const entryIds = new Set<string>();
-    for (const entry of plan.entries) {
-        const prefix = entry.id.trim() || "unnamed sign";
-        if (!entry.id.trim()) {
-            errors.push("Every stop sign needs an id.");
-        } else if (entryIds.has(entry.id.trim())) {
-            errors.push(`Stop sign id ${entry.id} is duplicated.`);
+    const ids = new Set<string>();
+    plan.entries.forEach((entry) => {
+        const label = entry.catalogId || entry.id || "unnamed scene";
+        if (!entry.id.trim() || ids.has(entry.id.trim())) {
+            errors.push(`${label}: scene id must be present and unique.`);
         }
-        entryIds.add(entry.id.trim());
-        errors.push(...validateStopSignEntry(entry).map((error) => `${prefix}: ${error}`));
-    }
+        ids.add(entry.id.trim());
+        errors.push(...validateStopSignEntry(entry).map((error) => `${label}: ${error}`));
+    });
     return errors;
 }
 
 export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     const errors: string[] = [];
-    if (isPlaceholderPose(entry.signPose)) {
-        errors.push("sign pose is uncalibrated; apply a live lane pose before collection.");
-    } else if (!validPose(entry.signPose)) {
-        errors.push("sign pose must contain finite coordinates and a heading from 0 to 359.999 degrees.");
+    if (!entry.catalogId?.trim() || !entry.catalogPosition || !validPosition(entry.catalogPosition)) {
+        errors.push("choose a physical stop sign from the catalog.");
     }
-    positive(errors, "stop distance", entry.stopDistanceM, 0.5, 15);
-    positive(errors, "ego-center offset", entry.egoCenterOffsetM, 0.5, 8);
-    positive(errors, "start distance", entry.startDistanceM, 5, 250);
-    positive(errors, "exit distance", entry.exitDistanceM, 2, 50);
-    positive(errors, "target speed", entry.targetSpeedMps, 0.5, 8);
-    integer(errors, "dwell", entry.dwellMs, 500, 30000);
-    integer(errors, "attempt count", entry.attemptCount, 1, 50);
-    integer(errors, "hour", entry.time.hour, 0, 23);
-    integer(errors, "minute", entry.time.minute, 0, 59);
-    if (!VALID_WEATHER.has(entry.weather.trim().toUpperCase())) {
-        errors.push("weather is not a supported GTA weather id.");
-    }
-    errors.push(...validateVehicle(entry.vehicle));
-    const variationIds = new Set<string>();
-    for (const variation of effectiveVariations(entry)) {
-        if (!variation.id.trim()) {
-            errors.push("every variation needs an id.");
-        } else if (variationIds.has(variation.id.trim())) {
-            errors.push(`variation ${variation.id} is duplicated.`);
+    for (const [label, pose] of [
+        ["Start", entry.startPose],
+        ["Stop", entry.egoStopPose],
+        ["End", entry.exitPose],
+    ] as const) {
+        if (!pose || !validPose(pose)) {
+            errors.push(`capture the ${label} pose from the setup car.`);
         }
-        variationIds.add(variation.id.trim());
-        errors.push(...validateVariation(variation).map((error) => `${variation.id || "unnamed variation"}: ${error}`));
+    }
+    if (entry.startPose && entry.egoStopPose && entry.exitPose) {
+        const start = relativeTo(entry.startPose, entry.egoStopPose);
+        const end = relativeTo(entry.exitPose, entry.egoStopPose);
+        if (start.longitudinal > -16) {
+            errors.push("Start must be at least 16 m before Stop so the approach clip has enough temporal context.");
+        }
+        if (end.longitudinal < 8) {
+            errors.push("End must be at least 8 m beyond Stop so the release clip has enough temporal context.");
+        }
+        if (distance(entry.startPose, entry.egoStopPose) > 250) {
+            errors.push("Start must be within 250 m of Stop.");
+        }
+        if (distance(entry.exitPose, entry.egoStopPose) > 50) {
+            errors.push("End must be within 50 m of Stop.");
+        }
+        if (Math.abs(start.lateral) > 8 || Math.abs(end.lateral) > 8) {
+            errors.push("Start, Stop, and End must stay within one 8 m lane corridor.");
+        }
+    }
+    const generated = entry.autoVariations;
+    if (!generated || !Number.isInteger(generated.count) || generated.count < 1 || generated.count > 100) {
+        errors.push("generated variant count must be a whole number from 1 to 100.");
+    }
+    if (!generated || !Number.isFinite(generated.motionVariancePct) || generated.motionVariancePct < 0 || generated.motionVariancePct > MAXIMUM_MOTION_VARIANCE_PCT) {
+        errors.push(`motion variance must be from 0 to ${MAXIMUM_MOTION_VARIANCE_PCT}%.`);
+    }
+    if (!Number.isFinite(entry.targetSpeedMps) || entry.targetSpeedMps < .5 || entry.targetSpeedMps > 8) {
+        errors.push("target speed must be from 0.5 to 8 m/s.");
+    }
+    if (!Number.isInteger(entry.stopConfirmationMs) || entry.stopConfirmationMs < 100 || entry.stopConfirmationMs > 1000) {
+        errors.push("stop confirmation must be a whole number from 100 to 1,000 ms.");
     }
     return errors;
 }
@@ -177,63 +213,30 @@ export function parseStoredStopSignPlan(raw: string | null): StopSignPlan | null
     }
 }
 
-export function distanceBetweenPoses(a: Pose, b: Pose): number {
-    return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+export function currentSceneStep(entry?: StopSignPlanEntry): 0 | 1 | 2 | 3 {
+    if (!entry?.startPose) return 0;
+    if (!entry.egoStopPose) return 1;
+    if (!entry.exitPose) return 2;
+    return 3;
 }
 
-export function isPlaceholderPose(pose: Pose): boolean {
-    return pose.x === 0 && pose.y === 0 && pose.z === 0;
-}
-
-function validateVariation(variation: StopSignVariation): string[] {
-    const errors: string[] = [];
-    optionalRange(errors, "stop distance", variation.stopDistanceM, 0.5, 15);
-    optionalRange(errors, "ego-center offset", variation.egoCenterOffsetM, 0.5, 8);
-    optionalRange(errors, "start distance", variation.startDistanceM, 5, 250);
-    optionalRange(errors, "exit distance", variation.exitDistanceM, 2, 50);
-    optionalRange(errors, "target speed", variation.targetSpeedMps, 0.5, 8);
-    optionalInteger(errors, "dwell", variation.dwellMs, 500, 30000);
-    optionalInteger(errors, "attempt count", variation.attemptCount, 1, 50);
-    if (variation.weather !== undefined && !VALID_WEATHER.has(variation.weather.trim().toUpperCase())) {
-        errors.push("weather is not a supported GTA weather id.");
-    }
-    if (variation.time) {
-        integer(errors, "hour", variation.time.hour, 0, 23);
-        integer(errors, "minute", variation.time.minute, 0, 59);
-    }
-    if (variation.vehicle) {
-        errors.push(...validateVehicle(variation.vehicle));
-    }
-    return errors;
-}
-
-function validateVehicle(vehicle: {model?: string, color?: {r: number, g: number, b: number}}): string[] {
-    const errors: string[] = [];
-    const model = vehicle.model?.trim() ?? "";
-    if (model.length > 64 || !/^[a-z0-9_-]*$/i.test(model)) {
-        errors.push("vehicle model must be at most 64 letters, numbers, underscores, or hyphens.");
-    }
-    if (vehicle.color) {
-        integer(errors, "vehicle red", vehicle.color.r, 0, 255);
-        integer(errors, "vehicle green", vehicle.color.g, 0, 255);
-        integer(errors, "vehicle blue", vehicle.color.b, 0, 255);
-    }
-    return errors;
-}
-
-function effectiveVariations(entry: StopSignPlanEntry): StopSignVariation[] {
-    return entry.variations.length > 0 ? entry.variations : [{id: "base"}];
+export function poseSummary(pose?: Pose): string {
+    return pose
+        ? `${pose.x.toFixed(1)}, ${pose.y.toFixed(1)} · ${pose.heading.toFixed(0)}°`
+        : "Not captured";
 }
 
 function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
     return {
         ...entry,
         signPose: {...entry.signPose},
+        catalogPosition: entry.catalogPosition ? {...entry.catalogPosition} : undefined,
+        startPose: entry.startPose ? {...entry.startPose} : undefined,
+        egoStopPose: entry.egoStopPose ? {...entry.egoStopPose} : undefined,
+        exitPose: entry.exitPose ? {...entry.exitPose} : undefined,
+        autoVariations: entry.autoVariations ? {...entry.autoVariations} : undefined,
         time: {...entry.time},
-        vehicle: {
-            ...entry.vehicle,
-            color: entry.vehicle.color ? {...entry.vehicle.color} : undefined,
-        },
+        vehicle: {...entry.vehicle, color: entry.vehicle.color ? {...entry.vehicle.color} : undefined},
         variations: entry.variations.map((variation) => ({
             ...variation,
             time: variation.time ? {...variation.time} : undefined,
@@ -246,32 +249,33 @@ function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
 }
 
 function validPose(pose: Pose): boolean {
-    return [pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)
-        && !isPlaceholderPose(pose)
-        && pose.heading >= 0
-        && pose.heading < 360;
+    return validPosition(pose) && Number.isFinite(pose.heading) && pose.heading >= 0 && pose.heading < 360;
 }
 
-function positive(errors: string[], label: string, value: number, min: number, max: number) {
-    if (!Number.isFinite(value) || value < min || value > max) {
-        errors.push(`${label} must be from ${min} to ${max}.`);
-    }
+function validPosition(position: {x: number, y: number, z: number}): boolean {
+    return [position.x, position.y, position.z].every(Number.isFinite)
+        && Math.abs(position.x) <= 10_000
+        && Math.abs(position.y) <= 10_000
+        && position.z >= -1_000
+        && position.z <= 3_000;
 }
 
-function integer(errors: string[], label: string, value: number, min: number, max: number) {
-    if (!Number.isInteger(value) || value < min || value > max) {
-        errors.push(`${label} must be a whole number from ${min} to ${max}.`);
-    }
+function relativeTo(pose: Pose, origin: Pose): {longitudinal: number, lateral: number} {
+    const radians = origin.heading * Math.PI / 180;
+    const forward = [-Math.sin(radians), Math.cos(radians)];
+    const right = [Math.cos(radians), Math.sin(radians)];
+    const x = pose.x - origin.x;
+    const y = pose.y - origin.y;
+    return {
+        longitudinal: x * forward[0]! + y * forward[1]!,
+        lateral: x * right[0]! + y * right[1]!,
+    };
 }
 
-function optionalRange(errors: string[], label: string, value: number | undefined, min: number, max: number) {
-    if (value !== undefined) {
-        positive(errors, label, value, min, max);
-    }
+function distance(first: Pose, second: Pose): number {
+    return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z);
 }
 
-function optionalInteger(errors: string[], label: string, value: number | undefined, min: number, max: number) {
-    if (value !== undefined) {
-        integer(errors, label, value, min, max);
-    }
+export function createStopSignSeed(): string {
+    return `scene-seed-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }

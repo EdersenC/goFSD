@@ -1,4 +1,4 @@
-import MapRounded from "@mui/icons-material/MapRounded";
+import NearMeRounded from "@mui/icons-material/NearMeRounded";
 import {
     Alert,
     Box,
@@ -17,25 +17,19 @@ import {useEffect, useMemo, useState} from "react";
 import {fetchStopSignCatalog} from "../api";
 import type {StopSignCatalogLocation} from "./catalog";
 
-const resultLimit = 12;
-
-export function StopSignCatalog({connected, busy, onSetWaypoint, onStageLocation}: {
+export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}: {
     connected: boolean
-    busy: boolean
-    onSetWaypoint: (location: StopSignCatalogLocation) => void
-    onStageLocation: (location: StopSignCatalogLocation) => void
+    busyId?: string
+    activeCatalogId?: string
+    onTeleport: (location: StopSignCatalogLocation) => void
 }) {
     const [locations, setLocations] = useState<StopSignCatalogLocation[]>([]);
     const [error, setError] = useState("");
     const [query, setQuery] = useState("");
-    const [selectedId, setSelectedId] = useState("");
 
     useEffect(() => {
         const controller = new AbortController();
-        void fetchStopSignCatalog(controller.signal).then((next) => {
-            setLocations(next);
-            setSelectedId((current) => current || next[0]?.id || "");
-        }).catch((reason: unknown) => {
+        void fetchStopSignCatalog(controller.signal).then(setLocations).catch((reason: unknown) => {
             if (!controller.signal.aborted) {
                 setError(reason instanceof Error ? reason.message : "Failed to load stop-sign catalog");
             }
@@ -45,70 +39,73 @@ export function StopSignCatalog({connected, busy, onSetWaypoint, onStageLocation
 
     const matches = useMemo(() => {
         const normalized = query.trim().toLowerCase();
-        if (!normalized) {
-            return locations.slice(0, resultLimit);
-        }
+        if (!normalized) return locations;
         return locations.filter((location) => (
             location.id.toLowerCase().includes(normalized)
             || location.kind.toLowerCase().includes(normalized)
             || location.model.toLowerCase().includes(normalized)
             || location.sourceYmap.toLowerCase().includes(normalized)
-        )).slice(0, resultLimit);
+            || `${location.x.toFixed(0)},${location.y.toFixed(0)}`.includes(normalized)
+        ));
     }, [locations, query]);
-    const selected = locations.find((location) => location.id === selectedId);
 
     return (
         <Card component="section" aria-labelledby="catalog-title">
             <CardContent>
                 <Stack direction="row" sx={{justifyContent: "space-between", alignItems: "flex-start", gap: 1}}>
                     <Box>
-                        <Typography variant="overline" color="secondary.main">Map registry</Typography>
-                        <Typography id="catalog-title" variant="h2">Stop-sign catalog</Typography>
+                        <Typography variant="overline" color="secondary.main">Step 1</Typography>
+                        <Typography id="catalog-title" variant="h2">Choose a stop sign</Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{mt: .5}}>
+                            Every verified main-map stop sign is listed. Teleport places the managed setup car on its nearest drivable lane.
+                        </Typography>
                     </Box>
-                    <Chip size="small" label={locations.length > 0 ? `${locations.length} props` : "loading"} />
+                    <Chip size="small" label={locations.length > 0 ? `${locations.length} total` : "loading"} />
                 </Stack>
                 {error && <Alert severity="error" sx={{mt: 1.5}}>{error}</Alert>}
                 <TextField
-                    label="Search id, type, or map"
+                    label="Search all signs"
+                    placeholder="ID, coordinates, type, or map"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    size="small"
                     fullWidth
                     sx={{mt: 1.5}}
                 />
-                <List dense disablePadding sx={{maxHeight: 220, overflow: "auto", my: 1, border: "1px solid", borderColor: "divider", borderRadius: 1}}>
+                <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
+                    Showing {matches.length.toLocaleString()} of {locations.length.toLocaleString()}
+                </Typography>
+                <List
+                    dense
+                    disablePadding
+                    sx={{maxHeight: 430, overflow: "auto", mt: .5, border: "1px solid", borderColor: "divider", borderRadius: 1}}
+                >
                     {matches.map((location) => (
-                        <ListItemButton key={location.id} selected={location.id === selectedId} onClick={() => setSelectedId(location.id)}>
+                        <ListItemButton
+                            key={location.id}
+                            selected={location.id === activeCatalogId}
+                            data-catalog-id={location.id}
+                            sx={{display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 1, borderBottom: "1px solid", borderColor: "divider"}}
+                            onClick={() => onTeleport(location)}
+                        >
                             <ListItemText
                                 primary={location.id}
-                                secondary={`${location.kind.split("_").join(" ")} · ${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)}${location.tilted ? " · tilted" : ""}`}
+                                secondary={`${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)} · ${location.kind.replace(/_/g, " ")}${location.tilted ? " · tilted" : ""}`}
                             />
+                            <Button
+                                size="small"
+                                variant={location.id === activeCatalogId ? "contained" : "outlined"}
+                                startIcon={<NearMeRounded />}
+                                disabled={!connected || Boolean(busyId)}
+                                onClick={(event) => { event.stopPropagation(); onTeleport(location); }}
+                            >
+                                {busyId === location.id ? "Teleporting…" : "Teleport"}
+                            </Button>
                         </ListItemButton>
                     ))}
                     {locations.length > 0 && matches.length === 0 && (
                         <Typography variant="body2" color="text.secondary" sx={{p: 1.5}}>No matching signs.</Typography>
                     )}
                 </List>
-                <Stack direction={{xs: "column", sm: "row"}} sx={{gap: 1, alignItems: {sm: "center"}}}>
-                    <Button
-                        variant="outlined"
-                        startIcon={<MapRounded />}
-                        disabled={!connected || !selected || busy}
-                        onClick={() => selected && onSetWaypoint(selected)}
-                    >
-                        Set GTA waypoint
-                    </Button>
-                    <Button
-                        variant="text"
-                        disabled={!selected}
-                        onClick={() => selected && onStageLocation(selected)}
-                    >
-                        Stage in plan
-                    </Button>
-                    <Typography variant="caption" color="text.secondary">
-                        Physical prop only. Use <code>/tpwaypoint</code>, align the setup car in-lane, then calibrate the live pose.
-                    </Typography>
-                </Stack>
             </CardContent>
         </Card>
     );

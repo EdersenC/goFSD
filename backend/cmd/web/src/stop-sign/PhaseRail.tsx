@@ -1,22 +1,21 @@
 import {Box, Stack, Typography} from "@mui/material";
 
 export const STOP_SIGN_PHASES = [
-    {id: "launch", label: "Launch", signal: "throttle"},
-    {id: "approach", label: "Approach / Brake", signal: "release + brake"},
-    {id: "stop", label: "Stop / Dwell", signal: "0 m/s · dwell"},
-    {id: "go", label: "Go / Release", signal: "scripted release · v0"},
+    {id: "approach", label: "Approach", signal: "flash · launch → cruise"},
+    {id: "brake_stop", label: "Brake → Stop", signal: "flash · decelerate → 0 m/s"},
+    {id: "release", label: "Release → End", signal: "flash · scripted release"},
 ] as const;
 
 export function resolvePhaseIndex(phase: string | undefined): number {
     const normalized = phase?.trim().toLowerCase() ?? "";
     if (/go|depart|resume|release|complete|success/.test(normalized)) {
-        return 3;
-    }
-    if (/stop|dwell|hold/.test(normalized)) {
         return 2;
     }
-    if (/approach|cruise|decel|brak|slow/.test(normalized)) {
+    if (/stop|dwell|hold/.test(normalized)) {
         return 1;
+    }
+    if (/approach|cruise|decel|brak|slow/.test(normalized)) {
+        return /decel|brak|slow/.test(normalized) ? 1 : 0;
     }
     return 0;
 }

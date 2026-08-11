@@ -21,14 +21,15 @@ import {
     STOP_SIGN_STOP_SPEED_MPS,
 } from "./expert";
 import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
+import {planStopSignClips} from "./clip-plan";
 import {
     nextFixedIntervalDeadlineMs,
     shouldReportStoppedTooEarly,
-    updateDepartureObserved,
     validateStopSignAttemptVehicleState,
 } from "./attempt-progress";
 import {
     StopSignBehaviorPhase,
+    StopSignClipStage,
     StopSignGoal,
     StopSignJob,
     StopSignOutcome,
@@ -60,9 +61,9 @@ export class StopSignRunner {
     private attemptIndex = 0;
     private attemptCount = 0;
     private latestTelemetry = emptyTelemetry();
-    private targetDwellMs = 5000;
+    private targetStopConfirmationMs = 250;
     private evaluationArmed = false;
-    private evaluationDwellStartedAtMs: number | null = null;
+    private evaluationStopStartedAtMs: number | null = null;
 
     constructor(private readonly egoService: EgoService) {}
 
@@ -85,14 +86,14 @@ export class StopSignRunner {
         const stopLinePose = poseBehind(signPose, stopDistanceM);
         const egoStopPose = poseBehind(stopLinePose, egoCenterOffsetM);
         const exitPose = poseAhead(signPose, STOP_SIGN_GO_DISTANCE_M);
-        return this.configureTarget(signPose, stopLinePose, egoStopPose, 5000, exitPose);
+        return this.configureTarget(signPose, stopLinePose, egoStopPose, 250, exitPose);
     }
 
     configureTarget(
         signPose: StopSignPose,
         stopLinePose: StopSignPose,
         egoStopPose: StopSignPose,
-        dwellMs = 5000,
+        stopConfirmationMs = 250,
         exitPose = poseAhead(signPose, STOP_SIGN_GO_DISTANCE_M),
     ) {
         this.target = {
@@ -102,10 +103,10 @@ export class StopSignRunner {
             exitPose: clonePose(exitPose),
         };
         this.phase = "idle";
-        this.targetDwellMs = Math.max(500, Math.trunc(dwellMs));
+        this.targetStopConfirmationMs = Math.max(100, Math.trunc(stopConfirmationMs));
         this.evaluationArmed = false;
-        this.evaluationDwellStartedAtMs = null;
-        this.latestTelemetry = telemetryForTarget(this.target, this.phase, 0, 0, null, 0, this.targetDwellMs);
+        this.evaluationStopStartedAtMs = null;
+        this.latestTelemetry = telemetryForTarget(this.target, this.phase, 0, 0, null, 0, this.targetStopConfirmationMs);
         return cloneTarget(this.target);
     }
 
@@ -116,7 +117,7 @@ export class StopSignRunner {
         this.target = null;
         this.phase = "idle";
         this.evaluationArmed = false;
-        this.evaluationDwellStartedAtMs = null;
+        this.evaluationStopStartedAtMs = null;
         this.latestTelemetry = emptyTelemetry();
     }
 
@@ -158,7 +159,7 @@ export class StopSignRunner {
                     break;
                 }
                 hooks.onJobStart?.(job, jobOffset + 1);
-                this.configureTarget(job.signPose, job.stopLinePose, job.egoStopPose, job.dwellMs, job.exitPose);
+                this.configureTarget(job.signPose, job.stopLinePose, job.egoStopPose, job.stopConfirmationMs, job.exitPose);
                 applyEnvironment(job);
                 const ego = buildStopSignEgo(job);
                 this.phase = "spawning";
@@ -183,7 +184,7 @@ export class StopSignRunner {
                     this.attemptCount = job.attemptCount;
                     const outcome = await this.runAttempt(ego, job, runId, tripIndex);
                     hooks.onAttemptComplete?.(job, attempt, outcome);
-                    tripIndex += 1;
+                    tripIndex += 3;
                     await wait(200);
                 }
                 if (this.stopWasRequested(hooks)) {
@@ -205,9 +206,63 @@ export class StopSignRunner {
     }
 
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
-        await prepareAttemptVehicle(this.egoService, ego, job.startPose);
         SetNewWaypoint(job.exitPose.x, job.exitPose.y);
-        const goal = buildGoal(job, this.attemptIndex);
+
+        const [approachClip, brakingClip, releaseClip] = planStopSignClips(job, tripIndex);
+
+        await prepareAttemptVehicle(this.egoService, ego, approachClip.fromPose);
+        const approach = await this.recordStage(
+            ego,
+            job,
+            runId,
+            approachClip.tripIndex,
+            approachClip.stage,
+            approachClip.fromPose,
+            approachClip.toPose,
+            () => this.monitorApproachStage(ego, job),
+        );
+        if (!approach.success) return approach;
+
+        await prepareAttemptVehicle(this.egoService, ego, brakingClip.fromPose);
+        const braking = await this.recordStage(
+            ego,
+            job,
+            runId,
+            brakingClip.tripIndex,
+            brakingClip.stage,
+            brakingClip.fromPose,
+            brakingClip.toPose,
+            () => {
+                SetVehicleForwardSpeed(ego.vehicle.id, brakingClip.initialSpeedMps);
+                return this.monitorBrakeStopStage(ego, job);
+            },
+        );
+        if (!braking.success) return braking;
+
+        await prepareAttemptVehicle(this.egoService, ego, releaseClip.fromPose);
+        return this.recordStage(
+            ego,
+            job,
+            runId,
+            releaseClip.tripIndex,
+            releaseClip.stage,
+            releaseClip.fromPose,
+            releaseClip.toPose,
+            () => this.monitorReleaseStage(ego, job),
+        );
+    }
+
+    private async recordStage(
+        ego: Ego,
+        job: StopSignJob,
+        runId: string,
+        tripIndex: number,
+        clipStage: StopSignClipStage,
+        fromPose: StopSignPose,
+        toPose: StopSignPose,
+        run: () => Promise<StopSignOutcome>,
+    ): Promise<StopSignOutcome> {
+        const goal = buildGoal(job, this.attemptIndex, clipStage);
         const capturePayload = {
             runId,
             tripIndex,
@@ -225,13 +280,13 @@ export class StopSignRunner {
             this.egoService.beginStopSignAttemptRecording(ego, {
                 ...capturePayload,
                 syncTime,
-                fromDestination: poseCoords(job.startPose),
-                toDestination: poseCoords(job.exitPose),
+                fromDestination: poseCoords(fromPose),
+                toDestination: poseCoords(toPose),
                 tripProfile: buildTripProfile(job),
                 goal,
             });
             this.phase = "recording";
-            const outcome = await this.monitorAttempt(ego, job);
+            const outcome = await run();
             holdVehicle(ego.vehicle.id);
             this.egoService.finishStopSignAttemptRecording(ego, outcome);
             const finalized = this.egoService.requireFinalizedTrip(
@@ -256,72 +311,26 @@ export class StopSignRunner {
         }
     }
 
-    private async monitorAttempt(ego: Ego, job: StopSignJob): Promise<StopSignOutcome> {
+    private async monitorApproachStage(ego: Ego, job: StopSignJob): Promise<StopSignOutcome> {
         const startedAtMs = GetGameTimer();
-        let dwellStartedAtMs: number | null = null;
-        let stoppedAtDistanceM: number | null = null;
         let previousDesiredSpeedMps = 0;
-        let departureObserved = false;
         let nextControlDeadlineMs = startedAtMs;
         while (true) {
             const nowMs = GetGameTimer();
-            if (this.localStopRequested) {
-                return outcome(false, "stopped", "Collection stopped", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
-            }
-            if (nowMs - startedAtMs > maximumAttemptDurationMs) {
-                return outcome(false, "timeout", "Attempt timed out", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
-            }
-            if (!isValidEntity(ego.vehicle.id)) {
-                return outcome(false, "invalid_vehicle", "Vehicle no longer exists", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
-            }
-            if (HasEntityCollidedWithAnything(ego.vehicle.id)) {
-                return outcome(false, "collision", "Vehicle collided during the stop-sign clip", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
-            }
-
+            const failure = stageFailure(ego.vehicle.id, startedAtMs, nowMs, this.localStopRequested, job.stopConfirmationMs);
+            if (failure) return failure;
             const pose = entityPose(ego.vehicle.id);
             if (!pose) {
-                return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
+                return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
             }
             const speedMps = Math.max(0, GetEntitySpeed(ego.vehicle.id));
             const centerError = relativeStopLinePose(pose, job.egoStopPose);
-            const startError = relativeStopLinePose(pose, job.startPose);
-            departureObserved = updateDepartureObserved(
-                departureObserved,
-                speedMps,
-                startError.longitudinalM,
-                startError.lateralM,
-            );
             const frontDistanceM = signedFrontBumperDistance(ego.vehicle.id, pose, job.stopLinePose);
-            const withinStopPose = Math.abs(centerError.longitudinalM) <= STOP_SIGN_STOP_POSITION_TOLERANCE_M
-                && Math.abs(centerError.lateralM) <= 0.8;
-            if (dwellStartedAtMs === null && frontDistanceM < -0.1) {
-                return outcome(false, "crossed_without_stop", "Front bumper crossed the stop line before the dwell", startedAtMs, nowMs, stoppedAtDistanceM, null, job.dwellMs, true);
-            }
-            if (shouldReportStoppedTooEarly(
-                departureObserved,
-                dwellStartedAtMs,
-                speedMps,
-                -centerError.longitudinalM,
-            )) {
-                return outcome(false, "stopped_too_early", "Vehicle stopped more than 3 m before the ego stop pose", startedAtMs, nowMs, stoppedAtDistanceM, null, job.dwellMs, false);
-            }
-            if (dwellStartedAtMs === null && withinStopPose && speedMps <= STOP_SIGN_STOP_SPEED_MPS) {
-                dwellStartedAtMs = nowMs;
-                stoppedAtDistanceM = frontDistanceM;
-            }
-
-            const dwellElapsedMs = dwellStartedAtMs === null ? 0 : nowMs - dwellStartedAtMs;
-            let phase: StopSignBehaviorPhase;
-            if (dwellStartedAtMs !== null && dwellElapsedMs < job.dwellMs) {
-                phase = "stop_hold";
-            } else if (dwellStartedAtMs !== null) {
-                phase = "release";
-            } else {
-                phase = classifyStopSignPhase(
-                    Math.max(0, -centerError.longitudinalM),
-                    speedMps,
-                    job.targetSpeedMps,
-                );
+            const remainingDistanceM = Math.max(0, -centerError.longitudinalM);
+            const phase = classifyStopSignPhase(remainingDistanceM, speedMps, job.targetSpeedMps);
+            if (phase === "decelerate") {
+                holdVehicle(ego.vehicle.id);
+                return outcome(true, "succeeded", "", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
             }
             this.phase = phase;
             this.latestTelemetry = telemetryForTarget(
@@ -330,13 +339,13 @@ export class StopSignRunner {
                 this.attemptIndex,
                 this.attemptCount,
                 centerError,
-                dwellElapsedMs,
-                job.dwellMs,
+                0,
+                job.stopConfirmationMs,
                 frontDistanceM,
             );
             const supervision = planStopSignExpert({
                 phase,
-                remainingDistanceM: Math.max(0, -centerError.longitudinalM),
+                remainingDistanceM,
                 measuredSpeedMps: speedMps,
                 targetSpeedMps: job.targetSpeedMps,
                 previousDesiredSpeedMps,
@@ -348,17 +357,118 @@ export class StopSignRunner {
             applyExpertControl(ego.vehicle.id, supervision);
             this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
 
-            const exitError = relativeStopLinePose(pose, job.exitPose);
-            if (phase === "release" && reachedExitPose(exitError)) {
-                this.phase = "complete";
-                this.latestTelemetry = {...this.latestTelemetry, stopSignPhase: "complete"};
-                return outcome(true, "succeeded", "", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
-            }
             nextControlDeadlineMs = nextFixedIntervalDeadlineMs(
                 nextControlDeadlineMs,
                 GetGameTimer(),
                 STOP_SIGN_CONTROL_INTERVAL_MS,
             );
+            await wait(Math.max(0, nextControlDeadlineMs - GetGameTimer()));
+        }
+    }
+
+    private async monitorBrakeStopStage(ego: Ego, job: StopSignJob): Promise<StopSignOutcome> {
+        const startedAtMs = GetGameTimer();
+        let stoppedAtMs: number | null = null;
+        let stoppedAtDistanceM: number | null = null;
+        let nextControlDeadlineMs = startedAtMs;
+        while (true) {
+            const nowMs = GetGameTimer();
+            const failure = stageFailure(ego.vehicle.id, startedAtMs, nowMs, this.localStopRequested, job.stopConfirmationMs);
+            if (failure) return failure;
+            const pose = entityPose(ego.vehicle.id);
+            if (!pose) return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
+            const speedMps = Math.max(0, GetEntitySpeed(ego.vehicle.id));
+            const centerError = relativeStopLinePose(pose, job.egoStopPose);
+            const frontDistanceM = signedFrontBumperDistance(ego.vehicle.id, pose, job.stopLinePose);
+            if (stoppedAtMs === null && frontDistanceM < -0.1) {
+                return outcome(false, "crossed_without_stop", "Front bumper crossed the stop line", startedAtMs, nowMs, null, null, job.stopConfirmationMs, true);
+            }
+            if (stoppedAtMs === null && shouldReportStoppedTooEarly(true, null, speedMps, -centerError.longitudinalM)) {
+                return outcome(false, "stopped_too_early", "Vehicle stopped more than 3 m before Stop", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
+            }
+            const withinStopPose = Math.abs(centerError.longitudinalM) <= STOP_SIGN_STOP_POSITION_TOLERANCE_M
+                && Math.abs(centerError.lateralM) <= .8;
+            if (stoppedAtMs === null && withinStopPose && speedMps <= STOP_SIGN_STOP_SPEED_MPS) {
+                stoppedAtMs = nowMs;
+                stoppedAtDistanceM = frontDistanceM;
+            }
+            const confirmationMs = stoppedAtMs === null ? 0 : nowMs - stoppedAtMs;
+            const phase: StopSignBehaviorPhase = stoppedAtMs === null ? "decelerate" : "stop_hold";
+            this.phase = phase;
+            this.latestTelemetry = telemetryForTarget(
+                {signPose: job.signPose, stopLinePose: job.stopLinePose, egoStopPose: job.egoStopPose},
+                phase,
+                this.attemptIndex,
+                this.attemptCount,
+                centerError,
+                confirmationMs,
+                job.stopConfirmationMs,
+                frontDistanceM,
+            );
+            const supervision = planStopSignExpert({
+                phase,
+                remainingDistanceM: Math.max(0, -centerError.longitudinalM),
+                measuredSpeedMps: speedMps,
+                targetSpeedMps: job.targetSpeedMps,
+                previousDesiredSpeedMps: speedMps,
+                dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
+                lateralErrorM: centerError.lateralM,
+                headingErrorDeg: centerError.headingErrorDeg,
+            });
+            applyExpertControl(ego.vehicle.id, supervision);
+            this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
+            if (stoppedAtMs !== null && confirmationMs >= job.stopConfirmationMs) {
+                holdVehicle(ego.vehicle.id);
+                return outcome(true, "succeeded", "", startedAtMs, nowMs, stoppedAtDistanceM, stoppedAtMs, job.stopConfirmationMs, false);
+            }
+            nextControlDeadlineMs = nextFixedIntervalDeadlineMs(nextControlDeadlineMs, GetGameTimer(), STOP_SIGN_CONTROL_INTERVAL_MS);
+            await wait(Math.max(0, nextControlDeadlineMs - GetGameTimer()));
+        }
+    }
+
+    private async monitorReleaseStage(ego: Ego, job: StopSignJob): Promise<StopSignOutcome> {
+        const startedAtMs = GetGameTimer();
+        let previousDesiredSpeedMps = 0;
+        let nextControlDeadlineMs = startedAtMs;
+        while (true) {
+            const nowMs = GetGameTimer();
+            const failure = stageFailure(ego.vehicle.id, startedAtMs, nowMs, this.localStopRequested, job.stopConfirmationMs);
+            if (failure) return failure;
+            const pose = entityPose(ego.vehicle.id);
+            if (!pose) return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
+            const speedMps = Math.max(0, GetEntitySpeed(ego.vehicle.id));
+            const centerError = relativeStopLinePose(pose, job.egoStopPose);
+            const exitError = relativeStopLinePose(pose, job.exitPose);
+            this.phase = "release";
+            this.latestTelemetry = telemetryForTarget(
+                {signPose: job.signPose, stopLinePose: job.stopLinePose, egoStopPose: job.egoStopPose},
+                "release",
+                this.attemptIndex,
+                this.attemptCount,
+                centerError,
+                0,
+                job.stopConfirmationMs,
+                signedFrontBumperDistance(ego.vehicle.id, pose, job.stopLinePose),
+            );
+            const supervision = planStopSignExpert({
+                phase: "release",
+                remainingDistanceM: Math.max(0, -exitError.longitudinalM),
+                measuredSpeedMps: speedMps,
+                targetSpeedMps: job.targetSpeedMps,
+                previousDesiredSpeedMps,
+                dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
+                lateralErrorM: exitError.lateralM,
+                headingErrorDeg: exitError.headingErrorDeg,
+            });
+            previousDesiredSpeedMps = supervision.desiredSpeedMps;
+            applyExpertControl(ego.vehicle.id, supervision);
+            this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
+            if (reachedExitPose(exitError)) {
+                this.phase = "complete";
+                this.latestTelemetry = {...this.latestTelemetry, stopSignPhase: "complete"};
+                return outcome(true, "succeeded", "", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
+            }
+            nextControlDeadlineMs = nextFixedIntervalDeadlineMs(nextControlDeadlineMs, GetGameTimer(), STOP_SIGN_CONTROL_INTERVAL_MS);
             await wait(Math.max(0, nextControlDeadlineMs - GetGameTimer()));
         }
     }
@@ -385,23 +495,23 @@ export class StopSignRunner {
         }
 
         const nowMs = GetGameTimer();
-        let dwellElapsedMs = this.evaluationDwellStartedAtMs === null
+        let stopConfirmationElapsedMs = this.evaluationStopStartedAtMs === null
             ? 0
-            : Math.max(0, nowMs - this.evaluationDwellStartedAtMs);
+            : Math.max(0, nowMs - this.evaluationStopStartedAtMs);
         const withinStopPose = Math.abs(error.longitudinalM) <= STOP_SIGN_STOP_POSITION_TOLERANCE_M
             && Math.abs(error.lateralM) <= 0.8;
-        if (this.evaluationArmed && this.evaluationDwellStartedAtMs === null && withinStopPose && speedMps <= STOP_SIGN_STOP_SPEED_MPS) {
-            this.evaluationDwellStartedAtMs = nowMs;
-            dwellElapsedMs = 0;
+        if (this.evaluationArmed && this.evaluationStopStartedAtMs === null && withinStopPose && speedMps <= STOP_SIGN_STOP_SPEED_MPS) {
+            this.evaluationStopStartedAtMs = nowMs;
+            stopConfirmationElapsedMs = 0;
         }
 
         if (!this.evaluationArmed) {
             this.phase = "idle";
-        } else if (this.evaluationDwellStartedAtMs !== null && dwellElapsedMs < this.targetDwellMs) {
+        } else if (this.evaluationStopStartedAtMs !== null && stopConfirmationElapsedMs < this.targetStopConfirmationMs) {
             this.phase = "stop_hold";
-        } else if (this.evaluationDwellStartedAtMs !== null && !reachedExitPose(exitError)) {
+        } else if (this.evaluationStopStartedAtMs !== null && !reachedExitPose(exitError)) {
             this.phase = "release";
-        } else if (this.evaluationDwellStartedAtMs !== null) {
+        } else if (this.evaluationStopStartedAtMs !== null) {
             this.phase = "complete";
         } else if (frontDistanceM < -0.1) {
             this.phase = "failed";
@@ -414,11 +524,33 @@ export class StopSignRunner {
             0,
             0,
             error,
-            dwellElapsedMs,
-            this.targetDwellMs,
+            stopConfirmationElapsedMs,
+            this.targetStopConfirmationMs,
             frontDistanceM,
         );
     }
+}
+
+function stageFailure(
+    vehicle: number,
+    startedAtMs: number,
+    nowMs: number,
+    stopRequested: boolean,
+    stopConfirmationMs: number,
+): StopSignOutcome | null {
+    if (stopRequested) {
+        return outcome(false, "stopped", "Collection stopped", startedAtMs, nowMs, null, null, stopConfirmationMs, false);
+    }
+    if (nowMs - startedAtMs > maximumAttemptDurationMs) {
+        return outcome(false, "timeout", "Stage clip timed out", startedAtMs, nowMs, null, null, stopConfirmationMs, false);
+    }
+    if (!isValidEntity(vehicle)) {
+        return outcome(false, "invalid_vehicle", "Vehicle no longer exists", startedAtMs, nowMs, null, null, stopConfirmationMs, false);
+    }
+    if (HasEntityCollidedWithAnything(vehicle)) {
+        return outcome(false, "collision", "Vehicle collided during the stage clip", startedAtMs, nowMs, null, null, stopConfirmationMs, false);
+    }
+    return null;
 }
 
 function applyExpertControl(vehicle: number, supervision: {
@@ -544,11 +676,14 @@ function buildTripProfile(job: StopSignJob): TripProfileSnapshot {
     };
 }
 
-function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
+function buildGoal(job: StopSignJob, attemptIndex: number, clipStage: StopSignClipStage): StopSignGoal {
     return {
         task: "stop-sign",
-        contract: "stop-sign-goal.v1",
-        releasePolicy: "scripted_dwell_release_v0",
+        contract: "stop-sign-goal.v2",
+        releasePolicy: "scripted_stage_release_v1",
+        clipStage,
+        catalogId: job.catalogId,
+        catalogPosition: job.catalogPosition ? {...job.catalogPosition} : undefined,
         signPose: clonePose(job.signPose),
         stopLinePose: clonePose(job.stopLinePose),
         egoStopPose: clonePose(job.egoStopPose),
@@ -556,7 +691,7 @@ function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
         exitPose: clonePose(job.exitPose),
         exitDistanceM: job.exitDistanceM,
         targetSpeedMps: job.targetSpeedMps,
-        dwellMs: job.dwellMs,
+        stopConfirmationMs: job.stopConfirmationMs,
         attemptIndex,
         attemptCount: job.attemptCount,
         seed: job.seed,
@@ -576,8 +711,8 @@ function telemetryForTarget(
     attemptIndex: number,
     attemptCount: number,
     error: ReturnType<typeof relativeStopLinePose> | null,
-    dwellElapsedMs: number,
-    dwellTargetMs: number,
+    stopConfirmationElapsedMs: number,
+    stopConfirmationTargetMs: number,
     frontDistanceM = 0,
 ): StopSignTelemetry {
     return {
@@ -591,8 +726,8 @@ function telemetryForTarget(
         stopSignLateralErrorM: error?.lateralM ?? 0,
         stopSignHeadingErrorDeg: error?.headingErrorDeg ?? 0,
         stopSignPhase: phase,
-        stopSignDwellElapsedMs: dwellElapsedMs,
-        stopSignDwellTargetMs: dwellTargetMs,
+        stopSignConfirmationElapsedMs: stopConfirmationElapsedMs,
+        stopSignConfirmationTargetMs: stopConfirmationTargetMs,
         stopSignStopped: phase === "stop_hold",
         stopSignAttemptIndex: attemptIndex,
         stopSignAttemptCount: attemptCount,
@@ -608,8 +743,8 @@ function emptyTelemetry(): StopSignTelemetry {
         stopSignLateralErrorM: 0,
         stopSignHeadingErrorDeg: 0,
         stopSignPhase: "idle",
-        stopSignDwellElapsedMs: 0,
-        stopSignDwellTargetMs: 0,
+        stopSignConfirmationElapsedMs: 0,
+        stopSignConfirmationTargetMs: 0,
         stopSignStopped: false,
         stopSignAttemptIndex: 0,
         stopSignAttemptCount: 0,
@@ -663,9 +798,9 @@ function outcome(
     startedAtMs: number,
     nowMs: number,
     stoppedAtDistanceM: number | null,
-    dwellStartedAtMs: number | null,
-    dwellTargetMs: number,
-    crossedStopLineBeforeDwell: boolean,
+    stopStartedAtMs: number | null,
+    stopConfirmationTargetMs: number,
+    crossedStopLineBeforeStop: boolean,
 ): StopSignOutcome {
     return {
         success,
@@ -673,10 +808,10 @@ function outcome(
         failureReason,
         durationMs: Math.max(0, nowMs - startedAtMs),
         stoppedAtDistanceM,
-        dwellDurationMs: dwellStartedAtMs === null
+        stopConfirmationDurationMs: stopStartedAtMs === null
             ? 0
-            : Math.min(dwellTargetMs, Math.max(0, nowMs - dwellStartedAtMs)),
-        crossedStopLineBeforeDwell,
+            : Math.min(stopConfirmationTargetMs, Math.max(0, nowMs - stopStartedAtMs)),
+        crossedStopLineBeforeStop,
     };
 }
 

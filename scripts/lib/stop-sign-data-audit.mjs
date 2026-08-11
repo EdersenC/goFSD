@@ -2,7 +2,12 @@ import {lstat, readFile, readdir} from "node:fs/promises";
 import path from "node:path";
 
 export const STOP_SIGN_PHASES = ["accelerate", "cruise_approach", "decelerate", "stop_hold", "release"];
-const ANCHOR_PHASES = STOP_SIGN_PHASES.slice(0, 4);
+export const STOP_SIGN_CLIP_STAGES = ["approach", "brake_stop", "release"];
+const STAGE_PHASES = {
+    approach: new Set(["accelerate", "cruise_approach"]),
+    brake_stop: new Set(["decelerate", "stop_hold"]),
+    release: new Set(["release"]),
+};
 const CONTROL_FIELDS = [
     "expertDesiredSpeedMps",
     "expertThrottle",
@@ -20,6 +25,8 @@ export async function auditStopSignTrip(tripDir) {
     if (processing.state !== "completed" || !Number.isSafeInteger(processing.sampleCount) || processing.sampleCount <= 0) {
         return null;
     }
+    const clipStage = metadata.stopSignGoal.clipStage;
+    const allowedPhases = STAGE_PHASES[clipStage];
     const rows = await readJSONLines(path.join(tripDir, "dataset.jsonl"));
     const errors = [];
     const phaseCounts = Object.fromEntries(STOP_SIGN_PHASES.map((phase) => [phase, 0]));
@@ -38,15 +45,23 @@ export async function auditStopSignTrip(tripDir) {
         if (row.task !== "stop-sign" || row.training_eligible !== true) {
             errors.push(`${prefix}: row is not marked as eligible stop-sign training data`);
         }
+        if (row.clip_stage !== clipStage) {
+            errors.push(`${prefix}: clip_stage ${String(row.clip_stage)} does not match metadata ${clipStage}`);
+        }
         if (!STOP_SIGN_PHASES.includes(row.phase)) {
             errors.push(`${prefix}: invalid phase ${String(row.phase)}`);
             continue;
+        }
+        if (!allowedPhases.has(row.phase)) {
+            errors.push(`${prefix}: phase ${row.phase} crossed the ${clipStage} clip boundary`);
         }
         phaseCounts[row.phase] += 1;
         labeledPhases.add(row.phase);
         for (const phase of row.label?.aux?.future_stop_sign_phases ?? []) {
             if (!STOP_SIGN_PHASES.includes(phase)) {
                 errors.push(`${prefix}: invalid future phase ${String(phase)}`);
+            } else if (!allowedPhases.has(phase)) {
+                errors.push(`${prefix}: future phase ${phase} crossed the ${clipStage} clip boundary`);
             } else {
                 labeledPhases.add(phase);
             }
@@ -73,15 +88,8 @@ export async function auditStopSignTrip(tripDir) {
         validateTargets(row, processing.futureOffsets, prefix, errors);
     }
 
-    for (const phase of ANCHOR_PHASES) {
-        if (phaseCounts[phase] === 0) {
-            errors.push(`anchor coverage is missing ${phase}`);
-        }
-    }
-    for (const phase of STOP_SIGN_PHASES) {
-        if (!labeledPhases.has(phase)) {
-            errors.push(`temporal labels are missing ${phase}`);
-        }
+    if (![...allowedPhases].some((phase) => phaseCounts[phase] > 0)) {
+        errors.push(`${clipStage} clip contains no stage-appropriate anchor labels`);
     }
     if (locations.size !== 1) {
         errors.push(`trip must resolve to one physical location group, got ${locations.size}`);
@@ -98,6 +106,7 @@ export async function auditStopSignTrip(tripDir) {
     return {
         tripDir,
         runId: metadata.runId,
+        clipStage,
         sampleCount: rows.length,
         location: [...locations][0],
         variations: [...variations].sort(),
@@ -142,7 +151,8 @@ function successfulStopSignMetadata(metadata) {
     return metadata.sceneId === "stop-sign"
         && metadata.sceneVariant === "temporal-v1"
         && metadata.stopSignGoal?.task === "stop-sign"
-        && metadata.stopSignGoal?.contract === "stop-sign-goal.v1"
+        && metadata.stopSignGoal?.contract === "stop-sign-goal.v2"
+        && STOP_SIGN_CLIP_STAGES.includes(metadata.stopSignGoal?.clipStage)
         && metadata.stopSignOutcome?.success === true
         && metadata.stopSignOutcome?.status === "succeeded";
 }

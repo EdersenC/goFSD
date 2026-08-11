@@ -78,10 +78,89 @@ func TestExpandUsesDocumentedDefaults(t *testing.T) {
 	}
 	job := jobs[0]
 	if job.StopDistanceM != DefaultStopDistanceM || job.EgoCenterOffsetM != DefaultEgoCenterOffsetM || job.StartDistanceM != DefaultStartDistanceM || job.ExitDistanceM != DefaultExitDistanceM ||
-		job.TargetSpeedMPS != DefaultTargetSpeedMPS || job.DwellMS != DefaultDwellMS ||
+		job.TargetSpeedMPS != DefaultTargetSpeedMPS || job.StopConfirmationMS != DefaultStopConfirmationMS ||
 		job.AttemptCount != DefaultAttemptCount || job.Weather != DefaultWeather ||
 		job.Time != (TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute}) {
 		t.Fatalf("unexpected defaults: %+v", job)
+	}
+}
+
+func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
+	start := Pose{X: 0, Y: -40, Z: 30, Heading: 0}
+	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
+	exit := Pose{X: 0, Y: 12, Z: 30, Heading: 0}
+	plan := Plan{
+		ID: "captured-scenes", Seed: "repeatable-seed",
+		Entries: []Entry{{
+			ID:                 "gta-v-sign-0023",
+			CatalogID:          "gta-v-sign-0023",
+			CatalogPosition:    &WorldPosition{X: -1830.7697, Y: 3206.3914, Z: 31.846758},
+			StartPose:          &start,
+			EgoStopPose:        &stop,
+			ExitPose:           &exit,
+			AutoVariations:     &AutoVariationSpec{Count: 50, MotionVariancePct: 20},
+			TargetSpeedMPS:     float64Ptr(5),
+			StopConfirmationMS: intPtr(250),
+			AttemptCount:       intPtr(1),
+		}},
+	}
+
+	first, err := Expand(plan)
+	if err != nil {
+		t.Fatalf("Expand captured scene: %v", err)
+	}
+	second, err := Expand(plan)
+	if err != nil {
+		t.Fatalf("Expand captured scene again: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("captured scene expansion changed for the same seed")
+	}
+	if len(first) != 50 {
+		t.Fatalf("expected 50 generated jobs, got=%d", len(first))
+	}
+	baseline := first[0]
+	if baseline.VariationID != "auto-001" || baseline.CatalogID != "gta-v-sign-0023" ||
+		baseline.CatalogPosition == nil || baseline.StartPose != start || baseline.EgoStopPose != stop || baseline.ExitPose != exit {
+		t.Fatalf("baseline did not preserve captured scene: %+v", baseline)
+	}
+	for index, job := range first {
+		if err := ValidateExpandedJob(job); err != nil {
+			t.Fatalf("generated job %d is invalid: %v", index, err)
+		}
+		if job.StartDistanceM < 31.5 || job.StartDistanceM > 48.5 {
+			t.Fatalf("generated start distance escaped 20%% bound: %+v", job)
+		}
+		if job.ExitDistanceM < 9.4 || job.ExitDistanceM > 14.6 {
+			t.Fatalf("generated end distance escaped 20%% bound: %+v", job)
+		}
+		if job.TargetSpeedMPS < 4 || job.TargetSpeedMPS > 6 {
+			t.Fatalf("generated speed escaped 20%% bound: %+v", job)
+		}
+		if planarDistance(job.EgoStopPose, stop) > .35 {
+			t.Fatalf("stop target jitter is too large: %+v", job.EgoStopPose)
+		}
+	}
+	if first[1].Weather == baseline.Weather && first[1].Time == baseline.Time && reflect.DeepEqual(first[1].Vehicle.Color, baseline.Vehicle.Color) {
+		t.Fatalf("generated conditions did not vary: %+v", first[1])
+	}
+}
+
+func TestExpandCapturedSceneRejectsIncompleteOrBackwardsRoutes(t *testing.T) {
+	start := Pose{X: 0, Y: -40, Z: 30, Heading: 0}
+	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
+	exit := Pose{X: 0, Y: -12, Z: 30, Heading: 0}
+	plan := Plan{ID: "captured", Seed: "seed", Entries: []Entry{{
+		ID: "sign", CatalogID: "sign", CatalogPosition: &WorldPosition{X: 1, Y: 2, Z: 3},
+		StartPose: &start, EgoStopPose: &stop, ExitPose: &exit,
+		AutoVariations: &AutoVariationSpec{Count: 50, MotionVariancePct: 20},
+	}}}
+	if _, err := Expand(plan); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "exitPose") {
+		t.Fatalf("expected backwards end rejection, got=%v", err)
+	}
+	plan.Entries[0].ExitPose = nil
+	if _, err := Expand(plan); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "requires captured") {
+		t.Fatalf("expected incomplete anchor rejection, got=%v", err)
 	}
 }
 
@@ -139,7 +218,7 @@ func TestExpandRejectsInvalidPlans(t *testing.T) {
 		{name: "start distance", edit: func(plan *Plan) { plan.Entries[0].StartDistanceM = float64Ptr(251) }, want: "startDistanceM"},
 		{name: "exit distance", edit: func(plan *Plan) { plan.Entries[0].ExitDistanceM = float64Ptr(1) }, want: "exitDistanceM"},
 		{name: "target speed", edit: func(plan *Plan) { plan.Entries[0].TargetSpeedMPS = float64Ptr(41) }, want: "targetSpeedMps"},
-		{name: "dwell", edit: func(plan *Plan) { plan.Entries[0].DwellMS = intPtr(200) }, want: "dwellMs"},
+		{name: "stop confirmation", edit: func(plan *Plan) { plan.Entries[0].StopConfirmationMS = intPtr(50) }, want: "stopConfirmationMs"},
 		{name: "attempts", edit: func(plan *Plan) { plan.Entries[0].AttemptCount = intPtr(51) }, want: "attemptCount"},
 		{name: "weather", edit: func(plan *Plan) { plan.Entries[0].Weather = stringPtr("tornado") }, want: "weather"},
 		{name: "time", edit: func(plan *Plan) { plan.Entries[0].Time = &TimeOfDay{Hour: 24} }, want: "time"},

@@ -49,4 +49,15 @@ func TestPlanFingerprintIsDeterministicAndSemantic(t *testing.T) {
 	if changedFingerprint == first {
 		t.Fatal("meaningful plan change did not change fingerprint")
 	}
+
+	changedConfirmation := equivalent
+	changedConfirmation.Entries = append([]Entry(nil), equivalent.Entries...)
+	changedConfirmation.Entries[0].StopConfirmationMS = intPtr(500)
+	confirmationFingerprint, err := PlanFingerprint(changedConfirmation)
+	if err != nil {
+		t.Fatalf("PlanFingerprint changed confirmation: %v", err)
+	}
+	if confirmationFingerprint == first {
+		t.Fatal("stop-confirmation contract change did not change fingerprint")
+	}
 }

@@ -64,6 +64,7 @@ var trackedLabelFields = map[string]string{
 
 const (
 	reportStopSignPhaseKey            = "__stop_sign_phase"
+	reportStopSignClipStageKey        = "__stop_sign_clip_stage"
 	reportStopSignLocationKey         = "__stop_sign_location"
 	reportStopSignVariationKey        = "__stop_sign_variation"
 	reportStopSignTrainingEligibleKey = "__stop_sign_training_eligible"
@@ -161,10 +162,12 @@ type StopSignCoverageSummary struct {
 	TrainingEligibleSampleCount         int                       `json:"training_eligible_sample_count"`
 	ExcludedSampleCount                 int                       `json:"excluded_sample_count"`
 	PhaseCounts                         map[string]int            `json:"phase_counts"`
+	ClipStageCounts                     map[string]int            `json:"clip_stage_counts"`
 	LocationCounts                      map[string]int            `json:"location_counts"`
 	VariationCounts                     map[string]int            `json:"variation_counts"`
 	LocationPhaseCounts                 map[string]map[string]int `json:"location_phase_counts"`
 	TrainingEligiblePhaseCounts         map[string]int            `json:"training_eligible_phase_counts"`
+	TrainingEligibleClipStageCounts     map[string]int            `json:"training_eligible_clip_stage_counts"`
 	TrainingEligibleLocationCounts      map[string]int            `json:"training_eligible_location_counts"`
 	TrainingEligibleLocationPhaseCounts map[string]map[string]int `json:"training_eligible_location_phase_counts"`
 }
@@ -200,6 +203,7 @@ type TripDatasetReport struct {
 	StopSignLocationID      string                    `json:"stop_sign_location_id,omitempty"`
 	StopSignSplitGroup      string                    `json:"stop_sign_split_group,omitempty"`
 	StopSignVariationID     string                    `json:"stop_sign_variation_id,omitempty"`
+	StopSignClipStage       string                    `json:"stop_sign_clip_stage,omitempty"`
 	StopSignPhaseCounts     map[string]int            `json:"stop_sign_phase_counts,omitempty"`
 	StopSignOutcomeStatus   string                    `json:"stop_sign_outcome_status,omitempty"`
 	TrainingEligible        *bool                     `json:"training_eligible,omitempty"`
@@ -374,10 +378,12 @@ type summaryAccumulator struct {
 	stopSignEligibleSampleCount         int
 	stopSignExcludedSampleCount         int
 	stopSignPhaseCounts                 map[string]int
+	stopSignClipStageCounts             map[string]int
 	stopSignLocationCounts              map[string]int
 	stopSignVariationCounts             map[string]int
 	stopSignLocationPhaseCounts         map[string]map[string]int
 	stopSignEligiblePhaseCounts         map[string]int
+	stopSignEligibleClipStageCounts     map[string]int
 	stopSignEligibleLocationCounts      map[string]int
 	stopSignEligibleLocationPhaseCounts map[string]map[string]int
 }
@@ -394,10 +400,12 @@ func newSummaryAccumulator() *summaryAccumulator {
 		vehicleColors:                       newCategoricalAccumulator(),
 		tripSeeds:                           newCategoricalAccumulator(),
 		stopSignPhaseCounts:                 make(map[string]int),
+		stopSignClipStageCounts:             make(map[string]int),
 		stopSignLocationCounts:              make(map[string]int),
 		stopSignVariationCounts:             make(map[string]int),
 		stopSignLocationPhaseCounts:         make(map[string]map[string]int),
 		stopSignEligiblePhaseCounts:         make(map[string]int),
+		stopSignEligibleClipStageCounts:     make(map[string]int),
 		stopSignEligibleLocationCounts:      make(map[string]int),
 		stopSignEligibleLocationPhaseCounts: make(map[string]map[string]int),
 	}
@@ -475,6 +483,7 @@ func (a *summaryAccumulator) addSample(label map[string]any) {
 
 func (a *summaryAccumulator) addStopSignSample(label map[string]any) {
 	phase, phaseOK := nonEmptyString(label[reportStopSignPhaseKey])
+	clipStage, clipStageOK := nonEmptyString(label[reportStopSignClipStageKey])
 	location, locationOK := nonEmptyString(label[reportStopSignLocationKey])
 	variation, variationOK := nonEmptyString(label[reportStopSignVariationKey])
 	eligible, eligibilityOK := booleanField(label[reportStopSignTrainingEligibleKey])
@@ -486,6 +495,9 @@ func (a *summaryAccumulator) addStopSignSample(label map[string]any) {
 		a.stopSignEligibleSampleCount++
 		if phaseOK {
 			a.stopSignEligiblePhaseCounts[phase]++
+		}
+		if clipStageOK {
+			a.stopSignEligibleClipStageCounts[clipStage]++
 		}
 		if locationOK {
 			a.stopSignEligibleLocationCounts[location]++
@@ -503,6 +515,9 @@ func (a *summaryAccumulator) addStopSignSample(label map[string]any) {
 	}
 	if phaseOK {
 		a.stopSignPhaseCounts[phase]++
+	}
+	if clipStageOK {
+		a.stopSignClipStageCounts[clipStage]++
 	}
 	if locationOK {
 		a.stopSignLocationCounts[location]++
@@ -591,10 +606,12 @@ func (a *summaryAccumulator) summary() DatasetReportSummary {
 			TrainingEligibleSampleCount:         a.stopSignEligibleSampleCount,
 			ExcludedSampleCount:                 a.stopSignExcludedSampleCount,
 			PhaseCounts:                         cloneIntMap(a.stopSignPhaseCounts),
+			ClipStageCounts:                     cloneIntMap(a.stopSignClipStageCounts),
 			LocationCounts:                      cloneIntMap(a.stopSignLocationCounts),
 			VariationCounts:                     cloneIntMap(a.stopSignVariationCounts),
 			LocationPhaseCounts:                 cloneNestedIntMap(a.stopSignLocationPhaseCounts),
 			TrainingEligiblePhaseCounts:         cloneIntMap(a.stopSignEligiblePhaseCounts),
+			TrainingEligibleClipStageCounts:     cloneIntMap(a.stopSignEligibleClipStageCounts),
 			TrainingEligibleLocationCounts:      cloneIntMap(a.stopSignEligibleLocationCounts),
 			TrainingEligibleLocationPhaseCounts: cloneNestedIntMap(a.stopSignEligibleLocationPhaseCounts),
 		},
@@ -851,6 +868,7 @@ func buildTripDatasetReport(ctx tripContext) (TripDatasetReport, []map[string]an
 	stopSignLocationID := ""
 	stopSignSplitGroup := ""
 	stopSignVariationID := ""
+	stopSignClipStage := ""
 	stopSignTrainingExclusionReason := ""
 	var stopSignTrainingEligible *bool
 	for _, sample := range samples {
@@ -868,6 +886,9 @@ func buildTripDatasetReport(ctx tripContext) (TripDatasetReport, []map[string]an
 		}
 		if stopSignVariationID == "" {
 			stopSignVariationID = strings.TrimSpace(sample.VariationID)
+		}
+		if stopSignClipStage == "" {
+			stopSignClipStage = strings.TrimSpace(sample.ClipStage)
 		}
 		if stopSignTrainingEligible == nil && sample.TrainingEligible != nil {
 			value := *sample.TrainingEligible
@@ -956,6 +977,7 @@ func buildTripDatasetReport(ctx tripContext) (TripDatasetReport, []map[string]an
 		StopSignLocationID:      stopSignLocationID,
 		StopSignSplitGroup:      stopSignSplitGroup,
 		StopSignVariationID:     stopSignVariationID,
+		StopSignClipStage:       stopSignClipStage,
 		StopSignPhaseCounts:     stopSignPhaseCounts,
 		StopSignOutcomeStatus:   stopSignOutcomeStatus,
 		TrainingEligible:        stopSignTrainingEligible,
@@ -973,6 +995,9 @@ func mergedReportLabel(sample DatasetSample) map[string]any {
 	}
 	if variation := strings.TrimSpace(sample.VariationID); variation != "" {
 		merged[reportStopSignVariationKey] = variation
+	}
+	if clipStage := strings.TrimSpace(sample.ClipStage); clipStage != "" {
+		merged[reportStopSignClipStageKey] = clipStage
 	}
 	if sample.TrainingEligible != nil {
 		merged[reportStopSignTrainingEligibleKey] = *sample.TrainingEligible

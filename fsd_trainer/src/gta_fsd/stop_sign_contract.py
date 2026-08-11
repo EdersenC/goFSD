@@ -16,7 +16,9 @@ STOP_SIGN_PHASES = (
     "release",
 )
 STOP_SIGN_PHASE_SET = frozenset(STOP_SIGN_PHASES)
-RELEASE_POLICY_NAME = "scripted_dwell_release_v0"
+STOP_SIGN_CLIP_STAGES = ("approach", "brake_stop", "release")
+STOP_SIGN_CLIP_STAGE_SET = frozenset(STOP_SIGN_CLIP_STAGES)
+RELEASE_POLICY_NAME = "scripted_stage_release_v1"
 
 
 def normalize_stop_sign_phase(value: Any) -> str:
@@ -27,6 +29,16 @@ def normalize_stop_sign_phase(value: Any) -> str:
             f"{list(STOP_SIGN_PHASES)}, got {phase or '<missing>'}"
         )
     return phase
+
+
+def normalize_stop_sign_clip_stage(value: Any) -> str:
+    stage = str(value).strip().lower()
+    if stage not in STOP_SIGN_CLIP_STAGE_SET:
+        raise ValueError(
+            "stopSignGoal.clipStage must be one of "
+            f"{list(STOP_SIGN_CLIP_STAGES)}, got {stage or '<missing>'}"
+        )
+    return stage
 
 
 def stop_sign_phase_from_telemetry(telemetry: Mapping[str, Any]) -> str:
@@ -48,6 +60,9 @@ def stop_location_key_from_metadata(metadata: Mapping[str, Any]) -> str:
     goal = metadata.get("stopSignGoal")
     if not isinstance(goal, Mapping):
         raise ValueError("stop-sign metadata must include stopSignGoal")
+    catalog_id = goal.get("catalogId")
+    if isinstance(catalog_id, str) and catalog_id.strip():
+        return f"catalog:{catalog_id.strip().lower()}"
     sign_pose = goal.get("signPose")
     if not isinstance(sign_pose, Mapping):
         raise ValueError("stopSignGoal.signPose must be a mapping")
@@ -91,7 +106,7 @@ class StopSignMotionPlan:
         if any(not math.isfinite(intent) or not 0.0 <= intent <= 1.0 for intent in self.stop_intent):
             raise ValueError("motion-plan stop_intent values must be within [0, 1]")
         if self.release_policy != RELEASE_POLICY_NAME:
-            raise ValueError(f"V0 release_policy must be {RELEASE_POLICY_NAME}")
+            raise ValueError(f"release_policy must be {RELEASE_POLICY_NAME}")
 
 
 @dataclass(frozen=True)
@@ -114,8 +129,8 @@ def deterministic_longitudinal_command(
 ) -> LongitudinalCommand:
     """Translate the nearest learned setpoint into exclusive throttle or brake.
 
-    V0 never learns the dwell-release decision. The runtime owns the five-second
-    dwell state machine and only calls this translator after scripted release.
+    V1 keeps release as a separate scripted stage. The runtime starts that clip
+    from the captured Stop pose; this translator does not claim to learn the transition.
     """
     current_speed = _finite_number(current_speed_mps, "current_speed_mps")
     if current_speed < 0.0:
@@ -137,7 +152,7 @@ def release_policy_metadata() -> dict[str, Any]:
         "name": RELEASE_POLICY_NAME,
         "version": 0,
         "learned": False,
-        "description": "release occurs only after the runtime completes the configured dwell",
+        "description": "release is collected and executed as a separate scripted stage clip",
     }
 
 

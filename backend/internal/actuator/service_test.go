@@ -439,7 +439,7 @@ speed_kp = 0.5
 plan_timeout = '350ms'
 telemetry_timeout = '200ms'
 estimated_actuation_latency = '40ms'
-expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
+expected_horizon_dt_ms = [100, 250, 500, 1000]
 `)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -771,7 +771,7 @@ func armStopSignInference(t *testing.T, svc *Service) {
 }
 
 func testStopSignPlan(sampledAt time.Time) stopsigncontrol.Plan {
-	dtMs := []int{250, 500, 1000, 2000, 3000, 5000}
+	dtMs := []int{100, 250, 500, 1000}
 	points := make([]stopsigncontrol.Setpoint, len(dtMs))
 	for index, offset := range dtMs {
 		points[index] = stopsigncontrol.Setpoint{

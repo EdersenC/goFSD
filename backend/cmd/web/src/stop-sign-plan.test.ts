@@ -1,65 +1,45 @@
 import {
-    createStopSignEntry,
+    captureScenePose,
     createStopSignPlan,
-    createProofVariations,
-    distanceBetweenPoses,
+    currentSceneStep,
     parseStoredStopSignPlan,
-    stopSignPlanStats,
+    planForScene,
     stageStopSignCatalogLocation,
+    stopSignPlanStats,
     validateStopSignPlan,
 } from "./stop-sign-plan";
 
-const plan = createStopSignPlan();
-assert(/sign pose/i.test(validateStopSignPlan(plan).join(" ")), "a placeholder pose must block collection");
-const stagedPlaceholder = stageStopSignCatalogLocation(plan, "gta-v-sign-0001");
-assertEqual(stagedPlaceholder.entries[0]?.id, "gta-v-sign-0001");
-assertEqual(stagedPlaceholder.entries[0]?.signPose.x, 0, "catalog staging must not copy a roadside prop pose");
-assertEqual(plan.entries[0]?.id, "sign-01", "catalog staging must not mutate the current plan");
-plan.entries[0]!.signPose = {x: 120, y: -40, z: 30, heading: 90};
-plan.entries[0]!.variations.push({id: "rain", weather: "RAIN", targetSpeedMps: 6, attemptCount: 4});
+const location = {id: "gta-v-sign-0023", x: -1830.7697, y: 3206.3914, z: 31.846758};
+const staged = stageStopSignCatalogLocation(createStopSignPlan(), location);
+assertEqual(staged.entryIndex, 0);
+assertEqual(staged.plan.entries[0]?.catalogId, location.id);
+assertEqual(staged.plan.entries[0]?.autoVariations?.count, 50);
+assertEqual(currentSceneStep(staged.plan.entries[0]), 0);
 
-assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 2, jobCount: 2, attemptCount: 7}));
-assertEqual(JSON.stringify(validateStopSignPlan(plan)), "[]");
+let plan = captureScenePose(staged.plan, 0, "startPose", {x: 0, y: -40, z: 30, heading: 0});
+assertEqual(currentSceneStep(plan.entries[0]), 1);
+plan = captureScenePose(plan, 0, "egoStopPose", {x: 0, y: 0, z: 30, heading: 0});
+assertEqual(currentSceneStep(plan.entries[0]), 2);
+plan = captureScenePose(plan, 0, "exitPose", {x: 0, y: 12, z: 30, heading: 0});
+assertEqual(currentSceneStep(plan.entries[0]), 3);
+assertEqual(validateStopSignPlan(plan).length, 0);
+assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 50, jobCount: 50, attemptCount: 50}));
 
-const stagedAdditional = stageStopSignCatalogLocation(plan, "gta-v-sign-0002");
-assertEqual(stagedAdditional.entries.length, 2);
-assertEqual(stagedAdditional.entries[1]?.id, "gta-v-sign-0002");
-assert(/uncalibrated/i.test(validateStopSignPlan(stagedAdditional).join(" ")));
-assertEqual(stageStopSignCatalogLocation(stagedAdditional, "gta-v-sign-0002").entries.length, 2, "restaging must not duplicate a catalog sign");
+const queued = planForScene(plan, 0);
+assertEqual(queued.entries.length, 1);
+assertEqual(queued.entries[0]?.startPose?.y, -40);
+assertEqual(queued.entries[0]?.egoStopPose?.y, 0);
+assertEqual(queued.entries[0]?.exitPose?.y, 12);
+assertEqual(parseStoredStopSignPlan(JSON.stringify(plan))?.entries[0]?.catalogId, location.id);
 
-const parsed = parseStoredStopSignPlan(JSON.stringify(plan));
-assert(parsed, "v2 plan should restore");
-parsed.entries[0]!.signPose.x = 999;
-assertEqual(plan.entries[0]!.signPose.x, 120, "restored plan must not alias input poses");
-assertEqual(parseStoredStopSignPlan('{"version":"legacy"}'), null);
+const backward = captureScenePose(plan, 0, "exitPose", {x: 0, y: -10, z: 30, heading: 0});
+assert(validateStopSignPlan(backward).some((error) => error.includes("End must be")));
+assertEqual(parseStoredStopSignPlan(JSON.stringify({...plan, version: "stop-sign-plan.v2"})), null);
 
-const proofVariations = createProofVariations();
-assertEqual(proofVariations.length, 4);
-assertEqual(proofVariations[0]?.id, "clear-baseline");
-assertEqual(proofVariations[0]?.targetSpeedMps, 5);
-assertEqual(proofVariations[0]?.attemptCount, 3);
-assertEqual(proofVariations[0]?.vehicle?.model, "sultan");
-assert(proofVariations.some((variation) => variation.weather === "RAIN"), "proof set should include one visual-domain variant");
-
-const invalid = createStopSignPlan();
-invalid.entries = [createStopSignEntry(1), createStopSignEntry(1)];
-invalid.entries[0]!.startDistanceM = 1;
-invalid.entries[0]!.exitDistanceM = 1;
-const errors = validateStopSignPlan(invalid).join(" ");
-assert(/duplicated/i.test(errors));
-assert(/start distance must be from/i.test(errors));
-assert(/exit distance must be from/i.test(errors));
-assertEqual(distanceBetweenPoses(
-    {x: 0, y: 0, z: 0, heading: 0},
-    {x: 3, y: 4, z: 0, heading: 90},
-), 5);
-
-console.log("stop-sign plan tests passed");
+console.log("stop-sign scene plan tests passed");
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
-    if (!condition) {
-        throw new Error(message);
-    }
+    if (!condition) throw new Error(message);
 }
 
 function assertEqual(actual: unknown, expected: unknown, message = `expected ${String(expected)}, got ${String(actual)}`) {

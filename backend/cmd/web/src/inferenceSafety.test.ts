@@ -1,6 +1,6 @@
 import type {ControlState, InferenceStatus} from "./types";
 import {queueStopSignPlan, sendControlCommand} from "./api";
-import {createStopSignPlan} from "./stop-sign-plan";
+import {createStopSignPlan, stageStopSignCatalogLocation} from "./stop-sign-plan";
 import {inferenceStateConfirmsHold} from "./workspace/inferenceSafety";
 import {
     controlConsumerConfirmsHold,
@@ -137,9 +137,8 @@ await test("UI control and stop-sign batch requests carry their captured safety 
     try {
         const controller = new AbortController();
         await sendControlCommand("startEgo", {safetyEpoch: 23}, controller.signal);
-        const plan = createStopSignPlan();
+        const plan = stageStopSignCatalogLocation(createStopSignPlan(), {id: "sign", x: 1, y: 2, z: 3}).plan;
         plan.id = "plan";
-        plan.entries[0]!.variations = [{id: "rain", weather: "RAIN"}];
         await queueStopSignPlan(plan, 24, controller.signal);
         assert(signals.every((signal) => signal === controller.signal), "every UI start request must remain abortable by Hold");
     } finally {
@@ -150,8 +149,8 @@ await test("UI control and stop-sign batch requests carry their captured safety 
     assert(bodies[1]?.id === "plan" && bodies[1]?.safetyEpoch === 24, "stop-sign plan starts must carry the captured epoch");
     assert(paths[1] === "/control/stop-sign-batches", "stop-sign plans must use the canonical batch endpoint");
     assert(!("version" in bodies[1]!), "browser-only storage version must not leak into the strict backend contract");
-    const entries = bodies[1]?.entries as Array<{variations?: Array<{id?: string}>}>;
-    assert(entries[0]?.variations?.[0]?.id === "rain", "variation overrides must retain the backend's canonical variations field");
+    const entries = bodies[1]?.entries as Array<{autoVariations?: {count?: number}}>;
+    assert(entries[0]?.autoVariations?.count === 50, "seeded auto-variation settings must reach the backend contract");
 });
 
 await test("Hold settlement accepts only inactive idle or succeeded inference", () => {

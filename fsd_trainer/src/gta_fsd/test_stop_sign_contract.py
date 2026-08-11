@@ -4,10 +4,12 @@ import unittest
 
 from stop_sign_contract import (
     RELEASE_POLICY_NAME,
+    STOP_SIGN_CLIP_STAGES,
     STOP_SIGN_PHASES,
     StopSignMotionPlan,
     deterministic_longitudinal_command,
     inverse_frequency_phase_weights,
+    normalize_stop_sign_clip_stage,
     normalize_stop_sign_phase,
     require_disjoint_stop_locations,
     stop_location_key_from_metadata,
@@ -15,6 +17,13 @@ from stop_sign_contract import (
 
 
 class StopSignTemporalContractTests(unittest.TestCase):
+    def test_clip_stage_contract_is_closed_and_explicit(self) -> None:
+        self.assertEqual(STOP_SIGN_CLIP_STAGES, ("approach", "brake_stop", "release"))
+        for stage in STOP_SIGN_CLIP_STAGES:
+            self.assertEqual(normalize_stop_sign_clip_stage(stage), stage)
+        with self.assertRaisesRegex(ValueError, "clipStage"):
+            normalize_stop_sign_clip_stage("approach_and_stop")
+
     def test_fine_phase_contract_is_closed_and_explicit(self) -> None:
         self.assertEqual(
             STOP_SIGN_PHASES,
@@ -49,7 +58,8 @@ class StopSignTemporalContractTests(unittest.TestCase):
             require_disjoint_stop_locations((first,), (second,))
 
     def test_deterministic_handoff_never_applies_throttle_and_brake_together(self) -> None:
-        accelerate = StopSignMotionPlan((250, 500), (4.0, 3.5), (0.0, 0.0))
+        self.assertEqual(RELEASE_POLICY_NAME, "scripted_stage_release_v1")
+        accelerate = StopSignMotionPlan((100, 250), (4.0, 3.5), (0.0, 0.0))
         accelerate_command = deterministic_longitudinal_command(accelerate, current_speed_mps=1.0)
         self.assertGreater(accelerate_command.throttle, 0.0)
         self.assertEqual(accelerate_command.brake, 0.0)
@@ -58,15 +68,15 @@ class StopSignTemporalContractTests(unittest.TestCase):
         self.assertEqual(brake_command.throttle, 0.0)
         self.assertGreater(brake_command.brake, 0.0)
 
-        stop = StopSignMotionPlan((250, 500), (0.0, 0.0), (0.9, 1.0))
+        stop = StopSignMotionPlan((100, 250), (0.0, 0.0), (0.9, 1.0))
         stop_command = deterministic_longitudinal_command(stop, current_speed_mps=0.05)
         self.assertTrue(stop_command.hold_stop)
         self.assertEqual(stop_command.release_policy, RELEASE_POLICY_NAME)
         self.assertEqual((stop_command.throttle, stop_command.brake), (0.0, 1.0))
 
     def test_v0_rejects_a_learned_release_policy(self) -> None:
-        with self.assertRaisesRegex(ValueError, "V0 release_policy"):
-            StopSignMotionPlan((250,), (0.0,), (1.0,), release_policy="learned_release")
+        with self.assertRaisesRegex(ValueError, "release_policy must be"):
+            StopSignMotionPlan((100,), (0.0,), (1.0,), release_policy="learned_release")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ const (
 	defaultWindowSize               = 3
 	defaultFrameStride              = 2
 	defaultSampleStride             = 2
-	defaultFutureTelemetryCount     = 6
+	defaultFutureTelemetryCount     = 4
 	defaultTelemetrySampleInterval  = 50 * time.Millisecond
 	defaultLabelTolerance           = 100 * time.Millisecond
 	defaultFlashBrightnessThreshold = 245.0
@@ -88,6 +88,7 @@ type DatasetSample struct {
 	ScenarioLocationID      string                 `json:"scenario_location_id,omitempty"`
 	ScenarioSplitGroup      string                 `json:"scenario_split_group,omitempty"`
 	VariationID             string                 `json:"variation_id,omitempty"`
+	ClipStage               string                 `json:"clip_stage,omitempty"`
 	TrainingEligible        *bool                  `json:"training_eligible,omitempty"`
 	TrainingExclusionReason string                 `json:"training_exclusion_reason,omitempty"`
 	StopSignGoal            map[string]any         `json:"stopSignGoal,omitempty"`

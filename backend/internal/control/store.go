@@ -132,8 +132,8 @@ type StopSignAttemptOutcome struct {
 	FailureReason              string   `json:"failureReason"`
 	DurationMS                 int64    `json:"durationMs"`
 	StoppedAtDistanceM         *float64 `json:"stoppedAtDistanceM"`
-	DwellDurationMS            int64    `json:"dwellDurationMs"`
-	CrossedStopLineBeforeDwell bool     `json:"crossedStopLineBeforeDwell"`
+	StopConfirmationDurationMS int64    `json:"stopConfirmationDurationMs"`
+	CrossedStopLineBeforeStop  bool     `json:"crossedStopLineBeforeStop"`
 }
 
 type TelemetryUpdate struct {
@@ -184,8 +184,8 @@ type TelemetryUpdate struct {
 	StopSignLongitudinalErrorM    float64       `json:"stopSignLongitudinalErrorM"`
 	StopSignLateralErrorM         float64       `json:"stopSignLateralErrorM"`
 	StopSignHeadingErrorDeg       float64       `json:"stopSignHeadingErrorDeg"`
-	StopSignDwellElapsedMS        int64         `json:"stopSignDwellElapsedMs"`
-	StopSignDwellTargetMS         int64         `json:"stopSignDwellTargetMs"`
+	StopSignConfirmationElapsedMS int64         `json:"stopSignConfirmationElapsedMs"`
+	StopSignConfirmationTargetMS  int64         `json:"stopSignConfirmationTargetMs"`
 	StopSignStopped               bool          `json:"stopSignStopped"`
 	StopSignAttemptIndex          int           `json:"stopSignAttemptIndex"`
 	StopSignAttemptCount          int           `json:"stopSignAttemptCount"`
@@ -242,8 +242,8 @@ type RuntimeTelemetry struct {
 	StopSignLongitudinalErrorM    float64       `json:"stopSignLongitudinalErrorM"`
 	StopSignLateralErrorM         float64       `json:"stopSignLateralErrorM"`
 	StopSignHeadingErrorDeg       float64       `json:"stopSignHeadingErrorDeg"`
-	StopSignDwellElapsedMS        int64         `json:"stopSignDwellElapsedMs"`
-	StopSignDwellTargetMS         int64         `json:"stopSignDwellTargetMs"`
+	StopSignConfirmationElapsedMS int64         `json:"stopSignConfirmationElapsedMs"`
+	StopSignConfirmationTargetMS  int64         `json:"stopSignConfirmationTargetMs"`
 	StopSignStopped               bool          `json:"stopSignStopped"`
 	StopSignAttemptIndex          int           `json:"stopSignAttemptIndex"`
 	StopSignAttemptCount          int           `json:"stopSignAttemptCount"`
@@ -623,8 +623,8 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		StopSignLongitudinalErrorM:    update.StopSignLongitudinalErrorM,
 		StopSignLateralErrorM:         update.StopSignLateralErrorM,
 		StopSignHeadingErrorDeg:       update.StopSignHeadingErrorDeg,
-		StopSignDwellElapsedMS:        max(int64(0), update.StopSignDwellElapsedMS),
-		StopSignDwellTargetMS:         max(int64(0), update.StopSignDwellTargetMS),
+		StopSignConfirmationElapsedMS: max(int64(0), update.StopSignConfirmationElapsedMS),
+		StopSignConfirmationTargetMS:  max(int64(0), update.StopSignConfirmationTargetMS),
 		StopSignStopped:               update.StopSignStopped,
 		StopSignAttemptIndex:          max(0, update.StopSignAttemptIndex),
 		StopSignAttemptCount:          max(0, update.StopSignAttemptCount),
@@ -917,7 +917,7 @@ func normalizedStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBat
 		outcome.Status = strings.TrimSpace(outcome.Status)
 		outcome.FailureReason = strings.TrimSpace(outcome.FailureReason)
 		outcome.DurationMS = max(int64(0), outcome.DurationMS)
-		outcome.DwellDurationMS = max(int64(0), outcome.DwellDurationMS)
+		outcome.StopConfirmationDurationMS = max(int64(0), outcome.StopConfirmationDurationMS)
 		outcome.StoppedAtDistanceM = cloneFloatPtr(outcome.StoppedAtDistanceM)
 		progress.LastAttemptOutcome = &outcome
 	}
@@ -1012,8 +1012,8 @@ func validateCommand(
 		if !isSHA256Fingerprint(planFingerprint) {
 			return fmt.Errorf("%w: planFingerprint must be a sha256 fingerprint for %s", ErrInvalidCommand, commandType)
 		}
-		if len(stopSignJobs) == 0 || len(stopSignJobs) > 100 {
-			return fmt.Errorf("%w: stopSignJobs must contain between 1 and 100 items for %s", ErrInvalidCommand, commandType)
+		if len(stopSignJobs) == 0 || len(stopSignJobs) > stopsignbatch.MaximumExpandedJobs {
+			return fmt.Errorf("%w: stopSignJobs must contain between 1 and %d items for %s", ErrInvalidCommand, stopsignbatch.MaximumExpandedJobs, commandType)
 		}
 		jobIDs := make(map[string]struct{}, len(stopSignJobs))
 		for index, job := range stopSignJobs {
@@ -1097,6 +1097,10 @@ func cloneStopSignBatchJobs(source []StopSignBatchJob) []StopSignBatchJob {
 	}
 	clone := append([]StopSignBatchJob(nil), source...)
 	for index := range clone {
+		if source[index].CatalogPosition != nil {
+			position := *source[index].CatalogPosition
+			clone[index].CatalogPosition = &position
+		}
 		if source[index].Vehicle.Color != nil {
 			color := *source[index].Vehicle.Color
 			clone[index].Vehicle.Color = &color

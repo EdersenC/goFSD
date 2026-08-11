@@ -227,7 +227,7 @@ def validate_checkpoint_control_contract(checkpoint: Mapping[str, Any]) -> tuple
         or release_policy.get("learned") is not False
     ):
         raise ValueError(
-            f"V0 release_policy must be non-learned {RELEASE_POLICY_NAME}"
+            f"release_policy must be non-learned {RELEASE_POLICY_NAME}"
         )
 
     return resolve_checkpoint_control_horizon_dt_ms(checkpoint)

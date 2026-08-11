@@ -1,13 +1,14 @@
 # GTA Stop Sign Lab
 
-This repository is a temporal-driving lab for one focused V0 behavior: launch from rest, approach a stop sign, brake to the correct stopping point, hold for about five seconds, and leave under a scripted release policy.
+This repository is a temporal-driving lab for one focused V0 behavior: approach a stop sign, brake to an exact stop, then continue through the intersection. Each scene is collected as three short, independent temporal clips instead of one long recording.
 
-The four operator milestones are:
+The three clip stages are:
 
-1. **Launch** — apply throttle and establish forward motion.
-2. **Approach + Brake** — cruise toward the sign, then decelerate without crossing the stop line.
-3. **Stop + Dwell** — stop at the derived ego pose and remain stopped for the configured dwell, normally `5000 ms`.
-4. **Go** — V0 releases with `scripted_dwell_release_v0`. The model does not decide when the dwell is finished yet.
+1. **Approach** — launch and establish the approach before braking begins.
+2. **Brake + Stop** — slow down and end immediately after a brief zero-speed confirmation.
+3. **Release** — begin at the captured Stop pose and drive to the captured End pose.
+
+Every stage has its own synchronization flash and capture lifecycle. Temporal windows and future labels stay inside that stage, so training never crosses an Approach → Brake or Brake → Release boundary. There is no long dwell recording or dwell control in the collection UI.
 
 ## Start the lab
 
@@ -51,7 +52,7 @@ The Stop Sign Lab uses one persistent **Collect → Data → Train → Evaluate*
 
 | Area | Purpose |
 |---|---|
-| **Collect** | Search the 463-prop GTA catalog, navigate to signs, register calibrated lane poses, queue ordered attempts, and watch live telemetry. |
+| **Collect** | Search all 463 verified main-map signs, teleport to one, capture Start → Stop → End, and replay the scene through deterministic auto-variants. |
 | **Data** | Process completed trips, inspect readiness and phase coverage, and keep failed attempts diagnosable but out of expert training by default. |
 | **Train** | Train from independent stop-sign locations, with phase-balanced sampling and a fixed temporal output contract. |
 | **Evaluate** | Load a compatible checkpoint, pass the guarded safety preflight, and compare predicted speed/stop intent with the closed-loop result. |
@@ -60,39 +61,32 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 
 ## First stop-sign collection
 
-1. Search the **Stop-sign catalog**, select a physical prop, choose **Stage in plan**, then **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
-2. Select **Start setup car** and remain in its driver seat.
-3. Place the setup car at the lane reference point with its heading aligned to the vehicle's intended travel direction. The catalog prop position and quaternion are navigation references, not a training pose.
-4. Select **Calibrate current sign**, then copy the accepted live pose into the desired plan entry with **Use live pose**.
-5. Set the stop-line distance, ego-center offset, approach distance, exit distance, target speed, dwell, attempts, and base environment.
-6. Select **Load proof set** for the seeded clear baseline, short/slow, long/brisk, and rainy daytime variants, or add your own. Blank variation fields inherit the entry's base values.
-7. Add more physical stop-sign entries as needed, review the total signs/variations/attempts, then select **Queue collection**.
-8. Watch the fine phase labels: `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`.
-9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
+1. Search the **Stop-sign catalog** and press **Teleport** on any of the 463 signs. Teleport creates or reopens that sign's scene and places the managed setup car on a nearby drivable lane.
+2. Move the car to the exact beginning of the demonstration and press **Capture Start**.
+3. Move it to the exact vehicle-center stopping point and press **Capture Stop**.
+4. Move it beyond the sign to the desired continuation point and press **Capture End**.
+5. Keep the default **50 variants** and **20% motion variance**, or adjust them. Motion variance is capped at `25%`; weather, clock time, and vehicle color vary broadly.
+6. Press **Collect this scene**. Every variant produces separate `approach`, `brake_stop`, and `release` clips.
+7. Choose the next catalog sign and repeat. Saved scenes remain in the browser so the workflow is Teleport → Start → Stop → End → Collect.
+8. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
-The browser keeps the draft plan locally. The backend expands it deterministically in entry order and then variation order. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan JSON, limits, geometry, and collection checklist.
+The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` preserves the captured scene exactly; later variants perturb route distance and speed within the selected bound, apply only centimeter-scale Stop jitter, and sample broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
 
-Catalog staging copies only the stable sign ID. Roadside prop coordinates and quaternions are never copied into the lane target, and an origin-placeholder pose is rejected by the UI, backend, and FiveM until a live pose is applied.
+## Scene geometry contract
 
-## Geometry contract
-
-Every attempt has exactly five distinct poses:
+The operator directly captures the three poses that define behavior:
 
 ```text
-signPose
-   ├─ forward by exitDistanceM ──────> exitPose
-   └─ back by stopDistanceM ──────────> stopLinePose
-          └─ back by egoCenterOffsetM ─> egoStopPose
-                 └─ back by startDistanceM ─> startPose
+Start  ── approach ──> braking boundary ── brake_stop ──> Stop
+                                                               └── release ──> End
 ```
 
-- `signPose` is the registered world reference and travel heading.
-- `stopLinePose` is where the vehicle's front must not cross before completing the stop.
-- `egoStopPose` is the target for the vehicle center, accounting for front overhang and clearance.
-- `startPose` is the deterministic reset pose for the approach.
-- `exitPose` is the exact scripted-release waypoint beyond the sign.
+- `Start` is the exact reset pose for the approach clip.
+- `Stop` is the exact target for the vehicle center at zero speed.
+- `End` is the exact destination for the release clip.
+- The selected catalog prop supplies stable physical-sign identity and navigation coordinates, not a model input.
 
-Derived poses are validated again at the FiveM boundary; clients cannot send contradictory geometry. The workbench defaults are the proven `4.0 m` sign-to-line offset, `2.5 m` line-to-ego-center offset, `35.0 m` approach, `8.0 m` sign-to-exit distance, `5.0 m/s` target speed, and `5000 ms` dwell.
+The UI and backend require Start to be before Stop, End to be beyond Stop, and all three poses to remain compatible with one approach lane. FiveM receives explicit validated poses for every generated variant.
 
 ## Data and model contract
 
@@ -112,14 +106,14 @@ Fresh runs use scene `stop-sign:temporal-v1` and this layout:
     └── frames/
 ```
 
-`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, sign/location identity, resolved variant, seed, attempt index, and synchronized telemetry. `dataset.jsonl` contains causal RGB windows, telemetry history/future, the fine phase, future targets, eligibility, and a location-level split group.
+`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, `clipStage`, catalog/location identity, resolved variant, seed, attempt index, and synchronized telemetry. One variant produces three trip folders—one each for `approach`, `brake_stop`, and `release`. `dataset.jsonl` contains causal RGB windows, telemetry history/future, fine phase, future targets, eligibility, and a location-level split group.
 
 The current model consumes five causal RGB frames plus current-speed history. Stop-sign pose, stop-line distance, ego error, and other oracle geometry are labels/scoring metadata only; they are not perception inputs. The primary outputs are:
 
 - `future_speed_mps`
 - `stop_intent`
 
-They are predicted at fixed horizons of `250, 500, 1000, 2000, 3000, 5000 ms`. A deterministic controller converts the nearest motion target into slew-limited, mutually exclusive throttle or brake, then the virtual controller applies it to GTA. Recorded expert throttle, expert brake, and physical brake pressure are auxiliary diagnostics—not the model-to-game interface.
+They are predicted at short fixed horizons of `100, 250, 500, 1000 ms`. Samples are stage-locked: image history and future targets must be available inside the same clip, and incomplete edge windows are excluded. A deterministic controller converts the nearest motion target into slew-limited, mutually exclusive throttle or brake, then the virtual controller applies it to GTA. Recorded expert throttle, expert brake, and physical brake pressure are auxiliary diagnostics—not the model-to-game interface.
 
 See [`docs/stop-sign-model-control.md`](docs/stop-sign-model-control.md) for the complete data, training, controller, and safety boundary.
 
@@ -127,7 +121,7 @@ See [`docs/stop-sign-model-control.md`](docs/stop-sign-model-control.md) for the
 
 The checked-in [`fsd_trainer/train_config.toml`](fsd_trainer/train_config.toml) intentionally contains no run IDs or checkpoint. A fresh workspace showing zero runs and zero checkpoints is expected.
 
-Training admits successful, complete `stop-sign-goal.v1` attempts by default, balances the observed anchor phases, and prevents a physical stop-sign location from appearing in both training and validation. The scripted release remains present in future phase/speed labels even when the five-second future horizon leaves no release anchor rows. Collect successful clips at two distinct physical signs before expecting the workbench to report training ready.
+Training admits successful, complete stage clips by default, balances the observed `(clip stage, fine phase)` groups, and prevents a physical stop-sign location from appearing in both training and validation. Failed clips remain inspectable but are excluded from expert training by default. A few clips prove the pipeline, not model readiness; collect many variants across many independent physical signs before training a useful checkpoint.
 
 Before training, run the contract audit. It verifies every referenced RGB image, dense 50 ms telemetry ordering, frame spacing, phase/variant/location labels, horizon target alignment, and stable RGB-to-game-time offset:
 
@@ -149,7 +143,7 @@ Do not process or rebuild paths while a training job is actively reading them. T
 
 | Area | Responsibility |
 |---|---|
-| `fivem/` | Stop-sign calibration, derived geometry, deterministic expert, world/vehicle execution, telemetry, and trip metadata. |
+| `fivem/` | Stop-sign scene replay, three-stage capture, deterministic expert, world/vehicle execution, telemetry, and trip metadata. |
 | `backend/` | Capture and processing, guarded command queue, Stop Sign Lab web UI, training bridge, and deterministic controller safety. |
 | `fsd_trainer/` | Stop-sign dataset loading, phase balancing, temporal planner training, checkpoint contract, and inference serving. |
 | `scripts/` | Setup, diagnostics, launchers, deployment support, and repository validation. |

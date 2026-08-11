@@ -6,6 +6,7 @@ import {
     planStopSignExpert,
 } from "./expert";
 import {parseStopSignJobs} from "./batch";
+import {planStopSignClips} from "./clip-plan";
 import {
     nextFixedIntervalDeadlineMs,
     shouldReportStoppedTooEarly,
@@ -150,7 +151,7 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         startDistanceM,
         exitDistanceM,
         targetSpeedMps: 8,
-        dwellMs: 5000,
+        stopConfirmationMs: 250,
         attemptCount: 2,
         weather: "EXTRASUNNY",
         time: {hour: 12, minute: 0},
@@ -172,6 +173,59 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     );
 }
 
+function testCapturedSceneJobsPreserveExactStartStopEndGeometry() {
+    const parsed = capturedSceneJobFixture();
+    assert.equal(parsed.catalogId, "gta-v-sign-0023");
+    assert.deepEqual(parsed.startPose, {x: 100, y: 180, z: 8, heading: 0});
+    assert.deepEqual(parsed.egoStopPose, {x: 100, y: 200, z: 8, heading: 0});
+    assert.deepEqual(parsed.exitPose, {x: 100, y: 212, z: 8, heading: 0});
+    assert.equal(parsed.stopConfirmationMs, 250);
+}
+
+function testClipPlanKeepsTemporalStagesSeparateAndContiguous() {
+    const job = capturedSceneJobFixture();
+    const clips = planStopSignClips(job, 30);
+
+    assert.deepEqual(clips.map((clip) => clip.stage), ["approach", "brake_stop", "release"]);
+    assert.deepEqual(clips.map((clip) => clip.tripIndex), [30, 31, 32]);
+    assert.deepEqual(clips[0].toPose, clips[1].fromPose);
+    assert.deepEqual(clips[1].toPose, clips[2].fromPose);
+    assert.equal(clips[0].initialSpeedMps, 0);
+    assert.equal(clips[1].initialSpeedMps, job.targetSpeedMps);
+    assert.equal(clips[2].initialSpeedMps, 0);
+}
+
+function capturedSceneJobFixture() {
+    const egoStopPose = {x: 100, y: 200, z: 8, heading: 0};
+    const stopLinePose = {x: 100, y: 202.5, z: 8, heading: 0};
+    const signPose = {x: 100, y: 206.5, z: 8, heading: 0};
+    const startPose = {x: 100, y: 180, z: 8, heading: 0};
+    const exitPose = {x: 100, y: 212, z: 8, heading: 0};
+    return parseStopSignJobs([{
+        id: "catalog-23:auto-001",
+        entryId: "catalog-23",
+        variationId: "auto-001",
+        catalogId: "gta-v-sign-0023",
+        catalogPosition: {x: 100, y: 206.5, z: 8},
+        signPose,
+        stopLinePose,
+        egoStopPose,
+        startPose,
+        exitPose,
+        stopDistanceM: 4,
+        egoCenterOffsetM: 2.5,
+        startDistanceM: 20,
+        exitDistanceM: 12,
+        targetSpeedMps: 5,
+        stopConfirmationMs: 250,
+        attemptCount: 1,
+        weather: "EXTRASUNNY",
+        time: {hour: 12, minute: 0},
+        vehicle: {model: "sultan"},
+        seed: "fresh:catalog-23:auto-001",
+    }])[0]!;
+}
+
 testGeometryUsesGtaHeadingConvention();
 testPhaseClassificationIsTemporalButNotSequenceDependent();
 testApproachTransitionsFromThrottleToBrake();
@@ -180,4 +234,6 @@ testEarlyStopScoringWaitsForActualDeparture();
 testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
 testAttemptPreflightRejectsUnsafeStarts();
 testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
+testCapturedSceneJobsPreserveExactStartStopEndGeometry();
+testClipPlanKeepsTemporalStagesSeparateAndContiguous();
 console.log("stop-sign expert tests passed");

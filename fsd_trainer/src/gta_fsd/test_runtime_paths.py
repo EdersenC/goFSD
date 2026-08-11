@@ -70,7 +70,7 @@ class RuntimePathTests(unittest.TestCase):
 
         self.assertFalse(config.dataset.include_failed_or_non_stop_sign_trips)
         self.assertEqual(config.dataset.telemetry_sample_interval_ms, 50)
-        self.assertEqual(config.dataset.future_offsets, (5, 10, 20, 40, 60, 100))
+        self.assertEqual(config.dataset.future_offsets, (2, 5, 10, 20))
         self.assertEqual(config.dataset.control_target_names, ("future_speed_mps", "stop_intent"))
         self.assertTrue(config.loader.phase_balancing.enabled)
         self.assertEqual(

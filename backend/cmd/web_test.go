@@ -74,7 +74,6 @@ func TestMUIWorkspaceExposesStopSignTemporalWorkbench(t *testing.T) {
 		"Launch",
 		"Approach",
 		"Brake",
-		"Dwell",
 		"Release",
 		"Collect",
 		"Data",
@@ -84,12 +83,11 @@ func TestMUIWorkspaceExposesStopSignTemporalWorkbench(t *testing.T) {
 		"/processing/reconcile",
 		"/training/jobs",
 		"/inference/start",
-		"setStopSignTarget",
-		"setStopSignCatalogWaypoint",
+		"probeStopSignTarget",
 		"/stop-sign-locations.csv",
-		"stop-sign-plan.v2",
+		"stop-sign-plan.v4",
 		`Model \u2192 controller \u2192 game`,
-		"scripted after the configured dwell",
+		"Release is a separate scripted stage clip",
 	} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("MUI stop-sign workspace is missing %q", marker)

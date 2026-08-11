@@ -42,7 +42,7 @@ func TestStopSignBatchHandlerQueuesOneDeterministicCommand(t *testing.T) {
 		t.Fatalf("unexpected deterministic jobs: %+v", body.Command.StopSignJobs)
 	}
 	job := body.Command.StopSignJobs[1]
-	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.ExitPose.X != 92 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.ExitDistanceM != 8 || job.TargetSpeedMPS != 7.5 || job.DwellMS != 6000 || job.AttemptCount != 4 {
+	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.ExitPose.X != 92 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.ExitDistanceM != 8 || job.TargetSpeedMPS != 7.5 || job.StopConfirmationMS != 500 || job.AttemptCount != 4 {
 		t.Fatalf("unexpected derived/varied job: %+v", job)
 	}
 	if job.Weather != "RAIN" || job.Time.Hour != 17 || job.Vehicle.Model != "sultan" || job.Vehicle.Color == nil || job.Vehicle.Color.B != 255 {
@@ -117,14 +117,14 @@ func validStopSignBatchPayload(safetyEpoch uint64) []byte {
 			"stopDistanceM":4,
 			"startDistanceM":40,
 			"targetSpeedMps":8,
-			"dwellMs":5000,
+			"stopConfirmationMs":250,
 			"attemptCount":4,
 			"weather":"EXTRASUNNY",
 			"time":{"hour":12,"minute":0},
 			"vehicle":{"model":"sultan","color":{"r":255,"g":255,"b":255}},
 			"variations":[
 				{"id":"base"},
-				{"id":"rain-blue","egoCenterOffsetM":3,"startDistanceM":60,"targetSpeedMps":7.5,"dwellMs":6000,"weather":"RAIN","time":{"hour":17,"minute":30},"vehicle":{"color":{"r":20,"g":40,"b":255}}}
+				{"id":"rain-blue","egoCenterOffsetM":3,"startDistanceM":60,"targetSpeedMps":7.5,"stopConfirmationMs":500,"weather":"RAIN","time":{"hour":17,"minute":30},"vehicle":{"color":{"r":20,"g":40,"b":255}}}
 			]
 		}]
 	}`, safetyEpoch))

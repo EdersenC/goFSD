@@ -280,7 +280,7 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	if len(future) != defaultFutureTelemetryCount {
 		t.Fatalf("unexpected telemetry future length: got=%d", len(future))
 	}
-	if future[0]["time"] != 500.0 || future[len(future)-1]["time"] != 1000.0 {
+	if future[0]["time"] != 500.0 || future[len(future)-1]["time"] != 800.0 {
 		t.Fatalf("unexpected telemetry future window: %+v", future)
 	}
 	if future[0]["acceleration"] != 0.25 {
@@ -311,7 +311,7 @@ func TestBuildTelemetryFutureUsesTimestampSlotsInsteadOfAdjacentRows(t *testing.
 		t.Fatal("expected a complete timestamp-aligned future horizon")
 	}
 	got := sampleTelemetryWindow(t, future, "telemetry_future")
-	wantTimes := []float64{449, 503, 548, 601, 652, 698}
+	wantTimes := []float64{449, 503, 548, 601}
 	for index, want := range wantTimes {
 		if got[index]["time"] != want {
 			t.Fatalf("unexpected horizon slot %d: got=%v want_time=%v", index, got[index], want)
@@ -1384,7 +1384,7 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 		t.Fatalf("read dataset.jsonl: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	if len(lines) != 3 {
+	if len(lines) != 4 {
 		t.Fatalf("unexpected dataset line count after thinning: got=%d body=%s", len(lines), string(body))
 	}
 
@@ -1401,8 +1401,9 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 		sampleCurrentTelemetryValue(samples[0], "isStopped"),
 		sampleCurrentTelemetryValue(samples[1], "isStopped"),
 		sampleCurrentTelemetryValue(samples[2], "isStopped"),
+		sampleCurrentTelemetryValue(samples[3], "isStopped"),
 	}
-	wantStopped := []any{false, true, true}
+	wantStopped := []any{false, true, true, false}
 	if !reflect.DeepEqual(gotStopped, wantStopped) {
 		t.Fatalf("unexpected stopped labels after thinning: got=%v want=%v", gotStopped, wantStopped)
 	}
@@ -1484,7 +1485,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		t.Fatalf("read dataset.jsonl: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	if len(lines) != 1 {
+	if len(lines) != 2 {
 		t.Fatalf("unexpected dataset line count: got=%d body=%s", len(lines), string(body))
 	}
 	var sample DatasetSample
@@ -1517,7 +1518,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		t.Fatalf("expected serialized telemetry history to keep acceleration in control: %+v", sample.TelemetryHistory[0])
 	}
 	if len(sample.TelemetryFuture) != defaultFutureTelemetryCount {
-		t.Fatalf("expected telemetry_future to be serialized with 6 entries: %+v", sample)
+		t.Fatalf("expected telemetry_future to be serialized with 4 entries: %+v", sample)
 	}
 	if sample.TelemetryFuture[0].Control.Acceleration != 0.25 {
 		t.Fatalf("expected serialized telemetry future to keep acceleration in control: %+v", sample.TelemetryFuture[0])

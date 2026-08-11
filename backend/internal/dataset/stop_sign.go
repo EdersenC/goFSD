@@ -18,6 +18,12 @@ var stopSignPhases = map[string]struct{}{
 	"release":         {},
 }
 
+var stopSignClipStages = map[string]struct{}{
+	"approach":   {},
+	"brake_stop": {},
+	"release":    {},
+}
+
 func isStopSignTimeline(labels []timedLabel) bool {
 	for _, label := range labels {
 		if _, ok := stopSignPhase(label.Label["stopSignPhase"]); ok {
@@ -215,6 +221,7 @@ func decorateStopSignSamples(samples []DatasetSample, metadata tripMetadata) []D
 	eligible, exclusionReason := stopSignTrainingEligibility(metadata.StopSignGoal, metadata.StopSignOutcome)
 	locationID := stopSignLocationID(metadata.StopSignGoal)
 	variationID, _ := nonEmptyString(metadata.StopSignGoal["variationId"])
+	clipStage, _ := nonEmptyString(metadata.StopSignGoal["clipStage"])
 
 	for index := range samples {
 		value := eligible
@@ -222,6 +229,7 @@ func decorateStopSignSamples(samples []DatasetSample, metadata tripMetadata) []D
 		samples[index].ScenarioLocationID = locationID
 		samples[index].ScenarioSplitGroup = locationID
 		samples[index].VariationID = variationID
+		samples[index].ClipStage = clipStage
 		samples[index].TrainingEligible = &value
 		samples[index].TrainingExclusionReason = exclusionReason
 		samples[index].StopSignGoal = cloneMap(metadata.StopSignGoal)
@@ -236,7 +244,10 @@ func stopSignTrainingEligibility(goal map[string]any, outcome map[string]any) (b
 	}
 	task, taskOK := nonEmptyString(goal["task"])
 	contract, contractOK := nonEmptyString(goal["contract"])
-	if !taskOK || !strings.EqualFold(task, stopSignTask) || !contractOK || contract != "stop-sign-goal.v1" || stopSignLocationID(goal) == "" {
+	clipStage, clipStageOK := nonEmptyString(goal["clipStage"])
+	_, supportedClipStage := stopSignClipStages[clipStage]
+	if !taskOK || !strings.EqualFold(task, stopSignTask) || !contractOK || contract != "stop-sign-goal.v2" ||
+		!clipStageOK || !supportedClipStage || stopSignLocationID(goal) == "" || !completeStopSignScene(goal) {
 		return false, "invalid_stop_sign_goal"
 	}
 	if len(outcome) == 0 {
@@ -253,7 +264,25 @@ func stopSignTrainingEligibility(goal map[string]any, outcome map[string]any) (b
 	return true, ""
 }
 
+func completeStopSignScene(goal map[string]any) bool {
+	for _, key := range []string{"signPose", "stopLinePose", "egoStopPose", "startPose", "exitPose"} {
+		pose, ok := goal[key].(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, field := range []string{"x", "y", "z", "heading"} {
+			if _, ok := finiteNumber(pose[field]); !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func stopSignLocationID(goal map[string]any) string {
+	if catalogID, ok := nonEmptyString(goal["catalogId"]); ok {
+		return "catalog:" + strings.ToLower(catalogID)
+	}
 	pose, ok := goal["signPose"].(map[string]any)
 	if !ok {
 		return ""

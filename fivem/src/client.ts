@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-stop-sign-probe-v6";
+const CLIENT_BUILD_ID = "2026-08-11-stop-sign-stage-clips-v7";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -147,8 +147,8 @@ type ControlTelemetryUpdate = {
     stopSignLateralErrorM: number
     stopSignHeadingErrorDeg: number
     stopSignPhase: string
-    stopSignDwellElapsedMs: number
-    stopSignDwellTargetMs: number
+    stopSignConfirmationElapsedMs: number
+    stopSignConfirmationTargetMs: number
     stopSignStopped: boolean
     stopSignAttemptIndex: number
     stopSignAttemptCount: number
@@ -578,8 +578,8 @@ setTick(() => {
         stopSignLateralErrorM: telemetry.stopSignLateralErrorM,
         stopSignHeadingErrorDeg: telemetry.stopSignHeadingErrorDeg,
         stopSignPhase: telemetry.stopSignPhase,
-        stopSignDwellElapsedMs: telemetry.stopSignDwellElapsedMs,
-        stopSignDwellTargetMs: telemetry.stopSignDwellTargetMs,
+        stopSignConfirmationElapsedMs: telemetry.stopSignConfirmationElapsedMs,
+        stopSignConfirmationTargetMs: telemetry.stopSignConfirmationTargetMs,
         stopSignStopped: telemetry.stopSignStopped,
         stopSignAttemptIndex: telemetry.stopSignAttemptIndex,
         stopSignAttemptCount: telemetry.stopSignAttemptCount,

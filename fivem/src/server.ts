@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-stop-sign-probe-v6";
+const SERVER_BUILD_ID = "2026-08-11-stop-sign-stage-clips-v7";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
@@ -174,8 +174,8 @@ type ControlStatusUpdate = {
             failureReason: string
             durationMs: number
             stoppedAtDistanceM: number | null
-            dwellDurationMs: number
-            crossedStopLineBeforeDwell: boolean
+            stopConfirmationDurationMs: number
+            crossedStopLineBeforeStop: boolean
         }
     }
 }
@@ -237,8 +237,8 @@ type ControlTelemetryUpdate = {
     stopSignLateralErrorM: number
     stopSignHeadingErrorDeg: number
     stopSignPhase: string
-    stopSignDwellElapsedMs: number
-    stopSignDwellTargetMs: number
+    stopSignConfirmationElapsedMs: number
+    stopSignConfirmationTargetMs: number
     stopSignStopped: boolean
     stopSignAttemptIndex: number
     stopSignAttemptCount: number
@@ -586,8 +586,8 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             stopSignLateralErrorM: update?.stopSignLateralErrorM ?? 0,
             stopSignHeadingErrorDeg: update?.stopSignHeadingErrorDeg ?? 0,
             stopSignPhase: update?.stopSignPhase ?? "idle",
-            stopSignDwellElapsedMs: update?.stopSignDwellElapsedMs ?? 0,
-            stopSignDwellTargetMs: update?.stopSignDwellTargetMs ?? 0,
+            stopSignConfirmationElapsedMs: update?.stopSignConfirmationElapsedMs ?? 0,
+            stopSignConfirmationTargetMs: update?.stopSignConfirmationTargetMs ?? 0,
             stopSignStopped: Boolean(update?.stopSignStopped),
             stopSignAttemptIndex: update?.stopSignAttemptIndex ?? 0,
             stopSignAttemptCount: update?.stopSignAttemptCount ?? 0,

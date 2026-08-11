@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import torch
 
-from config import resolve_data_root_child
+from config import DEFAULT_FUTURE_OFFSETS, resolve_data_root_child
 from control_contract import (
     CONTROL_CONTRACT_NAME,
     CONTROL_HORIZON_DIRECTION,
@@ -375,7 +375,7 @@ class ModelRuntime:
             raise ValueError(LEGACY_SCALAR_HEAD_ERROR)
         width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
         state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
-        future_offsets = list(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+        future_offsets = list(checkpoint.get("future_offsets") or DEFAULT_FUTURE_OFFSETS)
         control_horizon_dt_ms = list(resolve_checkpoint_control_horizon_dt_ms(checkpoint))
         control_target_names = resolve_checkpoint_control_target_names(
             checkpoint,

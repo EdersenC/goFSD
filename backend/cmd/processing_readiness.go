@@ -16,26 +16,27 @@ import (
 )
 
 type processingReadinessSummary struct {
-	ConfigFingerprint         string   `json:"configFingerprint"`
-	Scope                     string   `json:"scope"`
-	RunCount                  int      `json:"runCount"`
-	TotalTripCount            int      `json:"totalTripCount"`
-	TotalDatasetCount         int      `json:"totalDatasetCount"`
-	SelectedTripCount         int      `json:"selectedTripCount"`
-	SelectedDatasetCount      int      `json:"selectedDatasetCount"`
-	CurrentTripCount          int      `json:"currentTripCount"`
-	MissingDatasetCount       int      `json:"missingDatasetCount"`
-	UnreadyDatasetCount       int      `json:"unreadyDatasetCount"`
-	ExcludedTripCount         int      `json:"excludedTripCount"`
-	ReadyRunIDs               []string `json:"readyRunIds"`
-	TrainingEligibleTripCount int      `json:"trainingEligibleTripCount"`
-	TrainingSampleCount       int      `json:"trainingSampleCount"`
-	TrainingEligibleRunIDs    []string `json:"trainingEligibleRunIds"`
-	TrainingLocationCount     int      `json:"trainingLocationCount"`
-	SuggestedTrainRunIDs      []string `json:"suggestedTrainRunIds"`
-	SuggestedValRunIDs        []string `json:"suggestedValRunIds"`
-	TrainingEligibilityErrors int      `json:"trainingEligibilityErrorCount"`
-	TrainingReady             bool     `json:"trainingReady"`
+	ConfigFingerprint         string         `json:"configFingerprint"`
+	Scope                     string         `json:"scope"`
+	RunCount                  int            `json:"runCount"`
+	TotalTripCount            int            `json:"totalTripCount"`
+	TotalDatasetCount         int            `json:"totalDatasetCount"`
+	SelectedTripCount         int            `json:"selectedTripCount"`
+	SelectedDatasetCount      int            `json:"selectedDatasetCount"`
+	CurrentTripCount          int            `json:"currentTripCount"`
+	MissingDatasetCount       int            `json:"missingDatasetCount"`
+	UnreadyDatasetCount       int            `json:"unreadyDatasetCount"`
+	ExcludedTripCount         int            `json:"excludedTripCount"`
+	ReadyRunIDs               []string       `json:"readyRunIds"`
+	TrainingEligibleTripCount int            `json:"trainingEligibleTripCount"`
+	TrainingSampleCount       int            `json:"trainingSampleCount"`
+	TrainingEligibleRunIDs    []string       `json:"trainingEligibleRunIds"`
+	TrainingLocationCount     int            `json:"trainingLocationCount"`
+	TrainingClipStageCounts   map[string]int `json:"trainingClipStageCounts"`
+	SuggestedTrainRunIDs      []string       `json:"suggestedTrainRunIds"`
+	SuggestedValRunIDs        []string       `json:"suggestedValRunIds"`
+	TrainingEligibilityErrors int            `json:"trainingEligibilityErrorCount"`
+	TrainingReady             bool           `json:"trainingReady"`
 }
 
 type processingRunReadiness struct {
@@ -44,6 +45,7 @@ type processingRunReadiness struct {
 	eligibleTripCount int
 	eligibilityError  bool
 	locationKeys      map[string]struct{}
+	clipStages        map[string]struct{}
 }
 
 type trainingStopSignMetadata struct {
@@ -52,10 +54,13 @@ type trainingStopSignMetadata struct {
 	StopSignGoal struct {
 		Task         string                `json:"task"`
 		Contract     string                `json:"contract"`
+		ClipStage    string                `json:"clipStage"`
+		CatalogID    string                `json:"catalogId"`
 		SignPose     *trainingStopSignPose `json:"signPose"`
 		StopLinePose *trainingStopSignPose `json:"stopLinePose"`
 		EgoStopPose  *trainingStopSignPose `json:"egoStopPose"`
 		StartPose    *trainingStopSignPose `json:"startPose"`
+		ExitPose     *trainingStopSignPose `json:"exitPose"`
 	} `json:"stopSignGoal"`
 	StopSignOutcome struct {
 		Success bool   `json:"success"`
@@ -108,12 +113,13 @@ func buildProcessingReadinessSummary(
 		return processingReadinessSummary{}, errors.New("processing readiness requires a processor")
 	}
 	summary := processingReadinessSummary{
-		ConfigFingerprint:      processor.ConfigFingerprint(),
-		Scope:                  "all",
-		ReadyRunIDs:            make([]string, 0),
-		TrainingEligibleRunIDs: make([]string, 0),
-		SuggestedTrainRunIDs:   make([]string, 0),
-		SuggestedValRunIDs:     make([]string, 0),
+		ConfigFingerprint:       processor.ConfigFingerprint(),
+		Scope:                   "all",
+		ReadyRunIDs:             make([]string, 0),
+		TrainingEligibleRunIDs:  make([]string, 0),
+		SuggestedTrainRunIDs:    make([]string, 0),
+		SuggestedValRunIDs:      make([]string, 0),
+		TrainingClipStageCounts: make(map[string]int),
 	}
 	if stopSignOnly {
 		summary.Scope = "stop-sign-temporal-v1"
@@ -162,7 +168,7 @@ func buildProcessingReadinessSummary(
 		}
 		summary.CurrentTripCount++
 		run.currentTripCount++
-		eligible, metadataValid, locationKey := trainingStopSignTripEligible(tripDir)
+		eligible, metadataValid, locationKey, clipStage := trainingStopSignTripEligible(tripDir)
 		if !metadataValid {
 			summary.TrainingEligibilityErrors++
 			run.eligibilityError = true
@@ -182,13 +188,18 @@ func buildProcessingReadinessSummary(
 			run.locationKeys = make(map[string]struct{})
 		}
 		run.locationKeys[locationKey] = struct{}{}
+		if run.clipStages == nil {
+			run.clipStages = make(map[string]struct{})
+		}
+		run.clipStages[clipStage] = struct{}{}
+		summary.TrainingClipStageCounts[clipStage]++
 	}
 	for runID, run := range runReadiness {
 		if run.tripCount == 0 || run.currentTripCount != run.tripCount {
 			continue
 		}
 		summary.ReadyRunIDs = append(summary.ReadyRunIDs, runID)
-		if run.eligibleTripCount > 0 && !run.eligibilityError {
+		if run.eligibleTripCount > 0 && !run.eligibilityError && hasEveryTrainingClipStage(run.clipStages) {
 			summary.TrainingEligibleRunIDs = append(summary.TrainingEligibleRunIDs, runID)
 		}
 	}
@@ -202,32 +213,56 @@ func buildProcessingReadinessSummary(
 	return summary, nil
 }
 
-func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid bool, locationKey string) {
+func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid bool, locationKey, clipStage string) {
 	body, err := os.ReadFile(filepath.Join(tripDir, "metadata.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return false, true, ""
+		return false, true, "", ""
 	}
 	if err != nil {
-		return false, false, ""
+		return false, false, "", ""
 	}
 	var metadata trainingStopSignMetadata
 	if err := json.Unmarshal(body, &metadata); err != nil {
-		return false, false, ""
+		return false, false, "", ""
 	}
 	eligible = strings.EqualFold(strings.TrimSpace(metadata.SceneID), "stop-sign") &&
 		strings.EqualFold(strings.TrimSpace(metadata.SceneVariant), "temporal-v1") &&
 		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Task), "stop-sign") &&
-		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Contract), "stop-sign-goal.v1") &&
+		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Contract), "stop-sign-goal.v2") &&
+		validTrainingClipStage(metadata.StopSignGoal.ClipStage) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.SignPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.StopLinePose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.EgoStopPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.StartPose) &&
+		finiteTrainingStopSignPose(metadata.StopSignGoal.ExitPose) &&
 		metadata.StopSignOutcome.Success &&
 		strings.EqualFold(strings.TrimSpace(metadata.StopSignOutcome.Status), "succeeded")
 	if !eligible {
-		return false, true, ""
+		return false, true, "", ""
 	}
-	return true, true, trainingStopSignLocationKey(metadata.StopSignGoal.SignPose)
+	clipStage = strings.TrimSpace(metadata.StopSignGoal.ClipStage)
+	if catalogID := strings.ToLower(strings.TrimSpace(metadata.StopSignGoal.CatalogID)); catalogID != "" {
+		return true, true, "catalog:" + catalogID, clipStage
+	}
+	return true, true, trainingStopSignLocationKey(metadata.StopSignGoal.SignPose), clipStage
+}
+
+func validTrainingClipStage(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "approach", "brake_stop", "release":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasEveryTrainingClipStage(stages map[string]struct{}) bool {
+	for _, stage := range []string{"approach", "brake_stop", "release"} {
+		if _, ok := stages[stage]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func trainingStopSignLocationKey(pose *trainingStopSignPose) string {
@@ -242,7 +277,8 @@ func buildDisjointTrainingSplit(runs map[string]*processingRunReadiness) (trainR
 	eligibleRuns := make(map[string]*processingRunReadiness)
 	locations := make(map[string]struct{})
 	for runID, run := range runs {
-		if run.tripCount == 0 || run.currentTripCount != run.tripCount || run.eligibleTripCount == 0 || run.eligibilityError {
+		if run.tripCount == 0 || run.currentTripCount != run.tripCount || run.eligibleTripCount == 0 || run.eligibilityError ||
+			!hasEveryTrainingClipStage(run.clipStages) {
 			continue
 		}
 		eligibleRuns[runID] = run

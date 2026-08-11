@@ -39,9 +39,12 @@ import {
 } from "./api";
 import {useCollectionData, useControlState, useInferenceWorkspace, useTrainingWorkspace} from "./hooks";
 import {
+    captureScenePose,
     cloneStopSignPlan,
     createStopSignPlan,
     parseStoredStopSignPlan,
+    planForScene,
+    type ScenePoseField,
     STOP_SIGN_PLAN_STORAGE_KEY,
     stageStopSignCatalogLocation,
     stopSignPlanStats,
@@ -52,7 +55,7 @@ import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
 import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
 import type {StopSignCatalogLocation} from "./stop-sign/catalog";
-import type {InferenceModel, InferenceStatus, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
+import type {ControlState, InferenceModel, InferenceStatus, Pose, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
 import {requireCurrentSafetyEpoch, runSafetyStartWithHoldBarrier} from "./workspace/safetyStartBarrier";
 import {ArchitectureOverview} from "./ArchitectureOverview";
 
@@ -63,6 +66,8 @@ export function App() {
         return <ArchitectureOverview />;
     }
     const [plan, setPlan] = useState<StopSignPlan>(loadPlan);
+    const [activeEntryIndex, setActiveEntryIndex] = useState(0);
+    const [teleportingCatalogId, setTeleportingCatalogId] = useState("");
     const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
     const pendingRef = useRef<Set<string>>(new Set());
     const [notice, setNotice] = useState<Notice | null>(null);
@@ -76,8 +81,15 @@ export function App() {
     const collection = useCollectionData(true);
     const training = useTrainingWorkspace(true);
     const inference = useInferenceWorkspace(true);
-    const stats = useMemo(() => stopSignPlanStats(plan), [plan]);
-    const planErrors = useMemo(() => validateStopSignPlan(plan), [plan]);
+    const activeScenePlan = useMemo(() => {
+        try {
+            return planForScene(plan, activeEntryIndex);
+        } catch {
+            return null;
+        }
+    }, [plan, activeEntryIndex]);
+    const stats = useMemo(() => activeScenePlan ? stopSignPlanStats(activeScenePlan) : stopSignPlanStats(createStopSignPlan()), [activeScenePlan]);
+    const planErrors = useMemo(() => activeScenePlan ? validateStopSignPlan(activeScenePlan) : ["Choose a stop sign and capture Start, Stop, and End."], [activeScenePlan]);
     const activeBatch = control.data?.runtime.stopSignBatch;
     const collectionActive = activeBatch?.state === "running" || control.data?.runtime.status === "runningAllScenes";
     const activeTraining = training.state.data?.activeJob;
@@ -186,48 +198,52 @@ export function App() {
         window.setTimeout(() => void control.refresh(), 250);
     });
 
-    const setCatalogWaypoint = (location: StopSignCatalogLocation) => operate("catalog-waypoint", async () => {
+    const teleportToCatalogLocation = (location: StopSignCatalogLocation) => operate("teleport", async () => {
         if (!fivemControlReady) {
             throw new Error("FiveM control is not synchronized. Run restart FSD in the server console.");
         }
-        await sendControlCommand("setStopSignCatalogWaypoint", {
-            stopSignCatalogPosition: {x: location.x, y: location.y, z: location.z},
-        });
-        setNotice({message: `${location.id} waypoint queued. Use /tpwaypoint in FiveM, then calibrate the lane pose.`, severity: "success"});
-    });
-
-    const stageCatalogLocation = (location: StopSignCatalogLocation) => {
-        setPlan(stageStopSignCatalogLocation(plan, location.id));
-        setNotice({
-            message: `${location.id} staged. Its roadside coordinates were not copied; calibrate and apply the live lane pose.`,
-            severity: "info",
-        });
-    };
-
-    const calibrateSign = () => operate("calibrate", async () => {
-        if (!control.data?.telemetry?.isInVehicle) {
-            throw new Error("Enter the setup car before calibrating the sign pose.");
+        if (collectionActive || inference.status.data?.active) {
+            throw new Error("Stop collection or inference before teleporting the setup car.");
         }
-        await sendControlCommand("setStopSignTarget");
-        setNotice({message: "Sign pose calibration queued.", severity: "success"});
-        window.setTimeout(() => void control.refresh(), 250);
-    });
-
-    const clearCalibration = () => operate("calibrate", async () => {
-        await sendControlCommand("clearStopSignTarget");
-        setNotice({message: "Live sign calibration cleared.", severity: "info"});
-        window.setTimeout(() => void control.refresh(), 250);
-    });
-
-    const applyCalibration = (entryIndex: number) => {
-        const signPose = control.data?.telemetry?.stopSignPose;
-        if (!signPose) {
-            setNotice({message: "No accepted sign pose is available.", severity: "warning"});
-            return;
+        setTeleportingCatalogId(location.id);
+        try {
+            let state = await fetchControlState();
+            if (!state.telemetry?.isInVehicle || !state.telemetry.vehicleExists) {
+                await runControlStart((safetyEpoch, signal) => sendControlCommand("startEgo", {safetyEpoch}, signal));
+                state = await waitForSetupCar();
+            }
+            await runControlStart((safetyEpoch, signal) => sendControlCommand("probeStopSignTarget", {
+                safetyEpoch,
+                stopSignProbe: {
+                    catalogId: location.id,
+                    catalogPosition: {x: location.x, y: location.y, z: location.z},
+                    headingOffsetDeg: 0,
+                },
+            }, signal));
+            await waitForCatalogTeleport(location);
+            const staged = stageStopSignCatalogLocation(plan, location);
+            setPlan(staged.plan);
+            setActiveEntryIndex(staged.entryIndex);
+            setNotice({message: `${location.id} ready. Move to the desired starting point and capture Start.`, severity: "success"});
+            await control.refresh();
+        } finally {
+            setTeleportingCatalogId("");
         }
-        const entries = plan.entries.map((entry, index) => index === entryIndex ? {...entry, signPose: {...signPose}} : entry);
+    });
+
+    const capturePoint = (field: ScenePoseField) => operate("capture-point", async () => {
+        const state = await fetchControlState();
+        const pose = capturePoseFromState(state);
+        setPlan((current) => captureScenePose(current, activeEntryIndex, field, pose));
+        const label = field === "startPose" ? "Start" : field === "egoStopPose" ? "Stop" : "End";
+        setNotice({message: `${label} captured at ${pose.x.toFixed(1)}, ${pose.y.toFixed(1)}.`, severity: "success"});
+        await control.refresh();
+    });
+
+    const removeScene = (entryIndex: number) => {
+        const entries = plan.entries.filter((_entry, index) => index !== entryIndex);
         setPlan(cloneStopSignPlan({...plan, entries}));
-        setNotice({message: `${entries[entryIndex]?.id ?? "Sign"} updated from live calibration.`, severity: "success"});
+        setActiveEntryIndex(Math.max(0, Math.min(activeEntryIndex, entries.length - 1)));
     };
 
     const queueCollection = () => operate("queue", async () => {
@@ -243,9 +259,12 @@ export function App() {
         if (inference.status.data?.active || training.state.data?.running) {
             throw new Error("Stop inference or training before collection.");
         }
-        const result = await runControlStart((safetyEpoch, signal) => queueStopSignPlan(plan, safetyEpoch, signal));
+        if (!activeScenePlan) {
+            throw new Error("Choose a saved scene before collecting.");
+        }
+        const result = await runControlStart((safetyEpoch, signal) => queueStopSignPlan(activeScenePlan, safetyEpoch, signal));
         if (result.kind === "started") {
-            setNotice({message: `${result.value.jobCount} jobs queued · ${stats.attemptCount} attempts.`, severity: "success"});
+            setNotice({message: `${result.value.jobCount} variants queued · ${stats.attemptCount * 3} stage clips.`, severity: "success"});
         }
         window.setTimeout(() => void control.refresh(), 250);
     });
@@ -281,7 +300,7 @@ export function App() {
         }
         const spec: TrainingJobSpec = {
             name: trainingName.trim() || `stop-sign-${new Date().toISOString().slice(0, 10)}`,
-            notes: "Stop-sign temporal policy: launch, approach/brake, stop/dwell, go.",
+                notes: "Separate stop-sign clips: approach, brake-to-stop, scripted release.",
             epochs,
             trainRunIds,
             valRunIds,
@@ -348,7 +367,6 @@ export function App() {
         setNotice({message: "Status refreshed.", severity: "info"});
     });
 
-    const calibrationPose = control.data?.telemetry?.stopSignPose;
     const phase = control.data?.telemetry?.stopSignPhase ?? activeBatch?.phase;
     return (
         <Box sx={{minHeight: "100vh", pb: 11, background: "radial-gradient(circle at 72% -10%, rgba(87,217,255,.09), transparent 35%), #080b0e"}}>
@@ -374,18 +392,19 @@ export function App() {
                     <Stack sx={{gap: 2}}>
                         <StopSignCatalog
                             connected={fivemControlReady}
-                            busy={pending.has("catalog-waypoint")}
-                            onSetWaypoint={setCatalogWaypoint}
-                            onStageLocation={stageCatalogLocation}
+                            busyId={teleportingCatalogId}
+                            activeCatalogId={plan.entries[activeEntryIndex]?.catalogId}
+                            onTeleport={teleportToCatalogLocation}
                         />
                         <PlanEditor
                             plan={plan}
+                            activeEntryIndex={activeEntryIndex}
                             onChange={(next) => setPlan(cloneStopSignPlan(next))}
-                            onCalibrate={calibrateSign}
-                            onClearCalibration={clearCalibration}
-                            onApplyCalibration={applyCalibration}
-                            calibrationReady={Boolean(calibrationPose)}
-                            calibrationBusy={pending.has("calibrate")}
+                            onSelectEntry={setActiveEntryIndex}
+                            onCapture={capturePoint}
+                            onRemove={removeScene}
+                            captureReady={Boolean(control.data?.telemetry?.isInVehicle)}
+                            captureBusy={pending.has("capture-point")}
                         />
                     </Stack>
                     <Stack sx={{gap: 2}}>
@@ -394,6 +413,7 @@ export function App() {
                             connected={fivemControlReady}
                             active={collectionActive}
                             valid={planErrors.length === 0}
+                            variantCount={stats.variationCount}
                             batchProgress={batchProgress(activeBatch)}
                             pending={pending}
                             onStartSetup={startSetupCar}
@@ -453,10 +473,11 @@ export function App() {
     );
 }
 
-function CollectionControls({connected, active, valid, batchProgress, pending, onStartSetup, onQueue, onStop}: {
+function CollectionControls({connected, active, valid, variantCount, batchProgress, pending, onStartSetup, onQueue, onStop}: {
     connected: boolean
     active: boolean
     valid: boolean
+    variantCount: number
     batchProgress: number
     pending: ReadonlySet<string>
     onStartSetup: () => void
@@ -469,7 +490,9 @@ function CollectionControls({connected, active, valid, batchProgress, pending, o
                 <Typography id="run-control-title" variant="h2">Run control</Typography>
                 <Stack sx={{gap: 1, mt: 1.5}}>
                     <Button variant="outlined" disabled={!connected || pending.has("setup") || active} onClick={onStartSetup}>Start setup car</Button>
-                    <Button variant="contained" startIcon={<PlayArrowRounded />} disabled={!connected || !valid || active || pending.has("queue")} onClick={onQueue}>Queue collection</Button>
+                    <Button variant="contained" startIcon={<PlayArrowRounded />} disabled={!connected || !valid || active || pending.has("queue")} onClick={onQueue}>
+                        Collect {variantCount} variant{variantCount === 1 ? "" : "s"} · {variantCount * 3} clips
+                    </Button>
                     <Button variant="outlined" color="warning" startIcon={<StopRounded />} disabled={!active || pending.has("end-collection")} onClick={onStop}>End collection</Button>
                 </Stack>
                 <Divider sx={{my: 2}} />
@@ -511,6 +534,9 @@ function DataTrainingPanel({readiness, processingActive, trainingName, epochs, a
                     <DataMetric label="Trips" value={readiness?.trainingEligibleTripCount ?? 0} />
                     <DataMetric label="Samples" value={readiness?.trainingSampleCount ?? 0} />
                 </Box>
+                <Typography variant="caption" color="text.secondary" sx={{display: "block", mb: 1.5}}>
+                    Stage clips · approach {readiness?.trainingClipStageCounts?.approach ?? 0} · brake_stop {readiness?.trainingClipStageCounts?.brake_stop ?? 0} · release {readiness?.trainingClipStageCounts?.release ?? 0}
+                </Typography>
                 <Button variant="outlined" color="secondary" disabled={processingActive || pending.has("prepare")} onClick={onPrepare} fullWidth>
                     {processingActive ? "Processing…" : "Process recordings"}
                 </Button>
@@ -626,6 +652,72 @@ async function stopInferenceUnlessIdle(): Promise<void> {
 
 function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+async function waitForSetupCar(timeoutMs = 20_000): Promise<ControlState> {
+    return waitForControlState("setup car", timeoutMs, (state) => (
+        state.telemetry?.vehicleExists && state.telemetry.isInVehicle ? state : null
+    ));
+}
+
+async function waitForCatalogTeleport(location: StopSignCatalogLocation, timeoutMs = 30_000): Promise<ControlState> {
+    return waitForControlState(`teleport to ${location.id}`, timeoutMs, (state) => {
+        const telemetry = state.telemetry;
+        if (state.runtime.status === "error") {
+            throw new Error(state.runtime.lastError || `FiveM could not teleport to ${location.id}`);
+        }
+        if (!telemetry?.isInVehicle || !telemetry.stopSignTargetConfigured) {
+            return null;
+        }
+        const coordinates = [telemetry.positionX, telemetry.positionY, telemetry.positionZ];
+        if (!coordinates.every((value) => typeof value === "number" && Number.isFinite(value))) {
+            return null;
+        }
+        const distanceM = Math.hypot(
+            Number(telemetry.positionX) - location.x,
+            Number(telemetry.positionY) - location.y,
+            Number(telemetry.positionZ) - location.z,
+        );
+        return distanceM <= 30 ? state : null;
+    });
+}
+
+async function waitForControlState(
+    label: string,
+    timeoutMs: number,
+    accept: (state: ControlState) => ControlState | null,
+): Promise<ControlState> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const state = await fetchControlState();
+        const accepted = accept(state);
+        if (accepted) return accepted;
+        await wait(250);
+    }
+    throw new Error(`${label} did not become ready within ${Math.round(timeoutMs / 1000)} seconds`);
+}
+
+function capturePoseFromState(state: ControlState): Pose {
+    const telemetry = state.telemetry;
+    if (!telemetry?.vehicleExists || !telemetry.isInVehicle) {
+        throw new Error("Sit in the managed setup car before capturing a scene point.");
+    }
+    if (Math.abs(telemetry.currentSpeed) > .5) {
+        throw new Error("Stop the setup car before capturing the point.");
+    }
+    if (Math.abs(telemetry.pitchDeg ?? 0) > 8 || Math.abs(telemetry.rollDeg ?? 0) > 8) {
+        throw new Error("Move the setup car onto level road before capturing the point.");
+    }
+    const pose = {
+        x: Number(telemetry.positionX),
+        y: Number(telemetry.positionY),
+        z: Number(telemetry.positionZ),
+        heading: ((Number(telemetry.currentYaw) % 360) + 360) % 360,
+    };
+    if (![pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)) {
+        throw new Error("FiveM has not published a valid setup-car pose yet.");
+    }
+    return pose;
 }
 
 async function waitForControlHold(timeoutMs = 5000): Promise<void> {

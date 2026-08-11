@@ -30,7 +30,7 @@ from train import compute_planner_losses
 
 
 def stop_sign_checkpoint_metadata() -> dict[str, object]:
-    future_offsets = [5, 10, 20, 40, 60, 100]
+    future_offsets = [2, 5, 10, 20]
     transforms = build_target_transform_registry(
         STOP_SIGN_CONTROL_TARGET_NAMES + DEFAULT_AUX_TARGET_NAMES
     )
@@ -66,7 +66,7 @@ class StopSignControlContractTests(unittest.TestCase):
         checkpoint = stop_sign_checkpoint_metadata()
         self.assertEqual(
             validate_checkpoint_control_contract(checkpoint),
-            (250, 500, 1000, 2000, 3000, 5000),
+            (100, 250, 500, 1000),
         )
         checkpoint["release_policy"] = {"name": "learned_release", "learned": True}
         with self.assertRaisesRegex(ValueError, "non-learned"):

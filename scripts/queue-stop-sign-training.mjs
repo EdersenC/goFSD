@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import {auditStopSignTrip, findStopSignTripDirs, resolveLocalDataRoot} from "./lib/stop-sign-data-audit.mjs";
+import {auditStopSignTrip, findStopSignTripDirs, resolveLocalDataRoot, STOP_SIGN_CLIP_STAGES} from "./lib/stop-sign-data-audit.mjs";
 
 const DEFAULT_API = "http://127.0.0.1:8080";
 const options = parseArgs(process.argv.slice(2));
@@ -37,16 +37,22 @@ const missingAudits = selectedRunIds.filter((runId) => !auditedRunIds.has(runId)
 if (missingAudits.length > 0) {
     throw new Error(`Training split contains runs that did not pass RGB/telemetry audit: ${missingAudits.join(", ")}`);
 }
+const observedClipStages = new Set(auditedTrips.map((trip) => trip.clipStage));
+const missingClipStages = STOP_SIGN_CLIP_STAGES.filter((stage) => !observedClipStages.has(stage));
+if (missingClipStages.length > 0) {
+    throw new Error(`Training split is missing stage clips: ${missingClipStages.join(", ")}`);
+}
 const audit = {
     tripCount: auditedTrips.length,
     sampleCount: auditedTrips.reduce((count, trip) => count + trip.sampleCount, 0),
     locationCount: new Set(auditedTrips.map((trip) => trip.location)).size,
     variations: [...new Set(auditedTrips.flatMap((trip) => trip.variations))].sort(),
+    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, auditedTrips.filter((trip) => trip.clipStage === stage).length])),
 };
 
 const spec = {
     name: options.name ?? `stop-sign-${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}`,
-    notes: "RGB temporal stop-sign v1: phase-balanced launch, approach/brake, stop/dwell, scripted release.",
+    notes: "Stage-locked RGB clips: approach, brake-to-stop, scripted release.",
     epochs,
     trainRunIds,
     valRunIds,

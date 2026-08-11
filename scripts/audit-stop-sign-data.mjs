@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import {auditStopSignTrip, findStopSignTripDirs, resolveLocalDataRoot} from "./lib/stop-sign-data-audit.mjs";
+import {auditStopSignTrip, findStopSignTripDirs, resolveLocalDataRoot, STOP_SIGN_CLIP_STAGES} from "./lib/stop-sign-data-audit.mjs";
 
 const options = parseArgs(process.argv.slice(2));
 const dataRoot = resolveLocalDataRoot(options.root);
@@ -31,6 +31,7 @@ console.log(JSON.stringify({
     sampleCount: audited.reduce((count, trip) => count + trip.sampleCount, 0),
     locationCount: new Set(audited.map((trip) => trip.location)).size,
     variations: [...new Set(audited.flatMap((trip) => trip.variations))].sort(),
+    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, audited.filter((trip) => trip.clipStage === stage).length])),
     anchorPhaseCounts: phaseCounts,
     labeledPhases: [...new Set(audited.flatMap((trip) => trip.labeledPhases))],
     maxAlignmentDriftMs: Math.max(...audited.map((trip) => trip.alignmentDriftMs)),

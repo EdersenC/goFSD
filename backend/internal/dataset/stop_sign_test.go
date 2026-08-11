@@ -95,8 +95,8 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 func TestRunDatasetReportProvidesStopSignPhaseAndLocationCoverage(t *testing.T) {
 	tmp := t.TempDir()
 	runDir := filepath.Join(tmp, "run-stop-sign")
-	goalA := stopSignGoalFixture("base", 100, -20)
-	goalB := stopSignGoalFixture("rain", 200, -40)
+	goalA := stopSignGoalFixture("base", "approach", 100, -20)
+	goalB := stopSignGoalFixture("rain", "brake_stop", 200, -40)
 	tripA := filepath.Join(runDir, "stop-sign_temporal-v1", "trip-000")
 	tripB := filepath.Join(runDir, "stop-sign_temporal-v1", "trip-001")
 
@@ -144,14 +144,7 @@ func TestRunDatasetReportProvidesStopSignPhaseAndLocationCoverage(t *testing.T) 
 
 func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *testing.T) {
 	metadata := tripMetadata{
-		StopSignGoal: map[string]any{
-			"task":        "stop-sign",
-			"contract":    "stop-sign-goal.v1",
-			"variationId": "rain-red",
-			"signPose": map[string]any{
-				"x": 100.0, "y": -20.0, "z": 30.0, "heading": 180.0,
-			},
-		},
+		StopSignGoal:    stopSignGoalFixture("rain-red", "brake_stop", 100, -20),
 		StopSignOutcome: map[string]any{"success": true, "status": "succeeded"},
 	}
 	samples := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "stop_hold"}}, metadata)
@@ -161,7 +154,7 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 	if samples[0].ScenarioLocationID == "" || samples[0].ScenarioSplitGroup != samples[0].ScenarioLocationID {
 		t.Fatalf("expected a stable location-level split group: %+v", samples[0])
 	}
-	if samples[0].VariationID != "rain-red" || samples[0].StopSignGoal["contract"] != "stop-sign-goal.v1" {
+	if samples[0].VariationID != "rain-red" || samples[0].ClipStage != "brake_stop" || samples[0].StopSignGoal["contract"] != "stop-sign-goal.v2" {
 		t.Fatalf("goal context was not carried into the dataset row: %+v", samples[0])
 	}
 	if samples[0].StopSignOutcome["status"] != "succeeded" {
@@ -176,6 +169,13 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 	if excluded[0].TrainingExclusionReason != "stop_sign_outcome_not_succeeded" {
 		t.Fatalf("unexpected exclusion reason: %+v", excluded[0])
 	}
+	legacyMetadata := metadata
+	legacyMetadata.StopSignGoal = cloneMap(metadata.StopSignGoal)
+	legacyMetadata.StopSignGoal["contract"] = "stop-sign-goal.v1"
+	legacy := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "decelerate"}}, legacyMetadata)
+	if legacy[0].TrainingEligible == nil || *legacy[0].TrainingEligible || legacy[0].TrainingExclusionReason != "invalid_stop_sign_goal" {
+		t.Fatalf("legacy unsplit clips must not enter stage-locked training: %+v", legacy[0])
+	}
 	body, err := json.Marshal(excluded[0])
 	if err != nil {
 		t.Fatalf("marshal excluded sample: %v", err)
@@ -183,6 +183,7 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 	serialized := string(body)
 	for _, field := range []string{
 		`"training_eligible":false`,
+		`"clip_stage":"brake_stop"`,
 		`"stopSignGoal"`,
 		`"stopSignOutcome"`,
 		`"scenario_split_group"`,
@@ -214,13 +215,26 @@ func stopSignTelemetryFixture(phase string, currentSpeed float64, desiredSpeed f
 	}
 }
 
-func stopSignGoalFixture(variationID string, x float64, y float64) map[string]any {
+func stopSignGoalFixture(variationID string, clipStage string, x float64, y float64) map[string]any {
 	return map[string]any{
 		"task":        "stop-sign",
-		"contract":    "stop-sign-goal.v1",
+		"contract":    "stop-sign-goal.v2",
+		"clipStage":   clipStage,
 		"variationId": variationID,
 		"signPose": map[string]any{
 			"x": x, "y": y, "z": 30.0, "heading": 180.0,
+		},
+		"stopLinePose": map[string]any{
+			"x": x, "y": y + 2, "z": 30.0, "heading": 180.0,
+		},
+		"egoStopPose": map[string]any{
+			"x": x, "y": y + 4.5, "z": 30.0, "heading": 180.0,
+		},
+		"startPose": map[string]any{
+			"x": x, "y": y + 24.5, "z": 30.0, "heading": 180.0,
+		},
+		"exitPose": map[string]any{
+			"x": x, "y": y - 8, "z": 30.0, "heading": 180.0,
 		},
 	}
 }

@@ -49,10 +49,10 @@ max_dt = '250ms'
 plan_timeout = '400ms'
 telemetry_timeout = '250ms'
 estimated_actuation_latency = '50ms'
-expected_horizon_dt_ms = [250, 500, 1000, 2000, 3000, 5000]
+expected_horizon_dt_ms = [100, 250, 500, 1000]
 
 [backend.stop_sign_controller.release_policy]
-name = 'scripted_dwell_release_v0'
+name = 'scripted_stage_release_v1'
 learned = false
 
 [backend.inference]
@@ -80,7 +80,7 @@ window_size = 5
 image_offsets = [-20, -15, -10, -5, 0]
 label_tolerance = '100ms'
 telemetry_offsets = [-20, -15, -10, -5, 0]
-future_offsets = [5, 10, 20, 40, 60, 100]
+future_offsets = [2, 5, 10, 20]
 telemetry_sample_interval_ms = 50
 telemetry_feature_names = ['current_speed']
 control_target_names = ['future_speed_mps', 'stop_intent']
@@ -178,7 +178,7 @@ learning_rate = 0.0005
 loss_function = 'smooth_l1'
 smooth_l1_beta = 0.1
 aux_loss_weight = 0.4
-horizon_loss_weights = [1.0, 0.9, 0.8, 0.5, 0.8, 1.0]
+horizon_loss_weights = [1.0, 0.9, 0.75, 0.6]
 
 [training.optimizer]
 name = 'adamw'

@@ -6,8 +6,8 @@ const phases = [
     ["accelerate", "Launch from the saved start pose"],
     ["cruise_approach", "Hold the planned approach speed"],
     ["decelerate", "Reduce the speed profile before the line"],
-    ["stop_hold", "Stay below 0.1 m/s for the full dwell"],
-    ["release", "V0 controller releases after the scripted dwell"],
+    ["stop_hold", "Confirm zero speed briefly, then end the brake_stop clip"],
+    ["release", "Start a separate scripted release clip from the Stop pose"],
 ] as const;
 
 export function ArchitectureOverview() {
@@ -29,12 +29,12 @@ export function ArchitectureOverview() {
                     <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", md: "1fr auto 1fr auto 1fr"}, gap: 1.5, alignItems: "stretch"}}>
                         <FlowCard eyebrow="Input" title="Causal RGB clip" detail="Five RGB frames over one second. Current speed may be added explicitly; sign geometry never enters the model." />
                         <FlowArrow />
-                        <FlowCard eyebrow="Learned" title="Temporal motion plan" detail="Future speed at 0.25, 0.5, 1, 2, 3, and 5 seconds plus stop intent. No raw controller voltages." />
+                        <FlowCard eyebrow="Learned" title="Temporal motion plan" detail="Future speed at 0.1, 0.25, 0.5, and 1 second plus stop intent. No raw controller voltages." />
                         <FlowArrow />
                         <FlowCard eyebrow="Deterministic" title="Feedback controller" detail="Tracks speed, latches the stop, rate-limits output, and guarantees throttle and brake are mutually exclusive before FiveM." />
                     </Box>
                     <Typography variant="caption" color="warning.main" sx={{display: "block", mt: 2}}>
-                        V0 release is scripted after the configured dwell. It is not claimed as learned behavior.
+                        Release is a separate scripted stage clip. The runtime transition is not claimed as learned behavior.
                     </Typography>
                 </Section>
 

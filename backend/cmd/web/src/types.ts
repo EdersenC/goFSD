@@ -5,11 +5,13 @@ export type Pose = {
     heading: number
 };
 
-export const STOP_SIGN_PLAN_VERSION = "stop-sign-plan.v2" as const;
+export const STOP_SIGN_PLAN_VERSION = "stop-sign-plan.v4" as const;
 
 export type StopSignTime = {hour: number, minute: number};
 export type StopSignColor = {r: number, g: number, b: number};
 export type StopSignVehicle = {model?: string, color?: StopSignColor};
+export type StopSignCatalogPosition = {x: number, y: number, z: number};
+export type StopSignAutoVariations = {count: number, motionVariancePct: number};
 
 export type StopSignVariation = {
     id: string
@@ -18,7 +20,7 @@ export type StopSignVariation = {
     startDistanceM?: number
     exitDistanceM?: number
     targetSpeedMps?: number
-    dwellMs?: number
+    stopConfirmationMs?: number
     attemptCount?: number
     weather?: string
     time?: StopSignTime
@@ -28,12 +30,18 @@ export type StopSignVariation = {
 export type StopSignPlanEntry = {
     id: string
     signPose: Pose
+    catalogId?: string
+    catalogPosition?: StopSignCatalogPosition
+    startPose?: Pose
+    egoStopPose?: Pose
+    exitPose?: Pose
+    autoVariations?: StopSignAutoVariations
     stopDistanceM: number
     egoCenterOffsetM: number
     startDistanceM: number
     exitDistanceM: number
     targetSpeedMps: number
-    dwellMs: number
+    stopConfirmationMs: number
     attemptCount: number
     weather: string
     time: StopSignTime
@@ -52,6 +60,8 @@ export type StopSignBatchJob = {
     id: string
     entryId: string
     variationId: string
+    catalogId?: string
+    catalogPosition?: StopSignCatalogPosition
     signPose: Pose
     stopLinePose: Pose
     egoStopPose: Pose
@@ -62,7 +72,7 @@ export type StopSignBatchJob = {
     startDistanceM: number
     exitDistanceM: number
     targetSpeedMps: number
-    dwellMs: number
+    stopConfirmationMs: number
     attemptCount: number
     weather: string
     time: StopSignTime
@@ -98,8 +108,8 @@ export type BatchProgress = {
         failureReason: string
         durationMs: number
         stoppedAtDistanceM: number | null
-        dwellDurationMs: number
-        crossedStopLineBeforeDwell: boolean
+        stopConfirmationDurationMs: number
+        crossedStopLineBeforeStop: boolean
     }
 };
 
@@ -140,8 +150,8 @@ export type RuntimeTelemetry = {
     stopSignLateralErrorM?: number
     stopSignHeadingErrorDeg?: number
     stopSignStopped?: boolean
-    stopSignDwellElapsedMs?: number
-    stopSignDwellTargetMs?: number
+    stopSignConfirmationElapsedMs?: number
+    stopSignConfirmationTargetMs?: number
     stopSignAttemptIndex?: number
     stopSignAttemptCount?: number
     stopSignPhase?: string
@@ -180,6 +190,7 @@ export type ProcessingReadiness = {
     trainingSampleCount: number
     trainingEligibleRunIds: string[]
     trainingLocationCount: number
+    trainingClipStageCounts: Record<string, number>
     suggestedTrainRunIds: string[]
     suggestedValRunIds: string[]
     trainingEligibilityErrorCount: number

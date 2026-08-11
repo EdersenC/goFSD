@@ -7,7 +7,7 @@ export function TelemetryPanel({control}: {control?: ControlState}) {
     const linked = Boolean(runtime?.fivemConnected);
     const synchronized = linked && runtime?.appliedSafetyEpoch === control?.safetyEpoch;
     const phase = telemetry?.stopSignPhase ?? runtime?.stopSignBatch?.phase;
-    const dwell = dwellPercent(telemetry);
+    const stopConfirmation = stopConfirmationPercent(telemetry);
     return (
         <Card component="section" aria-labelledby="telemetry-title">
             <CardContent>
@@ -43,12 +43,12 @@ export function TelemetryPanel({control}: {control?: ControlState}) {
                 </Stack>
                 <Box sx={{mt: 2}}>
                     <Stack direction="row" sx={{justifyContent: "space-between", mb: .7}}>
-                        <Typography variant="caption" color="text.secondary">Dwell</Typography>
+                        <Typography variant="caption" color="text.secondary">Stop confirmation</Typography>
                         <Typography variant="caption" sx={{fontFamily: "ui-monospace, monospace"}}>
-                            {Math.round(telemetry?.stopSignDwellElapsedMs ?? 0)} / {Math.round(telemetry?.stopSignDwellTargetMs ?? 0)} ms
+                            {Math.round(telemetry?.stopSignConfirmationElapsedMs ?? 0)} / {Math.round(telemetry?.stopSignConfirmationTargetMs ?? 0)} ms
                         </Typography>
                     </Stack>
-                    <LinearProgress variant="determinate" value={dwell} color={telemetry?.stopSignStopped ? "success" : "primary"} />
+                    <LinearProgress variant="determinate" value={stopConfirmation} color={telemetry?.stopSignStopped ? "success" : "primary"} />
                 </Box>
                 <Stack direction="row" sx={{gap: 1, mt: 2, flexWrap: "wrap"}}>
                     <Chip size="small" variant="outlined" label={`Attempt ${telemetry?.stopSignAttemptIndex ?? runtime?.stopSignBatch?.attemptIndex ?? 0}/${telemetry?.stopSignAttemptCount ?? runtime?.stopSignBatch?.attemptCount ?? 0}`} />
@@ -83,9 +83,9 @@ function Metric({label, value, accent = false}: {label: string, value: string, a
     );
 }
 
-function dwellPercent(telemetry?: RuntimeTelemetry): number {
-    const target = telemetry?.stopSignDwellTargetMs ?? 0;
-    return target > 0 ? Math.min(100, Math.max(0, ((telemetry?.stopSignDwellElapsedMs ?? 0) / target) * 100)) : 0;
+function stopConfirmationPercent(telemetry?: RuntimeTelemetry): number {
+    const target = telemetry?.stopSignConfirmationTargetMs ?? 0;
+    return target > 0 ? Math.min(100, Math.max(0, ((telemetry?.stopSignConfirmationElapsedMs ?? 0) / target) * 100)) : 0;
 }
 
 function format(value: number | undefined, suffix: string): string {

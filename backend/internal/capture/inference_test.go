@@ -845,7 +845,7 @@ func TestInferenceStartCancellationAfterArmingDoesNotSpawnCapture(t *testing.T) 
 func TestStopSignInferenceRejectsActuatorWithDifferentSetpointTiming(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	state := readyStopSignActuatorState(cfg)
-	state.StopSignController.ExpectedHorizonDtMs = []int{50, 100, 150, 200, 250, 350}
+	state.StopSignController.ExpectedHorizonDtMs = []int{100, 250, 500, 1001}
 	actuatorSink := &statefulInferenceActuator{state: state}
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil, actuatorSink)
 	if err := inferencer.validateInferenceActuatorReady(); err == nil || !errors.Is(err, ErrInferenceActuatorUnavailable) || !strings.Contains(err.Error(), "actuator control horizon timing") {
@@ -1463,7 +1463,7 @@ func TestPredictionModelMustRemainBoundToSessionCheckpoint(t *testing.T) {
 	}
 
 	wrongTiming := compatible
-	wrongTiming.ControlHorizonDtMs = []int{50, 100, 150, 200, 250, 301}
+	wrongTiming.ControlHorizonDtMs = []int{100, 250, 500, 1001}
 	if err := inferencer.validateStopSignPredictionModel(wrongTiming); err == nil || !strings.Contains(err.Error(), "control horizon timing") {
 		t.Fatalf("expected noncanonical setpoint timing rejection, got=%v", err)
 	}
@@ -1546,7 +1546,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	cfg.ImageOffsets = []int{-4, -2, 0}
 	cfg.WindowSize = len(cfg.ImageOffsets)
 	cfg.TelemetryOffsets = []int{-2, -1, 0}
-	cfg.FutureSteps = 6
+	cfg.FutureSteps = 4
 	cfg.PredictionTimeout = time.Second
 	nowValue := time.UnixMilli(966).UTC()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return nowValue }))
@@ -1617,17 +1617,13 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 			response.PredControls = [][][]float64{{
 				{1.40, 0.05},
 				{1.20, 0.05},
-				{0.90, 0.10},
-				{0.60, 0.20},
-				{0.30, 0.50},
 				{0.00, 0.90},
+				{0.00, 1.00},
 			}}
 			response.PredAux = [][][]float64{{
 				{0.2, 0.0, 0.0},
 				{0.2, 0.0, 0.0},
-				{0.1, 0.1, 0.1},
-				{0.0, 0.3, 0.3},
-				{0.0, 0.6, 0.6},
+				{0.0, 1.0, 1.0},
 				{0.0, 1.0, 1.0},
 			}}
 			body, _ := json.Marshal(response)
@@ -1659,7 +1655,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	if prediction == nil {
 		t.Fatal("expected prediction")
 	}
-	if len(prediction.RawPredControls) != 6 || len(prediction.RawPredAux) != 6 {
+	if len(prediction.RawPredControls) != 4 || len(prediction.RawPredAux) != 4 {
 		t.Fatalf("unexpected raw planner outputs: %+v", prediction)
 	}
 	if prediction.ControlContract.Name != stopsigncontrol.StopSignMotionPlanContractV1 || prediction.ControlContract.Version != 1 {
@@ -1672,7 +1668,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	if plan.Contract != stopsigncontrol.StopSignMotionPlanContractV1 || plan.Direction != stopsigncontrol.StopSignDirectionForward {
 		t.Fatalf("unexpected setpoint plan identity: %+v", plan)
 	}
-	if math.Abs(plan.SampledAtS-1.066) > 1e-9 || len(plan.Points) != 6 {
+	if math.Abs(plan.SampledAtS-1.066) > 1e-9 || len(plan.Points) != 4 {
 		t.Fatalf("unexpected setpoint plan timestamp/length: %+v", plan)
 	}
 	for index, point := range plan.Points {

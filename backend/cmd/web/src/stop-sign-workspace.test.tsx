@@ -1,6 +1,6 @@
 import {ThemeProvider} from "@mui/material";
 import {renderToStaticMarkup} from "react-dom/server";
-import {createStopSignPlan} from "./stop-sign-plan";
+import {captureScenePose, createStopSignPlan, stageStopSignCatalogLocation} from "./stop-sign-plan";
 import {PhaseRail, resolvePhaseIndex} from "./stop-sign/PhaseRail";
 import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
@@ -10,37 +10,41 @@ import type {ControlState} from "./types";
 
 assertEqual(resolvePhaseIndex("launching"), 0);
 assertEqual(resolvePhaseIndex("approach_braking"), 1);
-assertEqual(resolvePhaseIndex("dwell"), 2);
-assertEqual(resolvePhaseIndex("release"), 3);
+assertEqual(resolvePhaseIndex("stop_hold"), 1);
+assertEqual(resolvePhaseIndex("release"), 2);
 
-const phaseMarkup = render(<PhaseRail phase="dwell" />);
-for (const label of ["Launch", "Approach / Brake", "Stop / Dwell", "Go / Release", "scripted release"]) {
+const phaseMarkup = render(<PhaseRail phase="stop_hold" />);
+for (const label of ["Approach", "Brake → Stop", "Release → End", "scripted release"]) {
     assert(phaseMarkup.includes(label), `missing phase ${label}`);
 }
-assert(phaseMarkup.includes('data-phase="stop"'), "stop phase needs a stable render marker");
+assert(phaseMarkup.includes('data-phase="brake_stop"'), "brake-to-stop phase needs a stable render marker");
 assert(phaseMarkup.includes('data-active="true"'), "current phase must be marked active");
 
-const plan = createStopSignPlan();
-plan.entries[0]!.signPose = {x: 100, y: 200, z: 30, heading: 90};
-plan.entries[0]!.variations.push({id: "rain", weather: "RAIN", targetSpeedMps: 6});
+let plan = stageStopSignCatalogLocation(createStopSignPlan(), {
+    id: "gta-v-sign-0023", x: -1830.7, y: 3206.4, z: 31.8,
+}).plan;
+plan = captureScenePose(plan, 0, "startPose", {x: 100, y: 140, z: 30, heading: 0});
+plan = captureScenePose(plan, 0, "egoStopPose", {x: 100, y: 200, z: 30, heading: 0});
+plan = captureScenePose(plan, 0, "exitPose", {x: 100, y: 212, z: 30, heading: 0});
 const editorMarkup = render(
     <PlanEditor
         plan={plan}
+        activeEntryIndex={0}
         onChange={() => undefined}
-        onCalibrate={() => undefined}
-        onClearCalibration={() => undefined}
-        onApplyCalibration={() => undefined}
-        calibrationReady
-        calibrationBusy={false}
+        onSelectEntry={() => undefined}
+        onCapture={() => undefined}
+        onRemove={() => undefined}
+        captureReady
+        captureBusy={false}
     />,
 );
-for (const label of ["Stop-sign plan", "Calibrate current sign", "Sign pose", "Base run", "Variants", "Exit distance (m)", "Attempts"]) {
+for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded variants", "50 clips", "Motion variance"]) {
     assert(editorMarkup.includes(label), `plan editor missing ${label}`);
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
 
-const catalogMarkup = render(<StopSignCatalog connected busy={false} onSetWaypoint={() => undefined} onStageLocation={() => undefined} />);
-for (const label of ["Stop-sign catalog", "Set GTA waypoint", "Stage in plan", "/tpwaypoint", "Physical prop only"]) {
+const catalogMarkup = render(<StopSignCatalog connected onTeleport={() => undefined} />);
+for (const label of ["Choose a stop sign", "Search all signs", "Teleport", "Every verified main-map stop sign"]) {
     assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
 }
 
@@ -64,8 +68,8 @@ const control: ControlState = {
         stopSignDistanceM: 16.5,
         stopLineDistanceM: 12.5,
         stopSignEgoStopPose: {x: 98, y: 200, z: 30, heading: 90},
-        stopSignDwellElapsedMs: 0,
-        stopSignDwellTargetMs: 5000,
+        stopSignConfirmationElapsedMs: 0,
+        stopSignConfirmationTargetMs: 250,
         stopSignAttemptIndex: 2,
         stopSignAttemptCount: 10,
     },

@@ -1,56 +1,36 @@
-# Stop-sign temporal collection
+# Stop-sign scene collection
 
-The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surface. It stores the draft in this browser, accepts a live `signPose` from FiveM, and queues one deterministic batch through `POST /control/stop-sign-batches`.
+The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surface. It turns each physical stop sign into a reusable scene defined by three operator-captured poses: **Start**, **Stop**, and **End**. The browser saves the scene library locally and queues deterministic batches through `POST /control/stop-sign-batches`.
 
 ## Operator checklist
 
 1. Start the backend, deploy the current FiveM resource, run `restart FSD` in the server console, and join the session.
 2. Confirm **API** is online, **FiveM** is linked, and **Control** is synchronized. Use **Hold** once and verify it settles before starting a batch.
-3. Search the 463-location **Stop-sign catalog**, select a physical prop, choose **Stage in plan**, then **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
-4. Select **Start setup car** and remain in its driver seat.
-5. Move the car to the lane reference point and align its heading to the direction the ego vehicle will travel through the intersection.
-6. Select **Calibrate current sign**, then select **Use live pose** on the intended entry.
-7. Review the five-pose geometry and base run settings. The setup car does not need to be moved to a start, stop, or exit pose; all are derived from the accepted sign pose.
-8. Add condition variations and additional physical signs. Keep every entry and variation ID unique.
-9. Review total signs, expanded variations, and attempts before queueing.
-10. Select **Queue collection**. FiveM runs one job and one attempt at a time.
-11. Watch the behavior phase and telemetry. Use **End collection** for orderly cancellation, or **Hold** for immediate safety intervention.
-12. In **Data**, process completed trips and inspect the RGB clip, phase sequence, speed, expert throttle/brake, physical brake pressure, and outcome.
+3. Search the complete 463-sign catalog and press **Teleport**. The managed setup car is moved to a nearby drivable lane and the sign is added to the scene library.
+4. Drive to the exact beginning of the desired demonstration and press **Capture Start**.
+5. Drive to the exact vehicle-center stopping point and press **Capture Stop**.
+6. Drive beyond the sign to the desired continuation point and press **Capture End**.
+7. Review the automatic variant count and motion bound. Defaults are `50` variants and `20%`; the motion bound cannot exceed `25%`.
+8. Select **Collect this scene**. FiveM runs one generated variant at a time and records three separate stage clips for it.
+9. Choose the next catalog sign and repeat the Teleport → Start → Stop → End workflow.
+10. Watch the clip stage and telemetry. Use **End collection** for orderly cancellation, or **Hold** for immediate safety intervention.
+11. In **Data**, process completed trips and inspect each stage clip, speed, expert throttle/brake, physical brake pressure, and outcome.
 
 The draft survives a browser refresh. The saved plan contains no `safetyEpoch`; the UI adds the current epoch immediately before queueing. A missing epoch returns `428`. A Hold or FiveM reconnect invalidates an old epoch, and the backend returns `409` without starting motion.
 
-## Geometry
+## Scene geometry
 
-`signPose.heading` is the GTA travel heading, not the physical sign prop's facing direction. With GTA's forward vector
+The catalog stores roadside prop positions for identification and one-click navigation. These positions are never model inputs and do not replace the operator's demonstrated route.
 
-The bundled CSV registry stores roadside prop positions and prop quaternions for navigation. Those values are never copied into `signPose` or model inputs. The operator establishes the lane-center reference and travel heading with the setup car before queueing.
-
-Staging a catalog location copies its stable ID into the next placeholder entry but deliberately leaves `signPose` uncalibrated. The workbench, backend expander, and FiveM consumer all reject the `(0,0,0)` origin placeholder, so a batch cannot begin until the live lane pose has been applied.
-
-```text
-forward(heading) = (-sin(heading), cos(heading))
-```
-
-the backend derives:
-
-```text
-stopLinePose = signPose    - forward * stopDistanceM
-egoStopPose  = stopLinePose - forward * egoCenterOffsetM
-startPose    = egoStopPose  - forward * startDistanceM
-exitPose     = signPose     + forward * exitDistanceM
-```
-
-This separation is deliberate:
+The operator captures:
 
 | Pose | Meaning |
 |---|---|
-| `signPose` | Stable map/location identity and travel heading. |
-| `stopLinePose` | Crossing boundary for the vehicle's front bumper. |
-| `egoStopPose` | Target vehicle-center pose before the line. |
-| `startPose` | Exact reset pose for the temporal approach. |
-| `exitPose` | Exact waypoint for the scripted release beyond the sign. |
+| `startPose` | Exact reset pose and heading for the Approach clip. |
+| `egoStopPose` | Exact vehicle-center pose and heading for the end of Brake + Stop. |
+| `exitPose` | Exact destination pose and heading for the Release clip. |
 
-The expanded command contains all five poses plus their distances. FiveM recomputes the chain and rejects any contradiction, preventing UI/backend/controller geometry drift.
+Start must be at least `5 m` before Stop, End must be at least `2 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
 
 ## Plan contract
 
@@ -61,56 +41,39 @@ The expanded command contains all five poses plus their distances. FiveM recompu
   "entries": [
     {
       "id": "mission-row-01",
-      "signPose": {"x": 120.0, "y": -45.0, "z": 8.0, "heading": 90.0},
-      "stopDistanceM": 3.0,
-      "egoCenterOffsetM": 2.5,
-      "startDistanceM": 40.0,
-      "exitDistanceM": 8.0,
-      "targetSpeedMps": 8.0,
-      "dwellMs": 5000,
-      "attemptCount": 5,
-      "weather": "EXTRASUNNY",
-      "time": {"hour": 12, "minute": 0},
-      "vehicle": {"model": "blista", "color": {"r": 230, "g": 60, "b": 45}},
-      "variations": [
-        {"id": "base"},
-        {
-          "id": "rain-blue-slower",
-          "weather": "RAIN",
-          "targetSpeedMps": 6.0,
-          "vehicle": {"color": {"r": 40, "g": 80, "b": 220}}
-        }
-      ]
+      "catalogId": "gta-v-sign-0023",
+      "catalogPosition": {"x": -1830.77, "y": 3206.39, "z": 31.85},
+      "startPose": {"x": -1810.0, "y": 3180.0, "z": 32.0, "heading": 320.0},
+      "egoStopPose": {"x": -1827.0, "y": 3201.0, "z": 32.0, "heading": 320.0},
+      "exitPose": {"x": -1836.0, "y": 3212.0, "z": 32.0, "heading": 320.0},
+      "autoVariations": {"count": 50, "motionVariancePct": 20},
+      "targetSpeedMps": 5.0
     }
   ]
 }
 ```
 
-Top-level `id` and `seed` are required. A plan allows 1–100 entries, at most 100 expanded jobs, and 1–50 attempts per job. Empty `variations` expands to one implicit `base` job. Expansion is stable: entry order first, then variation order. Each job seed is `<plan-seed>:<entry-id>:<variation-id>`.
+Top-level `id` and `seed` are required. A scene library allows 1–100 signs and at most 5,000 expanded jobs. Each captured scene requires catalog identity, catalog navigation position, Start, Stop, End, and an automatic-variation specification.
 
-Base defaults are:
+Expansion is deterministic. Each generated job uses seed `<plan-seed>:<entry-id>:auto-NNN`. `auto-001` is the exact captured baseline. Remaining jobs vary:
 
-| Setting | Default | Accepted range |
-|---|---:|---:|
-| `stopDistanceM` | `3.0` | `0.5–15.0 m` |
-| `egoCenterOffsetM` | `2.5` | `0.5–8.0 m` |
-| `startDistanceM` | `40.0` | `5.0–250.0 m` |
-| `exitDistanceM` | `8.0` | `2.0–50.0 m` |
-| `targetSpeedMps` | `8.0` | `0.5–8.0 m/s` |
-| `dwellMs` | `5000` | `500–30000 ms` |
-| `attemptCount` | `1` | `1–50` |
-| `weather` | `EXTRASUNNY` | Supported GTA weather name |
-| `time` | `12:00` | `00:00–23:59` |
+- Start-to-Stop distance, Stop-to-End distance, and target speed within `motionVariancePct`.
+- Start/End lateral position and heading within small bounded tolerances.
+- Stop by only a small centimeter-scale longitudinal/lateral tolerance and a small heading tolerance.
+- Weather, time of day, and vehicle color broadly across their supported pools.
 
-Variations may override stop distance, ego offset, start distance, exit distance, target speed, dwell, attempts, weather, time, vehicle model, and vehicle RGB color. Omitted fields inherit from the entry. Geometry remains sign-relative; variations do not provide arbitrary derived poses.
+The default is `50` variants with `20%` motion variance. The accepted motion range is `0–25%`. Changing the seed intentionally creates a different deterministic set; restoring the old seed reproduces the old set. Manual variation entry is not part of the normal operator workflow.
 
 ## Temporal guarantees
 
-- Jobs and attempts never overlap.
-- Every attempt resets to the resolved `startPose` before capture.
-- RGB video and 50 ms telemetry synchronize around the capture flash.
-- The behavior sequence uses `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`.
-- The normal dwell is five seconds. V0 release after the dwell is scripted and labeled honestly.
+- Jobs, attempts, and stage captures never overlap.
+- Every variant produces exactly three clips in order: `approach`, `brake_stop`, and `release`.
+- Each clip starts its own RGB capture, emits its own synchronization flash, records its own telemetry, and finalizes before the next clip begins.
+- Approach ends at the braking-stage boundary. Brake + Stop ends immediately after the car reaches the Stop pose and completes a brief zero-speed confirmation. Release begins from Stop and ends at End.
+- Long stationary dwell footage is not collected.
+- Temporal histories and future targets are stage-locked; samples that cannot satisfy the complete window inside one clip are excluded rather than borrowing frames or labels from another stage.
+- Model target horizons are `100`, `250`, `500`, and `1000 ms`.
+- Fine behavior phases remain `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`, while `clipStage` identifies the independent clip boundary.
 - Collision, timeout, early stop, stop-line crossing, invalid vehicle, and operator stop remain inspectable failures.
 - Failed attempts are excluded from expert training by default.
 - A location-level split key derived from `signPose` prevents train/validation leakage across frames or attempts from the same physical sign.
@@ -130,4 +93,4 @@ Variations may override stop distance, ego offset, start distance, exit distance
 └── trip-001/
 ```
 
-Capture writes the raw video, log, trip metadata, and scene `run.jsonl`. Processing extracts RGB frames and publishes `dataset.jsonl` plus `processing.json`. A temporary processing lock/workspace may appear while processing is active; do not edit or rebuild that trip concurrently.
+Each generated variant writes three consecutive trip folders, one per clip stage. `stopSignGoal.clipStage` identifies `approach`, `brake_stop`, or `release` in metadata and processed samples. Capture writes the raw video, log, trip metadata, and scene `run.jsonl`; processing extracts RGB frames and publishes `dataset.jsonl` plus `processing.json`. A temporary processing lock/workspace may appear while processing is active; do not edit or rebuild that trip concurrently.

@@ -225,7 +225,7 @@ async function queueProbeBatch(apiBase, state, location, profile, options) {
             signPose,
             ...settings,
             exitDistanceM: 8,
-            dwellMs: numberOption(options.dwell, 5000),
+            stopConfirmationMs: numberOption(options["stop-confirmation"], 250),
             attemptCount: 1,
             weather: "EXTRASUNNY",
             time: {hour: 12, minute: 0},

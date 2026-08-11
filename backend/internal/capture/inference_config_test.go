@@ -25,7 +25,7 @@ frame_stride = 2
 	sample_stride = 10
 	telemetry_sample_interval_ms = 50
 telemetry_offsets = [-20, -15, -10, -5, 0]
-future_offsets = [5, 10, 20, 40, 60, 100]
+future_offsets = [2, 5, 10, 20]
 telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
 	control_target_names = ["future_speed_mps", "stop_intent"]
 aux_target_names = ["expert_throttle", "expert_brake", "actual_brake_pressure"]
@@ -82,7 +82,7 @@ jpeg_quality = 82
 	if cfg.TelemetrySampleInterval != 50*time.Millisecond {
 		t.Fatalf("unexpected telemetry sample interval: %s", cfg.TelemetrySampleInterval)
 	}
-	expectedHorizon := []int{250, 500, 1000, 2000, 3000, 5000}
+	expectedHorizon := []int{100, 250, 500, 1000}
 	if err := validateExactInts("test control horizon", cfg.ControlHorizonDtMs, expectedHorizon); err != nil {
 		t.Fatal(err)
 	}

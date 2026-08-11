@@ -20,14 +20,14 @@ causal RGB + speed history
 
 ## Model input boundary
 
-Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero is the current sample; there are no future images in the input.
+Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero is the current sample; there are no future images in the input. Every window belongs to exactly one `clipStage`: `approach`, `brake_stop`, or `release`.
 
 The perception boundary is RGB-only with respect to the stop sign and stopping geometry. These values may be recorded for expert generation, labels, scoring, debugging, and safety, but are not model perception inputs:
 
 - `signPose`, `stopLinePose`, `egoStopPose`, `startPose`, and `exitPose`
 - distance to the sign or stop line
 - longitudinal, lateral, or heading error to the oracle pose
-- dwell completion or ground-truth phase as an input feature
+- stop confirmation completion or ground-truth phase as an input feature
 
 Current speed is allowed proprioception, not a map oracle. This lets the network learn what the stop sign looks like and when the visual approach requires slowing while still knowing the vehicle's own motion state.
 
@@ -48,8 +48,8 @@ Processed samples retain a causal RGB/history window and a future label sequence
 
 | Target | Horizons |
 |---|---|
-| `future_speed_mps` | `250, 500, 1000, 2000, 3000, 5000 ms` |
-| `stop_intent` | the same six horizons |
+| `future_speed_mps` | `100, 250, 500, 1000 ms` |
+| `stop_intent` | the same four horizons |
 
 `expert_throttle`, `expert_brake`, and `actual_brake_pressure` are low-weight auxiliary diagnostics. They help expose poor demonstrations or controller mismatch, but they are not the deployed controller interface.
 
@@ -61,20 +61,19 @@ Every usable sample carries one fine phase:
 4. `stop_hold`
 5. `release`
 
-Training uses phase-balanced sampling so long cruise spans do not drown out braking, stopping, or release. A complete temporal clip remains intact; frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so multiple attempts or variants at the same sign cannot leak across splits.
+Training balances observed `(clip stage, fine phase)` groups so long approach spans do not drown out braking, stopping, or release. History and future labels never cross a clip boundary: incomplete samples at the beginning or end of a stage are excluded. Frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so all three clips, attempts, and generated variants from one sign remain on one side of the split.
 
 Only successful attempts with a complete `stopSignGoal` and `stopSignOutcome` are admitted by default. Failed attempts stay available for inspection and later hard-negative work.
 
-## V0 release policy
+## Stage-locked release policy
 
-`scripted_dwell_release_v0` means:
+Collection treats Release as a separate demonstration:
 
-1. The approach model predicts future speed and stop intent.
-2. The runtime verifies that the vehicle has stopped at the ego stop pose.
-3. The runtime holds the vehicle for the configured dwell, normally about five seconds.
-4. After the dwell state machine completes, release is scripted.
+1. `approach` records launch and cruise, then stops before braking supervision begins.
+2. `brake_stop` records deceleration and ends immediately after brief zero-speed confirmation at Stop.
+3. `release` resets to Stop, records motion to End, and finalizes independently.
 
-The UI and checkpoint metadata must call this a scripted release. V0 results do not prove the model learned when traffic law permits it to go. A later contract can learn release timing only after the dataset includes the observations needed to make that decision.
+This deliberately avoids many redundant stationary frames. V0 does not claim to learn traffic-aware waiting or the decision of when it is legally safe to proceed; it learns the short motion behavior inside each declared stage.
 
 ## Controller translation
 
@@ -104,14 +103,14 @@ Changing a vehicle, game build, or controller adapter can change the actuator re
 
 The checked-in config starts with empty `train_run_ids`, `val_run_ids`, and checkpoint fields. The normal loop is:
 
-1. Collect multiple successful clips at multiple physical signs and across meaningful variants.
+1. Capture Start → Stop → End scenes at multiple physical signs and generate many seeded variants from each scene.
 2. Process all selected trips with the current frame-window fingerprint.
-3. Inspect phase/location/variant coverage and remove unusable demonstrations.
+3. Inspect clip-stage, phase, location, and variant coverage and remove unusable demonstrations.
 4. Reserve entire stop-sign locations for validation.
 5. Train and compare future-speed error, stop-intent quality, phase coverage, and validation loss.
 6. Evaluate offline first, then run a guarded live test with a calibrated controller.
 
-Closed-loop sequence results matter more than a low per-frame loss. A useful evaluation records whether the car launched, approached without oscillation, stopped before the line, reached the intended ego pose, held for the full dwell, did not collide, and left only under the declared release policy.
+Closed-loop sequence results matter more than a low per-frame loss. A useful evaluation records whether the car launched, approached without oscillation, stopped before the line at the intended pose, avoided collision, and completed the separate release to End.
 
 ## Safety boundary
 
