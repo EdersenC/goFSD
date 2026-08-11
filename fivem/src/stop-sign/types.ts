@@ -67,9 +67,10 @@ export type StopSignRuntimePhase =
 
 export type StopSignGoal = {
     task: "stop-sign"
-    contract: "stop-sign-goal.v2"
-    releasePolicy: "scripted_stage_release_v1"
-    clipStage: StopSignClipStage
+    contract: "stop-sign-goal.v3"
+    releasePolicy: "scripted_continuous_release_v2"
+    captureMode: "continuous"
+    logicalClipStages: StopSignClipStage[]
     catalogId?: string
     catalogPosition?: StopSignCatalogPosition
     signPose: StopSignPose
@@ -114,6 +115,15 @@ export type StopSignOutcome = {
     stoppedAtDistanceM: number | null
     stopConfirmationDurationMs: number
     crossedStopLineBeforeStop: boolean
+    stageTransitions?: StopSignStageTransitions
+};
+
+export type StopSignStageTransitions = {
+    approachStartedGameTimeMs: number
+    brakeStopStartedGameTimeMs: number | null
+    stopConfirmedGameTimeMs: number | null
+    releaseStartedGameTimeMs: number | null
+    completedGameTimeMs: number | null
 };
 
 export type StopSignTelemetry = {

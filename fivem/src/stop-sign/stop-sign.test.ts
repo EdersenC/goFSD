@@ -6,7 +6,7 @@ import {
     planStopSignExpert,
 } from "./expert";
 import {parseStopSignJobs} from "./batch";
-import {planStopSignClips} from "./clip-plan";
+import {logicalClipStageForPhase, STOP_SIGN_LOGICAL_CLIP_STAGES} from "./clip-plan";
 import {
     nextFixedIntervalDeadlineMs,
     shouldReportStoppedTooEarly,
@@ -182,17 +182,13 @@ function testCapturedSceneJobsPreserveExactStartStopEndGeometry() {
     assert.equal(parsed.stopConfirmationMs, 250);
 }
 
-function testClipPlanKeepsTemporalStagesSeparateAndContiguous() {
-    const job = capturedSceneJobFixture();
-    const clips = planStopSignClips(job, 30);
-
-    assert.deepEqual(clips.map((clip) => clip.stage), ["approach", "brake_stop", "release"]);
-    assert.deepEqual(clips.map((clip) => clip.tripIndex), [30, 31, 32]);
-    assert.deepEqual(clips[0].toPose, clips[1].fromPose);
-    assert.deepEqual(clips[1].toPose, clips[2].fromPose);
-    assert.equal(clips[0].initialSpeedMps, 0);
-    assert.equal(clips[1].initialSpeedMps, job.targetSpeedMps);
-    assert.equal(clips[2].initialSpeedMps, 0);
+function testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture() {
+    assert.deepEqual(STOP_SIGN_LOGICAL_CLIP_STAGES, ["approach", "brake_stop", "release"]);
+    assert.equal(logicalClipStageForPhase("accelerate"), "approach");
+    assert.equal(logicalClipStageForPhase("cruise_approach"), "approach");
+    assert.equal(logicalClipStageForPhase("decelerate"), "brake_stop");
+    assert.equal(logicalClipStageForPhase("stop_hold"), "brake_stop");
+    assert.equal(logicalClipStageForPhase("release"), "release");
 }
 
 function capturedSceneJobFixture() {
@@ -235,5 +231,5 @@ testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
 testAttemptPreflightRejectsUnsafeStarts();
 testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
 testCapturedSceneJobsPreserveExactStartStopEndGeometry();
-testClipPlanKeepsTemporalStagesSeparateAndContiguous();
+testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture();
 console.log("stop-sign expert tests passed");

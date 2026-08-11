@@ -30,7 +30,7 @@ func main() {
 }
 
 func runBackend(args []string, output io.Writer) error {
-	const backendBuildID = "2026-08-11-stop-sign-stage-clips-v10"
+	const backendBuildID = "2026-08-11-stop-sign-continuous-v11"
 	handled, err := dispatchBackendCommand(args, output)
 	if err != nil {
 		return err
@@ -713,7 +713,7 @@ func runProcessRuns(args []string) error {
 	workers := fs.Int("workers", 4, "number of parallel workers")
 	force := fs.Bool("force", false, "reprocess trips even when their fingerprint and published outputs are complete")
 	datasetOnly := fs.Bool("dataset-only", false, "reuse existing frames/ and regenerate only dataset.jsonl")
-	stopSignOnly := fs.Bool("stop-sign-only", false, "process only stop-sign temporal-v1 scenes; reports retain every scene in affected runs")
+	stopSignOnly := fs.Bool("stop-sign-only", false, "process only stop-sign continuous-v2 scenes; reports retain every scene in affected runs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -905,7 +905,7 @@ func processRunError(discovered int, finished int, failed int, contextErr error)
 func runReportRuns(args []string) error {
 	fs := flag.NewFlagSet("report-runs", flag.ContinueOnError)
 	root := fs.String("root", filepath.Join(defaultBackendDataRoot(), "runs"), "root directory to scan for trip folders")
-	stopSignOnly := fs.Bool("stop-sign-only", false, "report runs containing stop-sign temporal-v1 scenes, retaining every scene in those runs")
+	stopSignOnly := fs.Bool("stop-sign-only", false, "report runs containing stop-sign continuous-v2 scenes, retaining every scene in those runs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

@@ -37,7 +37,7 @@ const missingAudits = selectedRunIds.filter((runId) => !auditedRunIds.has(runId)
 if (missingAudits.length > 0) {
     throw new Error(`Training split contains runs that did not pass RGB/telemetry audit: ${missingAudits.join(", ")}`);
 }
-const observedClipStages = new Set(auditedTrips.map((trip) => trip.clipStage));
+const observedClipStages = new Set(auditedTrips.flatMap((trip) => trip.clipStages));
 const missingClipStages = STOP_SIGN_CLIP_STAGES.filter((stage) => !observedClipStages.has(stage));
 if (missingClipStages.length > 0) {
     throw new Error(`Training split is missing stage clips: ${missingClipStages.join(", ")}`);
@@ -47,12 +47,12 @@ const audit = {
     sampleCount: auditedTrips.reduce((count, trip) => count + trip.sampleCount, 0),
     locationCount: new Set(auditedTrips.map((trip) => trip.location)).size,
     variations: [...new Set(auditedTrips.flatMap((trip) => trip.variations))].sort(),
-    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, auditedTrips.filter((trip) => trip.clipStage === stage).length])),
+    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, auditedTrips.reduce((count, trip) => count + (trip.clipStageCounts[stage] ?? 0), 0)])),
 };
 
 const spec = {
     name: options.name ?? `stop-sign-${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}`,
-    notes: "Stage-locked RGB clips: approach, brake-to-stop, scripted release.",
+    notes: "Continuous RGB attempts with overlapping approach, brake-to-stop, and release windows.",
     epochs,
     trainRunIds,
     valRunIds,

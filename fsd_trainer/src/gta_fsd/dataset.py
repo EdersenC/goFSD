@@ -39,6 +39,7 @@ from target_transforms import (
 from state_inputs import build_state_input_vector_from_mapping, state_input_config_from_metadata
 from stop_sign_contract import (
     normalize_stop_sign_clip_stage,
+    stop_sign_clip_stage_for_phase,
     stop_location_key_from_metadata,
     stop_sign_phase_from_telemetry,
 )
@@ -406,11 +407,12 @@ def _is_successful_stop_sign_attempt(trip_dir: Path) -> bool:
     outcome = metadata.get("stopSignOutcome")
     return (
         str(metadata.get("sceneId", "")).strip().lower() == "stop-sign"
-        and str(metadata.get("sceneVariant", "")).strip().lower() == "temporal-v1"
+        and str(metadata.get("sceneVariant", "")).strip().lower() == "continuous-v2"
         and isinstance(goal, Mapping)
         and str(goal.get("task", "")).strip().lower() == "stop-sign"
-        and str(goal.get("contract", "")).strip().lower() == "stop-sign-goal.v2"
-        and str(goal.get("clipStage", "")).strip().lower() in {"approach", "brake_stop", "release"}
+        and str(goal.get("contract", "")).strip().lower() == "stop-sign-goal.v3"
+        and str(goal.get("captureMode", "")).strip().lower() == "continuous"
+        and _has_exact_logical_clip_stages(goal.get("logicalClipStages"))
         and all(
             _is_complete_stop_sign_pose(goal.get(key))
             for key in ("signPose", "stopLinePose", "egoStopPose", "startPose", "exitPose")
@@ -418,6 +420,7 @@ def _is_successful_stop_sign_attempt(trip_dir: Path) -> bool:
         and isinstance(outcome, Mapping)
         and outcome.get("success") is True
         and str(outcome.get("status", "")).strip().lower() == "succeeded"
+        and _ordered_stage_transitions(outcome.get("stageTransitions"))
     )
 
 
@@ -425,10 +428,35 @@ def _is_finite_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
 
 
+def _has_exact_logical_clip_stages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(isinstance(stage, str) for stage in value)
+        and set(value) == {"approach", "brake_stop", "release"}
+    )
+
+
 def _is_complete_stop_sign_pose(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
     return all(_is_finite_number(value.get(key)) for key in ("x", "y", "z", "heading"))
+
+
+def _ordered_stage_transitions(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    keys = (
+        "approachStartedGameTimeMs",
+        "brakeStopStartedGameTimeMs",
+        "stopConfirmedGameTimeMs",
+        "releaseStartedGameTimeMs",
+        "completedGameTimeMs",
+    )
+    timestamps = tuple(value.get(key) for key in keys)
+    return all(_is_finite_number(timestamp) for timestamp in timestamps) and all(
+        current <= following for current, following in zip(timestamps, timestamps[1:])
+    )
 
 
 def _coerce_float(mapping: TelemetryMap, key: str) -> float:
@@ -716,15 +744,6 @@ class FsdDataset(Dataset[DatasetItem]):
                 if not self.include_failed_or_non_stop_sign_trips:
                     raise
                 location_key = f"unscored:{trip.trip_key}"
-            goal = metadata.get("stopSignGoal")
-            try:
-                clip_stage = normalize_stop_sign_clip_stage(
-                    goal.get("clipStage") if isinstance(goal, Mapping) else None
-                )
-            except ValueError:
-                if not self.include_failed_or_non_stop_sign_trips:
-                    raise
-                clip_stage = "unscored"
             with dataset_path.open("rb") as handle:
                 while True:
                     byte_offset = handle.tell()
@@ -738,6 +757,17 @@ class FsdDataset(Dataset[DatasetItem]):
                     if not self._sample_has_required_offsets(sample):
                         continue
                     phase = stop_sign_phase_from_telemetry(sample["telemetry_history"][-1])
+                    try:
+                        clip_stage = normalize_stop_sign_clip_stage(sample.get("clip_stage"))
+                        expected_clip_stage = stop_sign_clip_stage_for_phase(phase)
+                        if clip_stage != expected_clip_stage:
+                            raise ValueError(
+                                f"sample clip_stage {clip_stage} does not match anchor phase {phase}"
+                            )
+                    except ValueError:
+                        if not self.include_failed_or_non_stop_sign_trips:
+                            raise
+                        clip_stage = "unscored"
                     trip.sample_indices.append(len(samples))
                     samples.append(DatasetSampleRef(
                         dataset_path=dataset_path,

@@ -2,6 +2,7 @@ import {
     captureScenePose,
     createStopSignPlan,
     currentSceneStep,
+    migrateImplicitCatalogDrafts,
     parseStoredStopSignPlan,
     planForScene,
     stageStopSignCatalogLocation,
@@ -31,6 +32,16 @@ assertEqual(queued.entries[0]?.startPose?.y, -40);
 assertEqual(queued.entries[0]?.egoStopPose?.y, 0);
 assertEqual(queued.entries[0]?.exitPose?.y, 12);
 assertEqual(parseStoredStopSignPlan(JSON.stringify(plan))?.entries[0]?.catalogId, location.id);
+
+const implicitDraft = stageStopSignCatalogLocation(plan, {
+    id: "gta-v-sign-0024",
+    x: -1820,
+    y: 3210,
+    z: 31,
+}).plan;
+const migrated = migrateImplicitCatalogDrafts(implicitDraft);
+assertEqual(migrated.entries.length, 1);
+assertEqual(migrated.entries[0]?.catalogId, location.id);
 
 const backward = captureScenePose(plan, 0, "exitPose", {x: 0, y: -10, z: 30, heading: 0});
 assert(validateStopSignPlan(backward).some((error) => error.includes("End must be")));

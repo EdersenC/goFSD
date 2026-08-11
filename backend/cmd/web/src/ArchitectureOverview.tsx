@@ -6,8 +6,8 @@ const phases = [
     ["accelerate", "Launch from the saved start pose"],
     ["cruise_approach", "Hold the planned approach speed"],
     ["decelerate", "Reduce the speed profile before the line"],
-    ["stop_hold", "Confirm zero speed briefly, then end the brake_stop clip"],
-    ["release", "Start a separate scripted release clip from the Stop pose"],
+    ["stop_hold", "Confirm zero speed briefly without ending the recording"],
+    ["release", "Continue smoothly toward End in the same physical run"],
 ] as const;
 
 export function ArchitectureOverview() {
@@ -27,14 +27,14 @@ export function ArchitectureOverview() {
 
                 <Section title="Model → controller → game">
                     <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", md: "1fr auto 1fr auto 1fr"}, gap: 1.5, alignItems: "stretch"}}>
-                        <FlowCard eyebrow="Input" title="Causal RGB clip" detail="Five RGB frames over one second. Current speed may be added explicitly; sign geometry never enters the model." />
+                        <FlowCard eyebrow="Input" title="Causal RGB window" detail="Five RGB frames over one second from a continuous run. Current speed may be added explicitly; sign geometry never enters the model." />
                         <FlowArrow />
                         <FlowCard eyebrow="Learned" title="Temporal motion plan" detail="Future speed at 0.1, 0.25, 0.5, and 1 second plus stop intent. No raw controller voltages." />
                         <FlowArrow />
                         <FlowCard eyebrow="Deterministic" title="Feedback controller" detail="Tracks speed, latches the stop, rate-limits output, and guarantees throttle and brake are mutually exclusive before FiveM." />
                     </Box>
                     <Typography variant="caption" color="warning.main" sx={{display: "block", mt: 2}}>
-                        Release is a separate scripted stage clip. The runtime transition is not claimed as learned behavior.
+                        The controller triggers release after the brief confirmation, but recording and temporal history remain continuous. Stage labels are supervision, never model inputs.
                     </Typography>
                 </Section>
 
@@ -69,7 +69,7 @@ export function ArchitectureOverview() {
                 <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", md: "1fr 1fr"}, gap: 2, mt: 2}}>
                     <Section title="Dataset boundary">
                         <Typography variant="body2" color="text.secondary">
-                            Store complete clips with synchronized RGB, speed, acceleration, physical brake pressure, expert throttle/brake diagnostics, phase, stop/go labels, goal revision, variant seed, and outcome. Failed attempts stay inspectable but are excluded from expert training by default.
+                            Store one complete attempt with synchronized RGB, speed, acceleration, physical brake pressure, expert throttle/brake diagnostics, per-frame phase, boundary timestamps, goal revision, variant seed, and outcome. Failed attempts stay inspectable but are excluded from expert training by default.
                         </Typography>
                         <Typography variant="body2" color="text.secondary" sx={{mt: 1.5}}>
                             Build a phase-balanced training index and split by stop location or scenario family—never by individual frame.
@@ -77,7 +77,7 @@ export function ArchitectureOverview() {
                     </Section>
                     <Section title="Runtime ownership">
                         <ContractRow name="Catalog" detail="463 physical prop locations for navigation only" />
-                        <ContractRow name="FiveM" detail="Scene setup, expert clips, physical telemetry" />
+                        <ContractRow name="FiveM" detail="Scene setup, continuous expert attempts, physical telemetry" />
                         <ContractRow name="Go backend" detail="Capture, batch queue, processing, guarded controller" />
                         <ContractRow name="Python" detail="Temporal dataset, training, checkpoint server" />
                         <ContractRow name="Workbench" detail="Collect, Data, Train, Evaluate, global Hold" />

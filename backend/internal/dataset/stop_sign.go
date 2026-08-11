@@ -107,6 +107,7 @@ func buildStopSignSamplesWithImageOffsetsAndStats(
 			Label:            trainingLabel,
 			Task:             stopSignTask,
 			Phase:            phase,
+			ClipStage:        stopSignClipStageForPhase(phase),
 		})
 		stats.GeneratedSampleCount++
 	}
@@ -221,7 +222,6 @@ func decorateStopSignSamples(samples []DatasetSample, metadata tripMetadata) []D
 	eligible, exclusionReason := stopSignTrainingEligibility(metadata.StopSignGoal, metadata.StopSignOutcome)
 	locationID := stopSignLocationID(metadata.StopSignGoal)
 	variationID, _ := nonEmptyString(metadata.StopSignGoal["variationId"])
-	clipStage, _ := nonEmptyString(metadata.StopSignGoal["clipStage"])
 
 	for index := range samples {
 		value := eligible
@@ -229,7 +229,6 @@ func decorateStopSignSamples(samples []DatasetSample, metadata tripMetadata) []D
 		samples[index].ScenarioLocationID = locationID
 		samples[index].ScenarioSplitGroup = locationID
 		samples[index].VariationID = variationID
-		samples[index].ClipStage = clipStage
 		samples[index].TrainingEligible = &value
 		samples[index].TrainingExclusionReason = exclusionReason
 		samples[index].StopSignGoal = cloneMap(metadata.StopSignGoal)
@@ -244,10 +243,8 @@ func stopSignTrainingEligibility(goal map[string]any, outcome map[string]any) (b
 	}
 	task, taskOK := nonEmptyString(goal["task"])
 	contract, contractOK := nonEmptyString(goal["contract"])
-	clipStage, clipStageOK := nonEmptyString(goal["clipStage"])
-	_, supportedClipStage := stopSignClipStages[clipStage]
-	if !taskOK || !strings.EqualFold(task, stopSignTask) || !contractOK || contract != "stop-sign-goal.v2" ||
-		!clipStageOK || !supportedClipStage || stopSignLocationID(goal) == "" || !completeStopSignScene(goal) {
+	if !taskOK || !strings.EqualFold(task, stopSignTask) || !contractOK || contract != "stop-sign-goal.v3" ||
+		!continuousStopSignGoal(goal) || stopSignLocationID(goal) == "" || !completeStopSignScene(goal) {
 		return false, "invalid_stop_sign_goal"
 	}
 	if len(outcome) == 0 {
@@ -261,7 +258,88 @@ func stopSignTrainingEligibility(goal map[string]any, outcome map[string]any) (b
 	if !success || !strings.EqualFold(status, "succeeded") {
 		return false, "stop_sign_outcome_not_succeeded"
 	}
+	if !completeStopSignTransitions(outcome["stageTransitions"]) {
+		return false, "invalid_stop_sign_stage_transitions"
+	}
 	return true, ""
+}
+
+func continuousStopSignGoal(goal map[string]any) bool {
+	captureMode, captureModeOK := nonEmptyString(goal["captureMode"])
+	if !captureModeOK || captureMode != "continuous" {
+		return false
+	}
+	rawStages, ok := stringValues(goal["logicalClipStages"])
+	if !ok || len(rawStages) != len(stopSignClipStages) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(rawStages))
+	for _, stage := range rawStages {
+		stage = strings.TrimSpace(stage)
+		if stage == "" {
+			return false
+		}
+		if _, supported := stopSignClipStages[stage]; !supported {
+			return false
+		}
+		seen[stage] = struct{}{}
+	}
+	return len(seen) == len(stopSignClipStages)
+}
+
+func stringValues(value any) ([]string, bool) {
+	switch values := value.(type) {
+	case []string:
+		return append([]string(nil), values...), true
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, text)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func completeStopSignTransitions(value any) bool {
+	transitions, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	keys := []string{
+		"approachStartedGameTimeMs",
+		"brakeStopStartedGameTimeMs",
+		"stopConfirmedGameTimeMs",
+		"releaseStartedGameTimeMs",
+		"completedGameTimeMs",
+	}
+	previous := -math.MaxFloat64
+	for _, key := range keys {
+		value, ok := finiteNumber(transitions[key])
+		if !ok || value < previous {
+			return false
+		}
+		previous = value
+	}
+	return true
+}
+
+func stopSignClipStageForPhase(phase string) string {
+	switch phase {
+	case "accelerate", "cruise_approach":
+		return "approach"
+	case "decelerate", "stop_hold":
+		return "brake_stop"
+	case "release":
+		return "release"
+	default:
+		panic(fmt.Sprintf("unsupported stop-sign phase %q", phase))
+	}
 }
 
 func completeStopSignScene(goal map[string]any) bool {

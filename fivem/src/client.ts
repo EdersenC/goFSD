@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-stop-sign-stage-clips-v7";
+const CLIENT_BUILD_ID = "2026-08-11-stop-sign-continuous-v8";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 

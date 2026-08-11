@@ -18,7 +18,7 @@ STOP_SIGN_PHASES = (
 STOP_SIGN_PHASE_SET = frozenset(STOP_SIGN_PHASES)
 STOP_SIGN_CLIP_STAGES = ("approach", "brake_stop", "release")
 STOP_SIGN_CLIP_STAGE_SET = frozenset(STOP_SIGN_CLIP_STAGES)
-RELEASE_POLICY_NAME = "scripted_stage_release_v1"
+RELEASE_POLICY_NAME = "scripted_continuous_release_v2"
 
 
 def normalize_stop_sign_phase(value: Any) -> str:
@@ -35,10 +35,19 @@ def normalize_stop_sign_clip_stage(value: Any) -> str:
     stage = str(value).strip().lower()
     if stage not in STOP_SIGN_CLIP_STAGE_SET:
         raise ValueError(
-            "stopSignGoal.clipStage must be one of "
+            "sample clip_stage must be one of "
             f"{list(STOP_SIGN_CLIP_STAGES)}, got {stage or '<missing>'}"
         )
     return stage
+
+
+def stop_sign_clip_stage_for_phase(value: Any) -> str:
+    phase = normalize_stop_sign_phase(value)
+    if phase in {"accelerate", "cruise_approach"}:
+        return "approach"
+    if phase in {"decelerate", "stop_hold"}:
+        return "brake_stop"
+    return "release"
 
 
 def stop_sign_phase_from_telemetry(telemetry: Mapping[str, Any]) -> str:
@@ -129,8 +138,8 @@ def deterministic_longitudinal_command(
 ) -> LongitudinalCommand:
     """Translate the nearest learned setpoint into exclusive throttle or brake.
 
-    V1 keeps release as a separate scripted stage. The runtime starts that clip
-    from the captured Stop pose; this translator does not claim to learn the transition.
+    V2 keeps the brief stop confirmation and release trigger deterministic while
+    preserving release examples inside the same continuous temporal recording.
     """
     current_speed = _finite_number(current_speed_mps, "current_speed_mps")
     if current_speed < 0.0:
@@ -150,9 +159,9 @@ def deterministic_longitudinal_command(
 def release_policy_metadata() -> dict[str, Any]:
     return {
         "name": RELEASE_POLICY_NAME,
-        "version": 0,
+        "version": 2,
         "learned": False,
-        "description": "release is collected and executed as a separate scripted stage clip",
+        "description": "controller triggers release after brief confirmation inside one continuous attempt",
     }
 
 

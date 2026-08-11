@@ -52,7 +52,7 @@ estimated_actuation_latency = '50ms'
 expected_horizon_dt_ms = [100, 250, 500, 1000]
 
 [backend.stop_sign_controller.release_policy]
-name = 'scripted_stage_release_v1'
+name = 'scripted_continuous_release_v2'
 learned = false
 
 [backend.inference]
@@ -91,7 +91,7 @@ sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
 train_run_ids = []
 val_run_ids = []
-# Stop-sign training uses only successful temporal-v1 attempts with complete goal/outcome metadata by default.
+# Stop-sign training uses only successful continuous-v2 attempts with complete goal/outcome metadata by default.
 include_failed_or_non_stop_sign_trips = false
 
 [dataset.target_transforms]

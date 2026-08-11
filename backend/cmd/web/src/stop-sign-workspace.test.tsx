@@ -38,13 +38,18 @@ const editorMarkup = render(
         captureBusy={false}
     />,
 );
-for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded variants", "50 clips", "Motion variance"]) {
+for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded variants", "50 continuous runs", "Motion variance"]) {
     assert(editorMarkup.includes(label), `plan editor missing ${label}`);
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
 
-const catalogMarkup = render(<StopSignCatalog connected onTeleport={() => undefined} />);
-for (const label of ["Choose a stop sign", "Search all signs", "Teleport", "Every verified main-map stop sign"]) {
+const catalogMarkup = render(<StopSignCatalog
+    connected
+    candidate={{id: "gta-v-sign-0023", model: "prop_sign_road_01a", kind: "stop", x: 1, y: 2, z: 3, tilted: false, sourceYmap: "test"}}
+    onTeleport={() => undefined}
+    onUseCandidate={() => undefined}
+/>);
+for (const label of ["Choose a stop sign", "Search all signs", "Teleport", "only previews", "Use this stop sign", "has not been added"]) {
     assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
 }
 

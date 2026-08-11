@@ -38,11 +38,12 @@ from train import (
 )
 
 
-def stop_sign_goal(clip_stage: str = "brake_stop") -> dict[str, object]:
+def stop_sign_goal() -> dict[str, object]:
     return {
         "task": "stop-sign",
-        "contract": "stop-sign-goal.v2",
-        "clipStage": clip_stage,
+        "contract": "stop-sign-goal.v3",
+        "captureMode": "continuous",
+        "logicalClipStages": ["approach", "brake_stop", "release"],
         "signPose": {"x": 10.0, "y": 20.0, "z": 30.0, "heading": 90.0},
         "stopLinePose": {"x": 8.0, "y": 20.0, "z": 30.0, "heading": 90.0},
         "egoStopPose": {"x": 5.5, "y": 20.0, "z": 30.0, "heading": 90.0},
@@ -76,19 +77,29 @@ def create_trip(
     root: Path,
     *,
     trip_index: int = 0,
-    clip_stage: str = "brake_stop",
     phase: str = "decelerate",
     row_count: int = 1,
+    phases: tuple[str, ...] | None = None,
 ) -> Path:
-    trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / f"trip-{trip_index:03d}"
+    trip_dir = root / "runs" / "run-a" / "stop-sign_continuous-v2" / f"trip-{trip_index:03d}"
     trip_dir.mkdir(parents=True)
     metadata = {
         "runId": "run-a",
         "sceneId": "stop-sign",
-        "sceneVariant": "temporal-v1",
+        "sceneVariant": "continuous-v2",
         "tripIndex": trip_index,
-        "stopSignGoal": stop_sign_goal(clip_stage),
-        "stopSignOutcome": {"success": True, "status": "succeeded"},
+        "stopSignGoal": stop_sign_goal(),
+        "stopSignOutcome": {
+            "success": True,
+            "status": "succeeded",
+            "stageTransitions": {
+                "approachStartedGameTimeMs": 1000,
+                "brakeStopStartedGameTimeMs": 2000,
+                "stopConfirmedGameTimeMs": 3000,
+                "releaseStartedGameTimeMs": 3000,
+                "completedGameTimeMs": 4000,
+            },
+        },
     }
     (trip_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     frames_dir = trip_dir / "frames"
@@ -102,27 +113,31 @@ def create_trip(
         )
         frame_paths.append(relative)
 
-    history = [
-        telemetry_point(5.0, desired_speed=5.0, stop_intent=0.0, phase=phase)
-        for _ in DEFAULT_TELEMETRY_OFFSETS
-    ]
-    future = [
-        telemetry_point(
-            max(0.0, 6.0 - index),
-            desired_speed=max(0.0, 6.0 - index),
-            stop_intent=1.0 if index >= 4 else 0.0,
-            phase="stop_hold" if index >= 4 else "decelerate",
-        )
-        for index in range(max(DEFAULT_FUTURE_OFFSETS))
-    ]
-    row = {
-        "frame_paths": frame_paths,
-        "telemetry_history": history,
-        "telemetry_future": future,
-        "label": {"control": {}, "aux": {}},
-    }
+    row_phases = phases or tuple(phase for _ in range(row_count))
+    rows = []
+    for row_phase in row_phases:
+        history = [
+            telemetry_point(5.0, desired_speed=5.0, stop_intent=0.0, phase=row_phase)
+            for _ in DEFAULT_TELEMETRY_OFFSETS
+        ]
+        future = [
+            telemetry_point(
+                max(0.0, 6.0 - index),
+                desired_speed=max(0.0, 6.0 - index),
+                stop_intent=1.0 if index >= 4 else 0.0,
+                phase="stop_hold" if index >= 4 else "decelerate",
+            )
+            for index in range(max(DEFAULT_FUTURE_OFFSETS))
+        ]
+        rows.append({
+            "frame_paths": frame_paths,
+            "telemetry_history": history,
+            "telemetry_future": future,
+            "label": {"control": {}, "aux": {}},
+            "clip_stage": clip_stage_for_phase(row_phase),
+        })
     (trip_dir / "dataset.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for _ in range(row_count)),
+        "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
     fingerprint = "sha256:" + ("a" * 64)
@@ -136,12 +151,20 @@ def create_trip(
         "futureOffsets": list(DEFAULT_FUTURE_OFFSETS),
         "telemetrySampleIntervalMs": 50,
         "frameCount": len(DEFAULT_IMAGE_OFFSETS),
-        "sampleCount": row_count,
-        "datasetRowCount": row_count,
+        "sampleCount": len(rows),
+        "datasetRowCount": len(rows),
         "referencedFrameCount": len(DEFAULT_IMAGE_OFFSETS),
     }
     (trip_dir / "processing.json").write_text(json.dumps(processing), encoding="utf-8")
     return trip_dir
+
+
+def clip_stage_for_phase(phase: str) -> str:
+    if phase in {"accelerate", "cruise_approach"}:
+        return "approach"
+    if phase in {"decelerate", "stop_hold"}:
+        return "brake_stop"
+    return "release"
 
 
 class StopSignTemporalPlannerTests(unittest.TestCase):
@@ -211,31 +234,23 @@ class StopSignTemporalPlannerTests(unittest.TestCase):
         self.assertEqual(len(dataset), 0)
         self.assertEqual(dataset.excluded_failed_or_non_stop_sign_trip_count, 1)
 
-    def test_stage_clips_remain_separate_and_balance_by_stage_and_phase(self) -> None:
+    def test_continuous_trip_balances_logical_stage_and_phase_windows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             create_trip(
                 root,
                 trip_index=0,
-                clip_stage="approach",
-                phase="cruise_approach",
-                row_count=2,
-            )
-            create_trip(
-                root,
-                trip_index=1,
-                clip_stage="brake_stop",
-                phase="decelerate",
+                phases=("cruise_approach", "cruise_approach", "decelerate", "stop_hold", "release"),
             )
             dataset = FsdDataset(
                 run_paths=[root / "runs" / "run-a"],
                 image_size=(32, 32),
             )
 
-        self.assertEqual(dataset.trip_sample_indices(), [[0, 1], [2]])
+        self.assertEqual(dataset.trip_sample_indices(), [[0, 1, 2, 3, 4]])
         self.assertEqual(
             tuple(sample.clip_stage for sample in dataset.samples),
-            ("approach", "approach", "brake_stop"),
+            ("approach", "approach", "brake_stop", "brake_stop", "release"),
         )
         self.assertEqual(
             tuple((sample.clip_stage, sample.phase) for sample in dataset.samples),
@@ -243,9 +258,11 @@ class StopSignTemporalPlannerTests(unittest.TestCase):
                 ("approach", "cruise_approach"),
                 ("approach", "cruise_approach"),
                 ("brake_stop", "decelerate"),
+                ("brake_stop", "stop_hold"),
+                ("release", "release"),
             ),
         )
-        self.assertEqual(dataset.phase_balanced_sample_weights(), (0.5, 0.5, 1.0))
+        self.assertEqual(dataset.phase_balanced_sample_weights(), (0.5, 0.5, 1.0, 1.0, 1.0))
 
     def test_model_outputs_bounded_stop_sign_motion_plan(self) -> None:
         model = StopSignTemporalPlanner(

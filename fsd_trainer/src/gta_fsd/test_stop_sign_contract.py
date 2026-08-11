@@ -21,7 +21,7 @@ class StopSignTemporalContractTests(unittest.TestCase):
         self.assertEqual(STOP_SIGN_CLIP_STAGES, ("approach", "brake_stop", "release"))
         for stage in STOP_SIGN_CLIP_STAGES:
             self.assertEqual(normalize_stop_sign_clip_stage(stage), stage)
-        with self.assertRaisesRegex(ValueError, "clipStage"):
+        with self.assertRaisesRegex(ValueError, "clip_stage"):
             normalize_stop_sign_clip_stage("approach_and_stop")
 
     def test_fine_phase_contract_is_closed_and_explicit(self) -> None:
@@ -58,7 +58,7 @@ class StopSignTemporalContractTests(unittest.TestCase):
             require_disjoint_stop_locations((first,), (second,))
 
     def test_deterministic_handoff_never_applies_throttle_and_brake_together(self) -> None:
-        self.assertEqual(RELEASE_POLICY_NAME, "scripted_stage_release_v1")
+        self.assertEqual(RELEASE_POLICY_NAME, "scripted_continuous_release_v2")
         accelerate = StopSignMotionPlan((100, 250), (4.0, 3.5), (0.0, 0.0))
         accelerate_command = deterministic_longitudinal_command(accelerate, current_speed_mps=1.0)
         self.assertGreater(accelerate_command.throttle, 0.0)

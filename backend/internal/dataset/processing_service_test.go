@@ -270,7 +270,7 @@ func TestProcessingServiceRecoversQueuedAndRunningTrips(t *testing.T) {
 func TestProcessingServiceRecoveryPredicateLeavesExcludedTripUntouched(t *testing.T) {
 	runsRoot := t.TempDir()
 	stopSignTrip := createReadyProcessingTrip(t, runsRoot, 0, "queued")
-	stopSignSceneDir := filepath.Join(runsRoot, "run-a", "stop-sign_temporal-v1")
+	stopSignSceneDir := filepath.Join(runsRoot, "run-a", "stop-sign_continuous-v2")
 	if err := os.Rename(filepath.Dir(stopSignTrip), stopSignSceneDir); err != nil {
 		t.Fatalf("move fixture into stop-sign scene: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestProcessingServiceRecoveryPredicateLeavesExcludedTripUntouched(t *testin
 		ReadinessPollInterval: time.Millisecond,
 		RecoveryTripPredicate: func(tripDir string) bool {
 			sceneDir := filepath.Base(filepath.Dir(filepath.Clean(tripDir)))
-			return sceneDir == "stop-sign_temporal-v1"
+			return sceneDir == "stop-sign_continuous-v2"
 		},
 	}, harness.factory)
 	if err != nil {

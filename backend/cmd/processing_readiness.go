@@ -52,20 +52,30 @@ type trainingStopSignMetadata struct {
 	SceneID      string `json:"sceneId"`
 	SceneVariant string `json:"sceneVariant"`
 	StopSignGoal struct {
-		Task         string                `json:"task"`
-		Contract     string                `json:"contract"`
-		ClipStage    string                `json:"clipStage"`
-		CatalogID    string                `json:"catalogId"`
-		SignPose     *trainingStopSignPose `json:"signPose"`
-		StopLinePose *trainingStopSignPose `json:"stopLinePose"`
-		EgoStopPose  *trainingStopSignPose `json:"egoStopPose"`
-		StartPose    *trainingStopSignPose `json:"startPose"`
-		ExitPose     *trainingStopSignPose `json:"exitPose"`
+		Task              string                `json:"task"`
+		Contract          string                `json:"contract"`
+		CaptureMode       string                `json:"captureMode"`
+		LogicalClipStages []string              `json:"logicalClipStages"`
+		CatalogID         string                `json:"catalogId"`
+		SignPose          *trainingStopSignPose `json:"signPose"`
+		StopLinePose      *trainingStopSignPose `json:"stopLinePose"`
+		EgoStopPose       *trainingStopSignPose `json:"egoStopPose"`
+		StartPose         *trainingStopSignPose `json:"startPose"`
+		ExitPose          *trainingStopSignPose `json:"exitPose"`
 	} `json:"stopSignGoal"`
 	StopSignOutcome struct {
-		Success bool   `json:"success"`
-		Status  string `json:"status"`
+		Success          bool                          `json:"success"`
+		Status           string                        `json:"status"`
+		StageTransitions *trainingStageTransitionTimes `json:"stageTransitions"`
 	} `json:"stopSignOutcome"`
+}
+
+type trainingStageTransitionTimes struct {
+	ApproachStartedGameTimeMS  *float64 `json:"approachStartedGameTimeMs"`
+	BrakeStopStartedGameTimeMS *float64 `json:"brakeStopStartedGameTimeMs"`
+	StopConfirmedGameTimeMS    *float64 `json:"stopConfirmedGameTimeMs"`
+	ReleaseStartedGameTimeMS   *float64 `json:"releaseStartedGameTimeMs"`
+	CompletedGameTimeMS        *float64 `json:"completedGameTimeMs"`
 }
 
 type trainingStopSignPose struct {
@@ -82,7 +92,7 @@ func runProcessingStatus(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("processing-status", flag.ContinueOnError)
 	flags.SetOutput(output)
 	root := flags.String("root", filepath.Join(defaultBackendDataRoot(), "runs"), "root directory to inspect for trip folders")
-	stopSignOnly := flags.Bool("stop-sign-only", false, "summarize only stop-sign temporal-v1 scene folders")
+	stopSignOnly := flags.Bool("stop-sign-only", false, "summarize only stop-sign continuous-v2 scene folders")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -122,7 +132,7 @@ func buildProcessingReadinessSummary(
 		TrainingClipStageCounts: make(map[string]int),
 	}
 	if stopSignOnly {
-		summary.Scope = "stop-sign-temporal-v1"
+		summary.Scope = "stop-sign-continuous-v2"
 	}
 
 	runCount, rootExists, err := countProcessingRunDirs(runsRoot)
@@ -191,8 +201,10 @@ func buildProcessingReadinessSummary(
 		if run.clipStages == nil {
 			run.clipStages = make(map[string]struct{})
 		}
-		run.clipStages[clipStage] = struct{}{}
-		summary.TrainingClipStageCounts[clipStage]++
+		for _, stage := range logicalClipStagesForTrip(clipStage) {
+			run.clipStages[stage] = struct{}{}
+			summary.TrainingClipStageCounts[stage]++
+		}
 	}
 	for runID, run := range runReadiness {
 		if run.tripCount == 0 || run.currentTripCount != run.tripCount {
@@ -226,34 +238,67 @@ func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid 
 		return false, false, "", ""
 	}
 	eligible = strings.EqualFold(strings.TrimSpace(metadata.SceneID), "stop-sign") &&
-		strings.EqualFold(strings.TrimSpace(metadata.SceneVariant), "temporal-v1") &&
+		strings.EqualFold(strings.TrimSpace(metadata.SceneVariant), "continuous-v2") &&
 		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Task), "stop-sign") &&
-		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Contract), "stop-sign-goal.v2") &&
-		validTrainingClipStage(metadata.StopSignGoal.ClipStage) &&
+		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Contract), "stop-sign-goal.v3") &&
+		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.CaptureMode), "continuous") &&
+		validTrainingLogicalClipStages(metadata.StopSignGoal.LogicalClipStages) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.SignPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.StopLinePose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.EgoStopPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.StartPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.ExitPose) &&
 		metadata.StopSignOutcome.Success &&
-		strings.EqualFold(strings.TrimSpace(metadata.StopSignOutcome.Status), "succeeded")
+		strings.EqualFold(strings.TrimSpace(metadata.StopSignOutcome.Status), "succeeded") &&
+		orderedTrainingStageTransitions(metadata.StopSignOutcome.StageTransitions)
 	if !eligible {
 		return false, true, "", ""
 	}
-	clipStage = strings.TrimSpace(metadata.StopSignGoal.ClipStage)
+	clipStage = "continuous"
 	if catalogID := strings.ToLower(strings.TrimSpace(metadata.StopSignGoal.CatalogID)); catalogID != "" {
 		return true, true, "catalog:" + catalogID, clipStage
 	}
 	return true, true, trainingStopSignLocationKey(metadata.StopSignGoal.SignPose), clipStage
 }
 
-func validTrainingClipStage(value string) bool {
-	switch strings.TrimSpace(value) {
-	case "approach", "brake_stop", "release":
-		return true
-	default:
+func logicalClipStagesForTrip(value string) []string {
+	if value == "continuous" {
+		return []string{"approach", "brake_stop", "release"}
+	}
+	return []string{value}
+}
+
+func sliceToStringSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[strings.TrimSpace(value)] = struct{}{}
+	}
+	return result
+}
+
+func validTrainingLogicalClipStages(values []string) bool {
+	return len(values) == 3 && hasEveryTrainingClipStage(sliceToStringSet(values))
+}
+
+func orderedTrainingStageTransitions(value *trainingStageTransitionTimes) bool {
+	if value == nil {
 		return false
 	}
+	values := []*float64{
+		value.ApproachStartedGameTimeMS,
+		value.BrakeStopStartedGameTimeMS,
+		value.StopConfirmedGameTimeMS,
+		value.ReleaseStartedGameTimeMS,
+		value.CompletedGameTimeMS,
+	}
+	previous := -math.MaxFloat64
+	for _, current := range values {
+		if !finiteFloatPointer(current) || *current < previous {
+			return false
+		}
+		previous = *current
+	}
+	return true
 }
 
 func hasEveryTrainingClipStage(stages map[string]struct{}) bool {

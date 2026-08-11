@@ -1,62 +1,25 @@
-import {brakingOnsetDistance} from "./expert";
-import {StopSignClipStage, StopSignJob, StopSignPose} from "./types";
+import {StopSignBehaviorPhase, StopSignClipStage} from "./types";
 
-export type StopSignClipPlan = {
-    stage: StopSignClipStage
-    tripIndex: number
-    fromPose: StopSignPose
-    toPose: StopSignPose
-    initialSpeedMps: number
-};
+export const STOP_SIGN_LOGICAL_CLIP_STAGES: readonly StopSignClipStage[] = [
+    "approach",
+    "brake_stop",
+    "release",
+];
 
-export function planStopSignClips(job: StopSignJob, firstTripIndex: number): [StopSignClipPlan, StopSignClipPlan, StopSignClipPlan] {
-    if (!Number.isSafeInteger(firstTripIndex) || firstTripIndex < 0) {
-        throw new Error("Stop-sign clip plan requires a non-negative trip index");
+/**
+ * Assigns a logical training clip to an anchor frame without splitting the
+ * underlying physical recording. History and future windows may cross these
+ * boundaries so the temporal policy keeps the real transition context.
+ */
+export function logicalClipStageForPhase(phase: StopSignBehaviorPhase): StopSignClipStage {
+    switch (phase) {
+        case "accelerate":
+        case "cruise_approach":
+            return "approach";
+        case "decelerate":
+        case "stop_hold":
+            return "brake_stop";
+        case "release":
+            return "release";
     }
-    const brakingStart = brakingStageStartPose(job);
-    return [
-        {
-            stage: "approach",
-            tripIndex: firstTripIndex,
-            fromPose: {...job.startPose},
-            toPose: brakingStart,
-            initialSpeedMps: 0,
-        },
-        {
-            stage: "brake_stop",
-            tripIndex: firstTripIndex + 1,
-            fromPose: brakingStart,
-            toPose: {...job.egoStopPose},
-            initialSpeedMps: job.targetSpeedMps,
-        },
-        {
-            stage: "release",
-            tripIndex: firstTripIndex + 2,
-            fromPose: {...job.egoStopPose},
-            toPose: {...job.exitPose},
-            initialSpeedMps: 0,
-        },
-    ];
-}
-
-export function brakingStageStartPose(job: StopSignJob): StopSignPose {
-    const totalDistanceM = Math.hypot(
-        job.startPose.x - job.egoStopPose.x,
-        job.startPose.y - job.egoStopPose.y,
-        job.startPose.z - job.egoStopPose.z,
-    );
-    if (!Number.isFinite(totalDistanceM) || totalDistanceM <= 2) {
-        throw new Error("Stop-sign stage split requires Start to be more than 2m before Stop");
-    }
-    const brakingDistanceM = Math.min(
-        totalDistanceM - 1,
-        Math.max(2, brakingOnsetDistance(job.targetSpeedMps) + 1),
-    );
-    const ratio = brakingDistanceM / totalDistanceM;
-    return {
-        x: job.egoStopPose.x + (job.startPose.x - job.egoStopPose.x) * ratio,
-        y: job.egoStopPose.y + (job.startPose.y - job.egoStopPose.y) * ratio,
-        z: job.egoStopPose.z + (job.startPose.z - job.egoStopPose.z) * ratio,
-        heading: job.egoStopPose.heading,
-    };
 }

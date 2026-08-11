@@ -5,7 +5,8 @@ import {
     StopSignPlanEntry,
 } from "./types";
 
-export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v4";
+export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v5";
+export const LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v4";
 export const DEFAULT_VARIANT_COUNT = 50;
 export const DEFAULT_MOTION_VARIANCE_PCT = 20;
 export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
@@ -213,6 +214,12 @@ export function parseStoredStopSignPlan(raw: string | null): StopSignPlan | null
     }
 }
 
+export function migrateImplicitCatalogDrafts(plan: StopSignPlan): StopSignPlan {
+    const migrated = cloneStopSignPlan(plan);
+    migrated.entries = migrated.entries.filter(hasCapturedScenePose);
+    return migrated;
+}
+
 export function currentSceneStep(entry?: StopSignPlanEntry): 0 | 1 | 2 | 3 {
     if (!entry?.startPose) return 0;
     if (!entry.egoStopPose) return 1;
@@ -246,6 +253,10 @@ function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
             } : undefined,
         })),
     };
+}
+
+function hasCapturedScenePose(entry: StopSignPlanEntry): boolean {
+    return Boolean(entry.startPose || entry.egoStopPose || entry.exitPose);
 }
 
 function validPose(pose: Pose): boolean {

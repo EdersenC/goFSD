@@ -42,6 +42,8 @@ import {
     captureScenePose,
     cloneStopSignPlan,
     createStopSignPlan,
+    LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY,
+    migrateImplicitCatalogDrafts,
     parseStoredStopSignPlan,
     planForScene,
     type ScenePoseField,
@@ -67,6 +69,7 @@ export function App() {
     }
     const [plan, setPlan] = useState<StopSignPlan>(loadPlan);
     const [activeEntryIndex, setActiveEntryIndex] = useState(0);
+    const [candidateLocation, setCandidateLocation] = useState<StopSignCatalogLocation | null>(null);
     const [teleportingCatalogId, setTeleportingCatalogId] = useState("");
     const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
     const pendingRef = useRef<Set<string>>(new Set());
@@ -221,15 +224,24 @@ export function App() {
                 },
             }, signal));
             await waitForCatalogTeleport(location);
-            const staged = stageStopSignCatalogLocation(plan, location);
-            setPlan(staged.plan);
-            setActiveEntryIndex(staged.entryIndex);
-            setNotice({message: `${location.id} ready. Move to the desired starting point and capture Start.`, severity: "success"});
+            setCandidateLocation(location);
+            setNotice({message: `${location.id} is only a preview. Choose Use this stop sign to add it to your scenes.`, severity: "info"});
             await control.refresh();
         } finally {
             setTeleportingCatalogId("");
         }
     });
+
+    const acceptCandidateLocation = () => {
+        if (!candidateLocation) {
+            return;
+        }
+        const staged = stageStopSignCatalogLocation(plan, candidateLocation);
+        setPlan(staged.plan);
+        setActiveEntryIndex(staged.entryIndex);
+        setCandidateLocation(null);
+        setNotice({message: `${candidateLocation.id} added. Move to the desired starting point and capture Start.`, severity: "success"});
+    };
 
     const capturePoint = (field: ScenePoseField) => operate("capture-point", async () => {
         const state = await fetchControlState();
@@ -264,7 +276,7 @@ export function App() {
         }
         const result = await runControlStart((safetyEpoch, signal) => queueStopSignPlan(activeScenePlan, safetyEpoch, signal));
         if (result.kind === "started") {
-            setNotice({message: `${result.value.jobCount} variants queued · ${stats.attemptCount * 3} stage clips.`, severity: "success"});
+            setNotice({message: `${result.value.jobCount} variants queued · one uninterrupted recording per attempt.`, severity: "success"});
         }
         window.setTimeout(() => void control.refresh(), 250);
     });
@@ -296,11 +308,11 @@ export function App() {
         const trainRunIds = [...new Set(readiness.suggestedTrainRunIds)].sort();
         const valRunIds = [...new Set(readiness.suggestedValRunIds)].sort();
         if (trainRunIds.length < 1 || valRunIds.length < 1) {
-            throw new Error("Training requires successful clips from at least two physical stop-sign locations.");
+            throw new Error("Training requires successful continuous attempts from at least two physical stop-sign locations.");
         }
         const spec: TrainingJobSpec = {
             name: trainingName.trim() || `stop-sign-${new Date().toISOString().slice(0, 10)}`,
-                notes: "Separate stop-sign clips: approach, brake-to-stop, scripted release.",
+                notes: "Continuous stop-sign attempts with overlapping approach, brake-to-stop, and release windows.",
             epochs,
             trainRunIds,
             valRunIds,
@@ -394,7 +406,10 @@ export function App() {
                             connected={fivemControlReady}
                             busyId={teleportingCatalogId}
                             activeCatalogId={plan.entries[activeEntryIndex]?.catalogId}
+                            candidate={candidateLocation}
+                            savedCatalogIds={plan.entries.flatMap((entry) => entry.catalogId ? [entry.catalogId] : [])}
                             onTeleport={teleportToCatalogLocation}
+                            onUseCandidate={acceptCandidateLocation}
                         />
                         <PlanEditor
                             plan={plan}
@@ -413,6 +428,7 @@ export function App() {
                             connected={fivemControlReady}
                             active={collectionActive}
                             valid={planErrors.length === 0}
+                            validationError={planErrors[0]}
                             variantCount={stats.variationCount}
                             batchProgress={batchProgress(activeBatch)}
                             pending={pending}
@@ -473,10 +489,11 @@ export function App() {
     );
 }
 
-function CollectionControls({connected, active, valid, variantCount, batchProgress, pending, onStartSetup, onQueue, onStop}: {
+function CollectionControls({connected, active, valid, validationError, variantCount, batchProgress, pending, onStartSetup, onQueue, onStop}: {
     connected: boolean
     active: boolean
     valid: boolean
+    validationError?: string
     variantCount: number
     batchProgress: number
     pending: ReadonlySet<string>
@@ -489,9 +506,11 @@ function CollectionControls({connected, active, valid, variantCount, batchProgre
             <CardContent>
                 <Typography id="run-control-title" variant="h2">Run control</Typography>
                 <Stack sx={{gap: 1, mt: 1.5}}>
+                    {!connected && <Alert severity="warning">FiveM control is not synchronized yet.</Alert>}
+                    {connected && !valid && validationError && <Alert severity="warning">{validationError}</Alert>}
                     <Button variant="outlined" disabled={!connected || pending.has("setup") || active} onClick={onStartSetup}>Start setup car</Button>
                     <Button variant="contained" startIcon={<PlayArrowRounded />} disabled={!connected || !valid || active || pending.has("queue")} onClick={onQueue}>
-                        Collect {variantCount} variant{variantCount === 1 ? "" : "s"} · {variantCount * 3} clips
+                        Collect {variantCount} continuous variant{variantCount === 1 ? "" : "s"}
                     </Button>
                     <Button variant="outlined" color="warning" startIcon={<StopRounded />} disabled={!active || pending.has("end-collection")} onClick={onStop}>End collection</Button>
                 </Stack>
@@ -535,7 +554,7 @@ function DataTrainingPanel({readiness, processingActive, trainingName, epochs, a
                     <DataMetric label="Samples" value={readiness?.trainingSampleCount ?? 0} />
                 </Box>
                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mb: 1.5}}>
-                    Stage clips · approach {readiness?.trainingClipStageCounts?.approach ?? 0} · brake_stop {readiness?.trainingClipStageCounts?.brake_stop ?? 0} · release {readiness?.trainingClipStageCounts?.release ?? 0}
+                    Logical windows · approach {readiness?.trainingClipStageCounts?.approach ?? 0} · brake_stop {readiness?.trainingClipStageCounts?.brake_stop ?? 0} · release {readiness?.trainingClipStageCounts?.release ?? 0}
                 </Typography>
                 <Button variant="outlined" color="secondary" disabled={processingActive || pending.has("prepare")} onClick={onPrepare} fullWidth>
                     {processingActive ? "Processing…" : "Process recordings"}
@@ -634,7 +653,12 @@ function batchProgress(batch: {jobCount: number, completedJobs: number, attemptI
 
 function loadPlan(): StopSignPlan {
     try {
-        return parseStoredStopSignPlan(window.localStorage.getItem(STOP_SIGN_PLAN_STORAGE_KEY)) ?? createStopSignPlan();
+        const current = parseStoredStopSignPlan(window.localStorage.getItem(STOP_SIGN_PLAN_STORAGE_KEY));
+        if (current) {
+            return current;
+        }
+        const legacy = parseStoredStopSignPlan(window.localStorage.getItem(LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY));
+        return legacy ? migrateImplicitCatalogDrafts(legacy) : createStopSignPlan();
     } catch {
         return createStopSignPlan();
     }

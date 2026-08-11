@@ -6,15 +6,16 @@ The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surf
 
 1. Start the backend, deploy the current FiveM resource, run `restart FSD` in the server console, and join the session.
 2. Confirm **API** is online, **FiveM** is linked, and **Control** is synchronized. Use **Hold** once and verify it settles before starting a batch.
-3. Search the complete 463-sign catalog and press **Teleport**. The managed setup car is moved to a nearby drivable lane and the sign is added to the scene library.
-4. Drive to the exact beginning of the desired demonstration and press **Capture Start**.
-5. Drive to the exact vehicle-center stopping point and press **Capture Stop**.
-6. Drive beyond the sign to the desired continuation point and press **Capture End**.
-7. Review the automatic variant count and motion bound. Defaults are `50` variants and `20%`; the motion bound cannot exceed `25%`.
-8. Select **Collect this scene**. FiveM runs one generated variant at a time and records three separate stage clips for it.
-9. Choose the next catalog sign and repeat the Teleport → Start → Stop → End workflow.
-10. Watch the clip stage and telemetry. Use **End collection** for orderly cancellation, or **Hold** for immediate safety intervention.
-11. In **Data**, process completed trips and inspect each stage clip, speed, expert throttle/brake, physical brake pressure, and outcome.
+3. Search the complete 463-sign catalog and press **Teleport**. This only previews the location; browsing never changes the scene library.
+4. Inspect the location and press **Use this stop sign** when it is suitable.
+5. Drive to the exact beginning of the desired demonstration and press **Capture Start**.
+6. Drive to the exact vehicle-center stopping point and press **Capture Stop**.
+7. Drive beyond the sign to the desired continuation point and press **Capture End**.
+8. Review the automatic variant count and motion bound. Defaults are `50` variants and `20%`; the motion bound cannot exceed `25%`.
+9. Select **Collect this scene**. FiveM records one uninterrupted attempt per generated variant.
+10. Choose the next catalog sign and repeat the Preview → Use → Start → Stop → End workflow.
+11. Watch the phase and telemetry. Use **End collection** for orderly cancellation, or **Hold** for immediate safety intervention.
+12. In **Data**, process completed trips and inspect logical stage windows, speed, expert throttle/brake, physical brake pressure, and outcome.
 
 The draft survives a browser refresh. The saved plan contains no `safetyEpoch`; the UI adds the current epoch immediately before queueing. A missing epoch returns `428`. A Hold or FiveM reconnect invalidates an old epoch, and the backend returns `409` without starting motion.
 
@@ -26,9 +27,9 @@ The operator captures:
 
 | Pose | Meaning |
 |---|---|
-| `startPose` | Exact reset pose and heading for the Approach clip. |
+| `startPose` | Exact reset pose and heading for the continuous attempt. |
 | `egoStopPose` | Exact vehicle-center pose and heading for the end of Brake + Stop. |
-| `exitPose` | Exact destination pose and heading for the Release clip. |
+| `exitPose` | Exact destination pose and heading where the attempt ends. |
 
 Start must be at least `5 m` before Stop, End must be at least `2 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
 
@@ -66,14 +67,14 @@ The default is `50` variants with `20%` motion variance. The accepted motion ran
 
 ## Temporal guarantees
 
-- Jobs, attempts, and stage captures never overlap.
-- Every variant produces exactly three clips in order: `approach`, `brake_stop`, and `release`.
-- Each clip starts its own RGB capture, emits its own synchronization flash, records its own telemetry, and finalizes before the next clip begins.
-- Approach ends at the braking-stage boundary. Brake + Stop ends immediately after the car reaches the Stop pose and completes a brief zero-speed confirmation. Release begins from Stop and ends at End.
+- Jobs and attempts never overlap.
+- Every variant produces one physical recording with three logical stages in order: `approach`, `brake_stop`, and `release`.
+- Capture and synchronization happen once at Start. FiveM emits exact transition timestamps and a phase on every 50 ms telemetry row, then capture finalizes once at End.
+- The vehicle, camera, controller history, and recording stay continuous through braking, the brief zero-speed confirmation, and release.
 - Long stationary dwell footage is not collected.
-- Temporal histories and future targets are stage-locked; samples that cannot satisfy the complete window inside one clip are excluded rather than borrowing frames or labels from another stage.
+- Each sample's `clip_stage` comes from its anchor phase. Causal histories and future targets intentionally overlap stage boundaries so transition motion is preserved.
 - Model target horizons are `100`, `250`, `500`, and `1000 ms`.
-- Fine behavior phases remain `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`, while `clipStage` identifies the independent clip boundary.
+- Fine behavior phases remain `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`; processed `clip_stage` is a logical balancing label, not a physical recording boundary.
 - Collision, timeout, early stop, stop-line crossing, invalid vehicle, and operator stop remain inspectable failures.
 - Failed attempts are excluded from expert training by default.
 - A location-level split key derived from `signPose` prevents train/validation leakage across frames or attempts from the same physical sign.
@@ -81,7 +82,7 @@ The default is `50` variants with `20%` motion variance. The accepted motion ran
 ## Output layout
 
 ```text
-<FSD_DATA_ROOT>/runs/<run-id>/stop-sign_temporal-v1/
+<FSD_DATA_ROOT>/runs/<run-id>/stop-sign_continuous-v2/
 ├── run.jsonl
 ├── trip-000/
 │   ├── video.mkv
@@ -93,4 +94,4 @@ The default is `50` variants with `20%` motion variance. The accepted motion ran
 └── trip-001/
 ```
 
-Each generated variant writes three consecutive trip folders, one per clip stage. `stopSignGoal.clipStage` identifies `approach`, `brake_stop`, or `release` in metadata and processed samples. Capture writes the raw video, log, trip metadata, and scene `run.jsonl`; processing extracts RGB frames and publishes `dataset.jsonl` plus `processing.json`. A temporary processing lock/workspace may appear while processing is active; do not edit or rebuild that trip concurrently.
+Each generated variant writes one trip folder. `stopSignGoal` declares continuous capture and all logical stages; `stopSignOutcome.stageTransitions` records their synchronized game-time boundaries. Processing extracts RGB frames and publishes anchor-frame `clip_stage` labels in `dataset.jsonl`. A temporary processing lock/workspace may appear while processing is active; do not edit or rebuild that trip concurrently.

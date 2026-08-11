@@ -31,7 +31,7 @@ console.log(JSON.stringify({
     sampleCount: audited.reduce((count, trip) => count + trip.sampleCount, 0),
     locationCount: new Set(audited.map((trip) => trip.location)).size,
     variations: [...new Set(audited.flatMap((trip) => trip.variations))].sort(),
-    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, audited.filter((trip) => trip.clipStage === stage).length])),
+    clipStageCounts: Object.fromEntries(STOP_SIGN_CLIP_STAGES.map((stage) => [stage, audited.reduce((count, trip) => count + (trip.clipStageCounts[stage] ?? 0), 0)])),
     anchorPhaseCounts: phaseCounts,
     labeledPhases: [...new Set(audited.flatMap((trip) => trip.labeledPhases))],
     maxAlignmentDriftMs: Math.max(...audited.map((trip) => trip.alignmentDriftMs)),

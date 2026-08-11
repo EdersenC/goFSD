@@ -127,7 +127,7 @@ process.stdin.on("end", () => {
             "trainingSampleCount",
             "trainingEligibilityErrorCount",
         ];
-        if (value.scope !== "stop-sign-temporal-v1") return;
+        if (value.scope !== "stop-sign-continuous-v2") return;
         if (!/^sha256:[0-9a-f]{64}$/.test(value.configFingerprint)) return;
         if (!countKeys.every((key) => Number.isInteger(value[key]) && value[key] >= 0)) return;
         if (!Array.isArray(value.trainingEligibleRunIds) || !value.trainingEligibleRunIds.every((id) => typeof id === "string" && id.trim())) return;

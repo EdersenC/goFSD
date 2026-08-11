@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -187,11 +186,11 @@ func TestProcessingReadinessRequiresTwoIndependentEligibleRunsForTraining(t *tes
 	if err != nil {
 		t.Fatalf("buildProcessingReadinessSummary: %v", err)
 	}
-	if !summary.TrainingReady || summary.TrainingEligibleTripCount != 6 || summary.TrainingSampleCount != 12 {
+	if !summary.TrainingReady || summary.TrainingEligibleTripCount != 2 || summary.TrainingSampleCount != 12 {
 		t.Fatalf("two independent nonempty runs should be training-ready: %+v", summary)
 	}
 	if !reflect.DeepEqual(summary.TrainingClipStageCounts, map[string]int{"approach": 2, "brake_stop": 2, "release": 2}) {
-		t.Fatalf("every run must expose one independently recorded clip per stage: %+v", summary)
+		t.Fatalf("every continuous run must expose all three logical stages: %+v", summary)
 	}
 	if !reflect.DeepEqual(summary.TrainingEligibleRunIDs, []string{"run-a", "run-b"}) ||
 		!reflect.DeepEqual(summary.ReadyRunIDs, []string{"run-a", "run-b"}) {
@@ -232,21 +231,17 @@ func TestProcessingReadinessMatchesTrainerStopSignOutcomeFilter(t *testing.T) {
 	writeCurrentProcessingFixture(t, malformedTrip, config, processor, 13)
 	writeSuccessfulStopSignMetadataFixture(t, failedTrip)
 	writeSuccessfulStopSignMetadataFixture(t, successfulTrip)
-	for index, stage := range []string{"brake_stop", "release"} {
-		tripDir := filepath.Join(runsRoot, "run-b", stopSignSceneFolder, fmt.Sprintf("trip-%03d", index+1))
-		writeCurrentProcessingFixture(t, tripDir, config, processor, 1)
-		writeSuccessfulStopSignMetadataStageFixtureAt(t, tripDir, 1, stage)
-	}
 	writeSuccessfulStopSignMetadataFixture(t, malformedTrip)
 	writeCommandJSONFile(t, filepath.Join(failedTrip, "metadata.json"), map[string]any{
-		"sceneId": "stop-sign", "sceneVariant": "temporal-v1",
+		"sceneId": "stop-sign", "sceneVariant": "continuous-v2",
 		"stopSignGoal": map[string]any{
-			"task": "stop-sign", "contract": "stop-sign-goal.v2", "clipStage": "approach",
-			"signPose":     map[string]any{"x": 1, "y": 2, "z": 3, "heading": 4},
-			"stopLinePose": map[string]any{"x": 1, "y": 0, "z": 3, "heading": 4},
-			"egoStopPose":  map[string]any{"x": 1, "y": -2.5, "z": 3, "heading": 4},
-			"startPose":    map[string]any{"x": 1, "y": -42.5, "z": 3, "heading": 4},
-			"exitPose":     map[string]any{"x": 1, "y": 10, "z": 3, "heading": 4},
+			"task": "stop-sign", "contract": "stop-sign-goal.v3", "captureMode": "continuous",
+			"logicalClipStages": []string{"approach", "brake_stop", "release"},
+			"signPose":          map[string]any{"x": 1, "y": 2, "z": 3, "heading": 4},
+			"stopLinePose":      map[string]any{"x": 1, "y": 0, "z": 3, "heading": 4},
+			"egoStopPose":       map[string]any{"x": 1, "y": -2.5, "z": 3, "heading": 4},
+			"startPose":         map[string]any{"x": 1, "y": -42.5, "z": 3, "heading": 4},
+			"exitPose":          map[string]any{"x": 1, "y": 10, "z": 3, "heading": 4},
 		},
 		"stopSignOutcome": map[string]any{"success": false, "status": "collision"},
 	})
@@ -258,7 +253,7 @@ func TestProcessingReadinessMatchesTrainerStopSignOutcomeFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildProcessingReadinessSummary: %v", err)
 	}
-	if summary.TrainingEligibleTripCount != 3 || summary.TrainingSampleCount != 13 ||
+	if summary.TrainingEligibleTripCount != 1 || summary.TrainingSampleCount != 11 ||
 		!reflect.DeepEqual(summary.TrainingEligibleRunIDs, []string{"run-b"}) || summary.TrainingReady {
 		t.Fatalf("training readiness did not match the trainer success filter: %+v", summary)
 	}
@@ -372,7 +367,7 @@ func TestRunProcessingStatusWritesMachineReadableSummary(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {
 		t.Fatalf("decode processing status output: %v", err)
 	}
-	if summary.Scope != "stop-sign-temporal-v1" || summary.CurrentTripCount != 1 || summary.SelectedDatasetCount != 1 {
+	if summary.Scope != "stop-sign-continuous-v2" || summary.CurrentTripCount != 1 || summary.SelectedDatasetCount != 1 {
 		t.Fatalf("unexpected CLI summary: %+v", summary)
 	}
 }
@@ -418,24 +413,27 @@ func writeSuccessfulStopSignMetadataFixture(t *testing.T, tripDir string) {
 
 func writeSuccessfulStopSignMetadataFixtureAt(t *testing.T, tripDir string, signX float64) {
 	t.Helper()
-	writeSuccessfulStopSignMetadataStageFixtureAt(t, tripDir, signX, "approach")
-}
-
-func writeSuccessfulStopSignMetadataStageFixtureAt(t *testing.T, tripDir string, signX float64, clipStage string) {
-	t.Helper()
 	writeCommandJSONFile(t, filepath.Join(tripDir, "metadata.json"), map[string]any{
-		"sceneId": "stop-sign", "sceneVariant": "temporal-v1",
+		"sceneId": "stop-sign", "sceneVariant": "continuous-v2",
 		"stopSignGoal": map[string]any{
-			"task": "stop-sign", "contract": "stop-sign-goal.v2", "clipStage": clipStage,
-			"signPose":     map[string]any{"x": signX, "y": 2, "z": 3, "heading": 4},
-			"stopLinePose": map[string]any{"x": 1, "y": 0, "z": 3, "heading": 4},
-			"egoStopPose":  map[string]any{"x": 1, "y": -2.5, "z": 3, "heading": 4},
-			"startPose":    map[string]any{"x": 1, "y": -42.5, "z": 3, "heading": 4},
-			"exitPose":     map[string]any{"x": 1, "y": 10, "z": 3, "heading": 4},
+			"task": "stop-sign", "contract": "stop-sign-goal.v3", "captureMode": "continuous",
+			"logicalClipStages": []string{"approach", "brake_stop", "release"},
+			"signPose":          map[string]any{"x": signX, "y": 2, "z": 3, "heading": 4},
+			"stopLinePose":      map[string]any{"x": 1, "y": 0, "z": 3, "heading": 4},
+			"egoStopPose":       map[string]any{"x": 1, "y": -2.5, "z": 3, "heading": 4},
+			"startPose":         map[string]any{"x": 1, "y": -42.5, "z": 3, "heading": 4},
+			"exitPose":          map[string]any{"x": 1, "y": 10, "z": 3, "heading": 4},
 		},
 		"stopSignOutcome": map[string]any{
 			"success": true,
 			"status":  "succeeded",
+			"stageTransitions": map[string]any{
+				"approachStartedGameTimeMs":  1000,
+				"brakeStopStartedGameTimeMs": 2000,
+				"stopConfirmedGameTimeMs":    3000,
+				"releaseStartedGameTimeMs":   3000,
+				"completedGameTimeMs":        4000,
+			},
 		},
 	})
 }
@@ -450,15 +448,16 @@ func writeSuccessfulStopSignStageSetFixture(
 	processor *datasetproc.Processor,
 ) {
 	t.Helper()
-	stages := []string{"approach", "brake_stop", "release"}
-	if len(sampleCounts) != len(stages) {
-		t.Fatalf("stage fixture requires exactly %d sample counts, got %d", len(stages), len(sampleCounts))
+	if len(sampleCounts) != 3 {
+		t.Fatalf("continuous fixture requires approach, brake-stop, and release sample counts, got %d", len(sampleCounts))
 	}
-	for index, stage := range stages {
-		tripDir := filepath.Join(runsRoot, runID, stopSignSceneFolder, fmt.Sprintf("trip-%03d", index))
-		writeCurrentProcessingFixture(t, tripDir, config, processor, sampleCounts[index])
-		writeSuccessfulStopSignMetadataStageFixtureAt(t, tripDir, signX, stage)
+	totalSamples := 0
+	for _, count := range sampleCounts {
+		totalSamples += count
 	}
+	tripDir := filepath.Join(runsRoot, runID, stopSignSceneFolder, "trip-000")
+	writeCurrentProcessingFixture(t, tripDir, config, processor, totalSamples)
+	writeSuccessfulStopSignMetadataFixtureAt(t, tripDir, signX)
 }
 
 func writeIncompleteRawProcessingFixture(t *testing.T, tripDir string) {

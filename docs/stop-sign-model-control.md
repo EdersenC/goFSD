@@ -20,7 +20,7 @@ causal RGB + speed history
 
 ## Model input boundary
 
-Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero is the current sample; there are no future images in the input. Every window belongs to exactly one `clipStage`: `approach`, `brake_stop`, or `release`.
+Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero is the current sample; there are no future images in the input. Every anchor is labeled `approach`, `brake_stop`, or `release`, while its temporal context remains continuous across boundaries.
 
 The perception boundary is RGB-only with respect to the stop sign and stopping geometry. These values may be recorded for expert generation, labels, scoring, debugging, and safety, but are not model perception inputs:
 
@@ -61,19 +61,19 @@ Every usable sample carries one fine phase:
 4. `stop_hold`
 5. `release`
 
-Training balances observed `(clip stage, fine phase)` groups so long approach spans do not drown out braking, stopping, or release. History and future labels never cross a clip boundary: incomplete samples at the beginning or end of a stage are excluded. Frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so all three clips, attempts, and generated variants from one sign remain on one side of the split.
+Training balances observed `(logical stage, fine phase)` groups so long approach spans do not drown out braking, stopping, or release. History and future labels intentionally cross a stage transition when the anchor is near it. Frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so all attempts and generated variants from one sign remain on one side of the split.
 
 Only successful attempts with a complete `stopSignGoal` and `stopSignOutcome` are admitted by default. Failed attempts stay available for inspection and later hard-negative work.
 
-## Stage-locked release policy
+## Continuous release policy
 
-Collection treats Release as a separate demonstration:
+Collection preserves one real motion sequence:
 
-1. `approach` records launch and cruise, then stops before braking supervision begins.
-2. `brake_stop` records deceleration and ends immediately after brief zero-speed confirmation at Stop.
-3. `release` resets to Stop, records motion to End, and finalizes independently.
+1. `approach` records launch and cruise.
+2. `brake_stop` begins when the planned speed decreases and includes the brief zero-speed confirmation.
+3. `release` begins immediately after confirmation without resetting the vehicle, camera, or temporal history.
 
-This deliberately avoids many redundant stationary frames. V0 does not claim to learn traffic-aware waiting or the decision of when it is legally safe to proceed; it learns the short motion behavior inside each declared stage.
+The controller owns the 250 ms confirmation and release trigger in V0, while release motion is still collected as supervision. Stage flags are labels only and never model inputs. This avoids redundant stationary frames without fabricating or stitching transition motion.
 
 ## Controller translation
 
@@ -105,12 +105,12 @@ The checked-in config starts with empty `train_run_ids`, `val_run_ids`, and chec
 
 1. Capture Start → Stop → End scenes at multiple physical signs and generate many seeded variants from each scene.
 2. Process all selected trips with the current frame-window fingerprint.
-3. Inspect clip-stage, phase, location, and variant coverage and remove unusable demonstrations.
+3. Inspect logical-stage, phase, location, and variant coverage and remove unusable demonstrations.
 4. Reserve entire stop-sign locations for validation.
 5. Train and compare future-speed error, stop-intent quality, phase coverage, and validation loss.
 6. Evaluate offline first, then run a guarded live test with a calibrated controller.
 
-Closed-loop sequence results matter more than a low per-frame loss. A useful evaluation records whether the car launched, approached without oscillation, stopped before the line at the intended pose, avoided collision, and completed the separate release to End.
+Closed-loop sequence results matter more than a low per-frame loss. A useful evaluation records whether the car launched, approached without oscillation, stopped before the line at the intended pose, avoided collision, and smoothly released to End.
 
 ## Safety boundary
 

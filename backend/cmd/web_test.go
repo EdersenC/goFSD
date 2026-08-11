@@ -85,9 +85,10 @@ func TestMUIWorkspaceExposesStopSignTemporalWorkbench(t *testing.T) {
 		"/inference/start",
 		"probeStopSignTarget",
 		"/stop-sign-locations.csv",
+		"Use this stop sign",
 		"stop-sign-plan.v4",
 		`Model \u2192 controller \u2192 game`,
-		"Release is a separate scripted stage clip",
+		"recording and temporal history remain continuous",
 	} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("MUI stop-sign workspace is missing %q", marker)

@@ -17,11 +17,14 @@ import {useEffect, useMemo, useState} from "react";
 import {fetchStopSignCatalog} from "../api";
 import type {StopSignCatalogLocation} from "./catalog";
 
-export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}: {
+export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, savedCatalogIds = [], onTeleport, onUseCandidate}: {
     connected: boolean
     busyId?: string
     activeCatalogId?: string
+    candidate?: StopSignCatalogLocation | null
+    savedCatalogIds?: readonly string[]
     onTeleport: (location: StopSignCatalogLocation) => void
+    onUseCandidate: () => void
 }) {
     const [locations, setLocations] = useState<StopSignCatalogLocation[]>([]);
     const [error, setError] = useState("");
@@ -57,7 +60,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}
                         <Typography variant="overline" color="secondary.main">Step 1</Typography>
                         <Typography id="catalog-title" variant="h2">Choose a stop sign</Typography>
                         <Typography variant="body2" color="text.secondary" sx={{mt: .5}}>
-                            Every verified main-map stop sign is listed. Teleport places the managed setup car on its nearest drivable lane.
+                            Teleport only previews a location. Add it to your scenes after you confirm it is useful.
                         </Typography>
                     </Box>
                     <Chip size="small" label={locations.length > 0 ? `${locations.length} total` : "loading"} />
@@ -82,7 +85,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}
                     {matches.map((location) => (
                         <ListItemButton
                             key={location.id}
-                            selected={location.id === activeCatalogId}
+                            selected={location.id === candidate?.id}
                             data-catalog-id={location.id}
                             sx={{display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 1, borderBottom: "1px solid", borderColor: "divider"}}
                             onClick={() => onTeleport(location)}
@@ -93,7 +96,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}
                             />
                             <Button
                                 size="small"
-                                variant={location.id === activeCatalogId ? "contained" : "outlined"}
+                                variant={location.id === candidate?.id ? "contained" : "outlined"}
                                 startIcon={<NearMeRounded />}
                                 disabled={!connected || Boolean(busyId)}
                                 onClick={(event) => { event.stopPropagation(); onTeleport(location); }}
@@ -106,6 +109,20 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, onTeleport}
                         <Typography variant="body2" color="text.secondary" sx={{p: 1.5}}>No matching signs.</Typography>
                     )}
                 </List>
+                {candidate && (
+                    <Alert
+                        severity="info"
+                        sx={{mt: 1.5}}
+                        action={<Button color="inherit" size="small" onClick={onUseCandidate}>{savedCatalogIds.includes(candidate.id) ? "Open saved scene" : "Use this stop sign"}</Button>}
+                    >
+                        Previewing {candidate.id}. It has not been added to the scene list.
+                    </Alert>
+                )}
+                {activeCatalogId && !candidate && (
+                    <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
+                        Active saved scene: {activeCatalogId}
+                    </Typography>
+                )}
             </CardContent>
         </Card>
     );

@@ -83,6 +83,11 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 	if !reflect.DeepEqual(first.Label.Aux.FutureStopSignPhases, []string{"accelerate", "cruise_approach"}) {
 		t.Fatalf("unexpected future phase profile: %+v", first.Label.Aux.FutureStopSignPhases)
 	}
+	boundary := samples[2]
+	if boundary.Phase != "cruise_approach" || boundary.ClipStage != "approach" ||
+		!reflect.DeepEqual(boundary.Label.Aux.FutureStopSignPhases, []string{"decelerate", "decelerate"}) {
+		t.Fatalf("logical approach window must preserve future context across the braking boundary: %+v", boundary)
+	}
 	current := first.TelemetryHistory[len(first.TelemetryHistory)-1]
 	if current.Control.Acceleration != 0.4 || current.Control.BrakePressureAvg != 0.15 {
 		t.Fatalf("raw actuation diagnostics were not retained: %+v", current.Control)
@@ -95,14 +100,13 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 func TestRunDatasetReportProvidesStopSignPhaseAndLocationCoverage(t *testing.T) {
 	tmp := t.TempDir()
 	runDir := filepath.Join(tmp, "run-stop-sign")
-	goalA := stopSignGoalFixture("base", "approach", 100, -20)
-	goalB := stopSignGoalFixture("rain", "brake_stop", 200, -40)
-	tripA := filepath.Join(runDir, "stop-sign_temporal-v1", "trip-000")
-	tripB := filepath.Join(runDir, "stop-sign_temporal-v1", "trip-001")
+	goalA := stopSignGoalFixture("base", 100, -20)
+	goalB := stopSignGoalFixture("rain", 200, -40)
+	tripA := filepath.Join(runDir, "stop-sign_continuous-v2", "trip-000")
+	tripB := filepath.Join(runDir, "stop-sign_continuous-v2", "trip-001")
 
 	writeStopSignReportTripFixture(t, tripA, 0, goalA, map[string]any{
-		"success": true,
-		"status":  "succeeded",
+		"success": true, "status": "succeeded", "stageTransitions": stopSignTransitionsFixture(),
 	}, []string{"accelerate", "decelerate", "stop_hold", "release"})
 	writeStopSignReportTripFixture(t, tripB, 1, goalB, map[string]any{
 		"success": false,
@@ -144,17 +148,17 @@ func TestRunDatasetReportProvidesStopSignPhaseAndLocationCoverage(t *testing.T) 
 
 func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *testing.T) {
 	metadata := tripMetadata{
-		StopSignGoal:    stopSignGoalFixture("rain-red", "brake_stop", 100, -20),
-		StopSignOutcome: map[string]any{"success": true, "status": "succeeded"},
+		StopSignGoal:    stopSignGoalFixture("rain-red", 100, -20),
+		StopSignOutcome: map[string]any{"success": true, "status": "succeeded", "stageTransitions": stopSignTransitionsFixture()},
 	}
-	samples := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "stop_hold"}}, metadata)
+	samples := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "stop_hold", ClipStage: "brake_stop"}}, metadata)
 	if len(samples) != 1 || samples[0].TrainingEligible == nil || !*samples[0].TrainingEligible {
 		t.Fatalf("successful clip should be eligible: %+v", samples)
 	}
 	if samples[0].ScenarioLocationID == "" || samples[0].ScenarioSplitGroup != samples[0].ScenarioLocationID {
 		t.Fatalf("expected a stable location-level split group: %+v", samples[0])
 	}
-	if samples[0].VariationID != "rain-red" || samples[0].ClipStage != "brake_stop" || samples[0].StopSignGoal["contract"] != "stop-sign-goal.v2" {
+	if samples[0].VariationID != "rain-red" || samples[0].ClipStage != "brake_stop" || samples[0].StopSignGoal["contract"] != "stop-sign-goal.v3" {
 		t.Fatalf("goal context was not carried into the dataset row: %+v", samples[0])
 	}
 	if samples[0].StopSignOutcome["status"] != "succeeded" {
@@ -162,7 +166,7 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 	}
 
 	metadata.StopSignOutcome = map[string]any{"success": false, "status": "collision"}
-	excluded := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "decelerate"}}, metadata)
+	excluded := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "decelerate", ClipStage: "brake_stop"}}, metadata)
 	if excluded[0].TrainingEligible == nil || *excluded[0].TrainingEligible {
 		t.Fatalf("failed clip must remain inspectable but be excluded from expert training: %+v", excluded[0])
 	}
@@ -171,10 +175,10 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 	}
 	legacyMetadata := metadata
 	legacyMetadata.StopSignGoal = cloneMap(metadata.StopSignGoal)
-	legacyMetadata.StopSignGoal["contract"] = "stop-sign-goal.v1"
-	legacy := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "decelerate"}}, legacyMetadata)
+	legacyMetadata.StopSignGoal["contract"] = "stop-sign-goal.v2"
+	legacy := decorateStopSignSamples([]DatasetSample{{Task: stopSignTask, Phase: "decelerate", ClipStage: "brake_stop"}}, legacyMetadata)
 	if legacy[0].TrainingEligible == nil || *legacy[0].TrainingEligible || legacy[0].TrainingExclusionReason != "invalid_stop_sign_goal" {
-		t.Fatalf("legacy unsplit clips must not enter stage-locked training: %+v", legacy[0])
+		t.Fatalf("legacy split clips must not enter continuous training: %+v", legacy[0])
 	}
 	body, err := json.Marshal(excluded[0])
 	if err != nil {
@@ -215,12 +219,13 @@ func stopSignTelemetryFixture(phase string, currentSpeed float64, desiredSpeed f
 	}
 }
 
-func stopSignGoalFixture(variationID string, clipStage string, x float64, y float64) map[string]any {
+func stopSignGoalFixture(variationID string, x float64, y float64) map[string]any {
 	return map[string]any{
-		"task":        "stop-sign",
-		"contract":    "stop-sign-goal.v2",
-		"clipStage":   clipStage,
-		"variationId": variationID,
+		"task":              "stop-sign",
+		"contract":          "stop-sign-goal.v3",
+		"captureMode":       "continuous",
+		"logicalClipStages": []string{"approach", "brake_stop", "release"},
+		"variationId":       variationID,
 		"signPose": map[string]any{
 			"x": x, "y": y, "z": 30.0, "heading": 180.0,
 		},
@@ -239,6 +244,16 @@ func stopSignGoalFixture(variationID string, clipStage string, x float64, y floa
 	}
 }
 
+func stopSignTransitionsFixture() map[string]any {
+	return map[string]any{
+		"approachStartedGameTimeMs":  1000.0,
+		"brakeStopStartedGameTimeMs": 2000.0,
+		"stopConfirmedGameTimeMs":    3000.0,
+		"releaseStartedGameTimeMs":   3000.0,
+		"completedGameTimeMs":        4000.0,
+	}
+}
+
 func writeStopSignReportTripFixture(
 	t *testing.T,
 	tripDir string,
@@ -250,7 +265,7 @@ func writeStopSignReportTripFixture(
 	t.Helper()
 	samples := make([]DatasetSample, 0, len(phases))
 	for _, phase := range phases {
-		samples = append(samples, DatasetSample{Task: stopSignTask, Phase: phase})
+		samples = append(samples, DatasetSample{Task: stopSignTask, Phase: phase, ClipStage: stopSignClipStageForPhase(phase)})
 	}
 	samples = decorateStopSignSamples(samples, tripMetadata{
 		StopSignGoal:    goal,
@@ -259,14 +274,14 @@ func writeStopSignReportTripFixture(
 	writeDatasetReportTripFixture(t, tripDir, tripFixture{
 		runID:        "run-stop-sign",
 		sceneID:      "stop-sign",
-		sceneVariant: "temporal-v1",
+		sceneVariant: "continuous-v2",
 		status:       ProcessingStatus{State: "completed", FrameCount: len(phases), SampleCount: len(phases)},
 		samples:      samples,
 	})
 	writeJSONFile(t, filepath.Join(tripDir, "metadata.json"), tripMetadata{
 		RunID:           "run-stop-sign",
 		SceneID:         "stop-sign",
-		SceneVariant:    "temporal-v1",
+		SceneVariant:    "continuous-v2",
 		TripIndex:       tripIndex,
 		StopSignGoal:    cloneMap(goal),
 		StopSignOutcome: cloneMap(outcome),

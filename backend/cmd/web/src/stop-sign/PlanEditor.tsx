@@ -44,7 +44,7 @@ type Props = {
 const points: Array<{field: ScenePoseField, number: string, title: string, detail: string}> = [
     {field: "startPose", number: "1", title: "Start", detail: "Park where every replay should begin."},
     {field: "egoStopPose", number: "2", title: "Stop", detail: "Park at the exact vehicle-center stopping point."},
-    {field: "exitPose", number: "3", title: "End", detail: "Park beyond the sign where the clip should finish."},
+    {field: "exitPose", number: "3", title: "End", detail: "Park beyond the sign where the continuous run should finish."},
 ];
 
 export function PlanEditor({
@@ -171,7 +171,7 @@ export function PlanEditor({
                                 </Box>
                                 <Chip
                                     color="secondary"
-                                    label={`${entry.autoVariations?.count ?? 0} variants · ${(entry.autoVariations?.count ?? 0) * 3} clips`}
+                                    label={`${entry.autoVariations?.count ?? 0} continuous runs · 3 labeled stages each`}
                                 />
                             </Stack>
                             <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "160px 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>

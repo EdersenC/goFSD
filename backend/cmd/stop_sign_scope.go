@@ -7,7 +7,7 @@ import (
 	datasetproc "awesomeProject/internal/dataset"
 )
 
-const stopSignSceneFolder = "stop-sign_temporal-v1"
+const stopSignSceneFolder = "stop-sign_continuous-v2"
 
 func filterStopSignTripDirs(tripDirs []string) []string {
 	filtered := make([]string, 0, len(tripDirs))
