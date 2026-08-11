@@ -43,6 +43,7 @@ import {
     createStopSignPlan,
     parseStoredStopSignPlan,
     STOP_SIGN_PLAN_STORAGE_KEY,
+    stageStopSignCatalogLocation,
     stopSignPlanStats,
     validateStopSignPlan,
 } from "./stop-sign-plan";
@@ -194,6 +195,14 @@ export function App() {
         });
         setNotice({message: `${location.id} waypoint queued. Use /tpwaypoint in FiveM, then calibrate the lane pose.`, severity: "success"});
     });
+
+    const stageCatalogLocation = (location: StopSignCatalogLocation) => {
+        setPlan(stageStopSignCatalogLocation(plan, location.id));
+        setNotice({
+            message: `${location.id} staged. Its roadside coordinates were not copied; calibrate and apply the live lane pose.`,
+            severity: "info",
+        });
+    };
 
     const calibrateSign = () => operate("calibrate", async () => {
         if (!control.data?.telemetry?.isInVehicle) {
@@ -366,6 +375,7 @@ export function App() {
                             connected={fivemControlReady}
                             busy={pending.has("catalog-waypoint")}
                             onSetWaypoint={setCatalogWaypoint}
+                            onStageLocation={stageCatalogLocation}
                         />
                         <PlanEditor
                             plan={plan}

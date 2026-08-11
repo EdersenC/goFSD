@@ -4,15 +4,27 @@ import {
     distanceBetweenPoses,
     parseStoredStopSignPlan,
     stopSignPlanStats,
+    stageStopSignCatalogLocation,
     validateStopSignPlan,
 } from "./stop-sign-plan";
 
 const plan = createStopSignPlan();
+assert(/sign pose/i.test(validateStopSignPlan(plan).join(" ")), "a placeholder pose must block collection");
+const stagedPlaceholder = stageStopSignCatalogLocation(plan, "gta-v-sign-0001");
+assertEqual(stagedPlaceholder.entries[0]?.id, "gta-v-sign-0001");
+assertEqual(stagedPlaceholder.entries[0]?.signPose.x, 0, "catalog staging must not copy a roadside prop pose");
+assertEqual(plan.entries[0]?.id, "sign-01", "catalog staging must not mutate the current plan");
 plan.entries[0]!.signPose = {x: 120, y: -40, z: 30, heading: 90};
 plan.entries[0]!.variations.push({id: "rain", weather: "RAIN", targetSpeedMps: 6, attemptCount: 4});
 
 assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 2, jobCount: 2, attemptCount: 14}));
 assertEqual(JSON.stringify(validateStopSignPlan(plan)), "[]");
+
+const stagedAdditional = stageStopSignCatalogLocation(plan, "gta-v-sign-0002");
+assertEqual(stagedAdditional.entries.length, 2);
+assertEqual(stagedAdditional.entries[1]?.id, "gta-v-sign-0002");
+assert(/uncalibrated/i.test(validateStopSignPlan(stagedAdditional).join(" ")));
+assertEqual(stageStopSignCatalogLocation(stagedAdditional, "gta-v-sign-0002").entries.length, 2, "restaging must not duplicate a catalog sign");
 
 const parsed = parseStoredStopSignPlan(JSON.stringify(plan));
 assert(parsed, "v2 plan should restore");

@@ -3,7 +3,7 @@ game 'gta5'
 
 author 'Eddy'
 description 'Temporal stop-sign dataset collection'
-version '0.3.0'
+version '0.4.0'
 
 -- JS runtime scripts
 client_script 'dist/client.js'

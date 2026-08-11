@@ -70,7 +70,7 @@ func TestExpandUsesDocumentedDefaults(t *testing.T) {
 		Seed: "seed",
 		Entries: []Entry{{
 			ID:       "sign",
-			SignPose: Pose{X: 0, Y: 0, Z: 0, Heading: 180},
+			SignPose: Pose{X: 10, Y: 20, Z: 3, Heading: 180},
 		}},
 	})
 	if err != nil {
@@ -91,7 +91,7 @@ func TestExpandMergesVehicleVariationFields(t *testing.T) {
 		Seed: "seed",
 		Entries: []Entry{{
 			ID:       "sign",
-			SignPose: Pose{Heading: 0},
+			SignPose: Pose{X: 10, Y: 20, Z: 3, Heading: 0},
 			Vehicle: &VehicleVariant{
 				Model: " SULTAN ",
 				Color: &RGBColor{R: 10, G: 20, B: 30},
@@ -133,6 +133,7 @@ func TestExpandRejectsInvalidPlans(t *testing.T) {
 		{name: "duplicate entry", edit: func(plan *Plan) { plan.Entries = append(plan.Entries, plan.Entries[0]) }, want: "duplicated"},
 		{name: "non finite pose", edit: func(plan *Plan) { plan.Entries[0].SignPose.X = math.NaN() }, want: "finite"},
 		{name: "heading", edit: func(plan *Plan) { plan.Entries[0].SignPose.Heading = 360 }, want: "heading"},
+		{name: "uncalibrated origin", edit: func(plan *Plan) { plan.Entries[0].SignPose = Pose{} }, want: "uncalibrated origin placeholder"},
 		{name: "stop distance", edit: func(plan *Plan) { plan.Entries[0].StopDistanceM = float64Ptr(0) }, want: "stopDistanceM"},
 		{name: "ego center offset", edit: func(plan *Plan) { plan.Entries[0].EgoCenterOffsetM = float64Ptr(0) }, want: "egoCenterOffsetM"},
 		{name: "start distance", edit: func(plan *Plan) { plan.Entries[0].StartDistanceM = float64Ptr(251) }, want: "startDistanceM"},

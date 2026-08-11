@@ -6,7 +6,7 @@ The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surf
 
 1. Start the backend, deploy the current FiveM resource, run `restart FSD` in the server console, and join the session.
 2. Confirm **API** is online, **FiveM** is linked, and **Control** is synchronized. Use **Hold** once and verify it settles before starting a batch.
-3. Search the 463-location **Stop-sign catalog**, select a physical prop, and choose **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
+3. Search the 463-location **Stop-sign catalog**, select a physical prop, choose **Stage in plan**, then **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
 4. Select **Start setup car** and remain in its driver seat.
 5. Move the car to the lane reference point and align its heading to the direction the ego vehicle will travel through the intersection.
 6. Select **Calibrate current sign**, then select **Use live pose** on the intended entry.
@@ -24,6 +24,8 @@ The draft survives a browser refresh. The saved plan contains no `safetyEpoch`; 
 `signPose.heading` is the GTA travel heading, not the physical sign prop's facing direction. With GTA's forward vector
 
 The bundled CSV registry stores roadside prop positions and prop quaternions for navigation. Those values are never copied into `signPose` or model inputs. The operator establishes the lane-center reference and travel heading with the setup car before queueing.
+
+Staging a catalog location copies its stable ID into the next placeholder entry but deliberately leaves `signPose` uncalibrated. The workbench, backend expander, and FiveM consumer all reject the `(0,0,0)` origin placeholder, so a batch cannot begin until the live lane pose has been applied.
 
 ```text
 forward(heading) = (-sin(heading), cos(heading))

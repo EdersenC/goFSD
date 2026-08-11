@@ -34,6 +34,7 @@ Join the session, open [http://127.0.0.1:8080/](http://127.0.0.1:8080/), and kee
 - [ ] A stale pre-Hold start is rejected rather than executed later.
 - [ ] The setup command puts the player in the driver seat and preserves the controlled car.
 - [ ] A catalog selection sets the expected GTA map waypoint, and `/tpwaypoint` reaches the physical sign without changing plan geometry.
+- [ ] A staged catalog sign cannot be queued while its lane pose is still the origin placeholder.
 - [ ] Live sign calibration returns the expected world pose and travel heading.
 - [ ] The derived stop line, ego stop pose, start pose, and exit pose are on the correct side of the sign and aligned with the lane.
 - [ ] A queued attempt resets to the exact derived start pose before capture.

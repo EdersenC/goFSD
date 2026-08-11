@@ -60,7 +60,7 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 
 ## First stop-sign collection
 
-1. Search the **Stop-sign catalog**, select a physical prop, and choose **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
+1. Search the **Stop-sign catalog**, select a physical prop, choose **Stage in plan**, then **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
 2. Select **Start setup car** and remain in its driver seat.
 3. Place the setup car at the lane reference point with its heading aligned to the vehicle's intended travel direction. The catalog prop position and quaternion are navigation references, not a training pose.
 4. Select **Calibrate current sign**, then copy the accepted live pose into the desired plan entry with **Use live pose**.
@@ -71,6 +71,8 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
 The browser keeps the draft plan locally. The backend expands it deterministically in entry order and then variation order. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan JSON, limits, geometry, and collection checklist.
+
+Catalog staging copies only the stable sign ID. Roadside prop coordinates and quaternions are never copied into the lane target, and an origin-placeholder pose is rejected by the UI, backend, and FiveM until a live pose is applied.
 
 ## Geometry contract
 

@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-10-stop-sign-catalog-v3";
+const SERVER_BUILD_ID = "2026-08-11-stop-sign-calibration-guard-v4";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 

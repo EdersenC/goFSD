@@ -109,6 +109,10 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     };
     assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
     assert.throws(
+        () => parseStopSignJobs([{...job, signPose: {x: 0, y: 0, z: 0, heading: 0}}]),
+        /uncalibrated origin placeholder/,
+    );
+    assert.throws(
         () => parseStopSignJobs([{...job, egoStopPose: {...egoStopPose, y: egoStopPose.y + 1}}]),
         /contradicts the sign-relative distance contract/,
     );

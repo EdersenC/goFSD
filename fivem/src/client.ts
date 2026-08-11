@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-10-stop-sign-catalog-v3";
+const CLIENT_BUILD_ID = "2026-08-11-stop-sign-calibration-guard-v4";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 

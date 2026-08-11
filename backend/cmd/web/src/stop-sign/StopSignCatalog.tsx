@@ -19,10 +19,11 @@ import type {StopSignCatalogLocation} from "./catalog";
 
 const resultLimit = 12;
 
-export function StopSignCatalog({connected, busy, onSetWaypoint}: {
+export function StopSignCatalog({connected, busy, onSetWaypoint, onStageLocation}: {
     connected: boolean
     busy: boolean
     onSetWaypoint: (location: StopSignCatalogLocation) => void
+    onStageLocation: (location: StopSignCatalogLocation) => void
 }) {
     const [locations, setLocations] = useState<StopSignCatalogLocation[]>([]);
     const [error, setError] = useState("");
@@ -96,6 +97,13 @@ export function StopSignCatalog({connected, busy, onSetWaypoint}: {
                         onClick={() => selected && onSetWaypoint(selected)}
                     >
                         Set GTA waypoint
+                    </Button>
+                    <Button
+                        variant="text"
+                        disabled={!selected}
+                        onClick={() => selected && onStageLocation(selected)}
+                    >
+                        Stage in plan
                     </Button>
                     <Typography variant="caption" color="text.secondary">
                         Physical prop only. Use <code>/tpwaypoint</code>, align the setup car in-lane, then calibrate the live pose.

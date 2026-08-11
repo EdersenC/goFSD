@@ -40,7 +40,7 @@ export function ArchitectureOverview() {
 
                 <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", md: "1fr 1fr"}, gap: 2, mt: 2}}>
                     <Section title="Scene geometry">
-                        <ContractRow name="signPose" detail="Visible landmark and lane-travel heading" />
+                        <ContractRow name="signPose" detail="Calibrated lane reference and travel heading" />
                         <ContractRow name="stopLinePose" detail="Sign pose minus stopDistanceM" />
                         <ContractRow name="egoStopPose" detail="Stop line minus egoCenterOffsetM" />
                         <ContractRow name="startPose" detail="Ego stop pose minus startDistanceM" />
@@ -48,6 +48,9 @@ export function ArchitectureOverview() {
                         <Divider sx={{my: 1.5}} />
                         <Typography variant="body2" color="text.secondary">
                             Signed line distance is positive before the line and negative after it. The scoring oracle uses front-bumper distance; the RGB policy does not receive it.
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{mt: 1}}>
+                            Catalog prop coordinates are navigation-only. The origin placeholder is rejected until a live lane pose is applied.
                         </Typography>
                     </Section>
 

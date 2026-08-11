@@ -62,8 +62,15 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
         },
         seed: requiredString(raw.seed, `stopSignJobs[${index}].seed`),
     };
+    rejectUncalibratedSignPose(job.signPose, index);
     validateDerivedGeometry(job, index);
     return job;
+}
+
+function rejectUncalibratedSignPose(pose: StopSignPose, index: number) {
+    if (pose.x === 0 && pose.y === 0 && pose.z === 0) {
+        throw new Error(`stopSignJobs[${index}].signPose is still the uncalibrated origin placeholder`);
+    }
 }
 
 function validateDerivedGeometry(job: StopSignJob, index: number) {

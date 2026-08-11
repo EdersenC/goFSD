@@ -178,7 +178,7 @@ func Expand(plan Plan) ([]Job, error) {
 			return nil, invalid("entry id %q is duplicated", entryID)
 		}
 		entryIDs[entryID] = struct{}{}
-		if err := validatePose(fmt.Sprintf("entries[%d].signPose", entryIndex), entry.SignPose); err != nil {
+		if err := validateSignPose(fmt.Sprintf("entries[%d].signPose", entryIndex), entry.SignPose); err != nil {
 			return nil, err
 		}
 
@@ -277,6 +277,9 @@ func ValidateExpandedJob(job Job) error {
 		if err := validatePose("expanded job "+label, pose); err != nil {
 			return err
 		}
+	}
+	if err := validateSignPose("expanded job signPose", job.SignPose); err != nil {
+		return err
 	}
 	resolved := settings{
 		stopDistanceM:    job.StopDistanceM,
@@ -457,6 +460,16 @@ func validatePose(label string, pose Pose) error {
 	}
 	if pose.Heading < 0 || pose.Heading >= 360 {
 		return invalid("%s.heading must be in [0, 360)", label)
+	}
+	return nil
+}
+
+func validateSignPose(label string, pose Pose) error {
+	if err := validatePose(label, pose); err != nil {
+		return err
+	}
+	if pose.X == 0 && pose.Y == 0 && pose.Z == 0 {
+		return invalid("%s is still the uncalibrated origin placeholder", label)
 	}
 	return nil
 }

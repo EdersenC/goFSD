@@ -39,8 +39,8 @@ for (const label of ["Stop-sign plan", "Calibrate current sign", "Sign pose", "B
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
 
-const catalogMarkup = render(<StopSignCatalog connected busy={false} onSetWaypoint={() => undefined} />);
-for (const label of ["Stop-sign catalog", "Set GTA waypoint", "/tpwaypoint", "Physical prop only"]) {
+const catalogMarkup = render(<StopSignCatalog connected busy={false} onSetWaypoint={() => undefined} onStageLocation={() => undefined} />);
+for (const label of ["Stop-sign catalog", "Set GTA waypoint", "Stage in plan", "/tpwaypoint", "Physical prop only"]) {
     assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
 }
 

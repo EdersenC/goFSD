@@ -67,6 +67,24 @@ export function stopSignPlanStats(plan: StopSignPlan): StopSignPlanStats {
     }, {signCount: 0, variationCount: 0, jobCount: 0, attemptCount: 0});
 }
 
+export function stageStopSignCatalogLocation(plan: StopSignPlan, catalogId: string): StopSignPlan {
+    const id = catalogId.trim();
+    if (!id) {
+        throw new Error("Catalog location id is required");
+    }
+    const staged = cloneStopSignPlan(plan);
+    if (staged.entries.some((entry) => entry.id.trim() === id)) {
+        return staged;
+    }
+    const placeholder = staged.entries.find((entry) => isPlaceholderPose(entry.signPose));
+    if (placeholder) {
+        placeholder.id = id;
+        return staged;
+    }
+    staged.entries.push({...createStopSignEntry(staged.entries.length + 1), id});
+    return staged;
+}
+
 export function validateStopSignPlan(plan: StopSignPlan): string[] {
     const errors: string[] = [];
     if (plan.version !== STOP_SIGN_PLAN_VERSION) {
@@ -103,7 +121,9 @@ export function validateStopSignPlan(plan: StopSignPlan): string[] {
 
 export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     const errors: string[] = [];
-    if (!validPose(entry.signPose)) {
+    if (isPlaceholderPose(entry.signPose)) {
+        errors.push("sign pose is uncalibrated; apply a live lane pose before collection.");
+    } else if (!validPose(entry.signPose)) {
         errors.push("sign pose must contain finite coordinates and a heading from 0 to 359.999 degrees.");
     }
     positive(errors, "stop distance", entry.stopDistanceM, 0.5, 15);
@@ -149,6 +169,10 @@ export function parseStoredStopSignPlan(raw: string | null): StopSignPlan | null
 
 export function distanceBetweenPoses(a: Pose, b: Pose): number {
     return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+export function isPlaceholderPose(pose: Pose): boolean {
+    return pose.x === 0 && pose.y === 0 && pose.z === 0;
 }
 
 function validateVariation(variation: StopSignVariation): string[] {
@@ -213,6 +237,7 @@ function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
 
 function validPose(pose: Pose): boolean {
     return [pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)
+        && !isPlaceholderPose(pose)
         && pose.heading >= 0
         && pose.heading < 360;
 }
