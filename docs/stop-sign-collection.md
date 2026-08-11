@@ -13,11 +13,11 @@ The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surf
 7. Drive beyond the sign to the desired continuation point and press **Capture End**.
 8. Review the automatic variant count and motion bound. Defaults are `50` variants and `20%`; the motion bound cannot exceed `25%`.
 9. Select **Collect this scene**. FiveM records one uninterrupted attempt per generated variant.
-10. Choose the next catalog sign and repeat the Preview → Use → Start → Stop → End workflow.
+10. Choose the next catalog sign and repeat the Preview → Use → Start → Stop → End workflow. Completed calibrations appear under **Saved signs**; open one to restore all three positions by catalog ID.
 11. Watch the phase and telemetry. Use **End collection** for orderly cancellation, or **Hold** for immediate safety intervention.
 12. In **Data**, process completed trips and inspect logical stage windows, speed, expert throttle/brake, physical brake pressure, and outcome.
 
-The draft survives a browser refresh. The saved plan contains no `safetyEpoch`; the UI adds the current epoch immediately before queueing. A missing epoch returns `428`. A Hold or FiveM reconnect invalidates an old epoch, and the backend returns `409` without starting motion.
+Drafts and completed calibrations survive a browser refresh. Each completed scene is keyed by its stable `catalogId`, so selecting the same sign reopens and updates its existing Start, Stop, and End instead of creating a duplicate. Deleting a scene from the Scene builder intentionally removes that saved calibration. The saved plan contains no `safetyEpoch`; the UI adds the current epoch immediately before queueing. A missing epoch returns `428`. A Hold or FiveM reconnect invalidates an old epoch, and the backend returns `409` without starting motion.
 
 ## Scene geometry
 
@@ -31,7 +31,7 @@ The operator captures:
 | `egoStopPose` | Exact vehicle-center pose and heading for the end of Brake + Stop. |
 | `exitPose` | Exact destination pose and heading where the attempt ends. |
 
-Start must be at least `5 m` before Stop, End must be at least `2 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
+Start must be at least `16 m` before Stop, End must be at least `8 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
 
 ## Plan contract
 

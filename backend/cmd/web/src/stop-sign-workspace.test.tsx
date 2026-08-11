@@ -46,10 +46,12 @@ assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup)
 const catalogMarkup = render(<StopSignCatalog
     connected
     candidate={{id: "gta-v-sign-0023", model: "prop_sign_road_01a", kind: "stop", x: 1, y: 2, z: 3, tilted: false, sourceYmap: "test"}}
+    savedScenes={plan.entries}
     onTeleport={() => undefined}
     onUseCandidate={() => undefined}
+    onOpenSaved={() => undefined}
 />);
-for (const label of ["Choose a stop sign", "Search all signs", "Teleport", "only previews", "Use this stop sign", "has not been added"]) {
+for (const label of ["Choose a stop sign", "Saved signs", "gta-v-sign-0023", "Start", "Stop", "End", "Search all signs", "Teleport", "only previews", "Open saved scene", "has not been added"]) {
     assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
 }
 

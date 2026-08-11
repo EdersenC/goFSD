@@ -2,6 +2,7 @@ import {
     captureScenePose,
     createStopSignPlan,
     currentSceneStep,
+    isStopSignSceneCalibrated,
     migrateImplicitCatalogDrafts,
     parseStoredStopSignPlan,
     planForScene,
@@ -23,6 +24,7 @@ plan = captureScenePose(plan, 0, "egoStopPose", {x: 0, y: 0, z: 30, heading: 0})
 assertEqual(currentSceneStep(plan.entries[0]), 2);
 plan = captureScenePose(plan, 0, "exitPose", {x: 0, y: 12, z: 30, heading: 0});
 assertEqual(currentSceneStep(plan.entries[0]), 3);
+assert(isStopSignSceneCalibrated(plan.entries[0]!));
 assertEqual(validateStopSignPlan(plan).length, 0);
 assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 50, jobCount: 50, attemptCount: 50}));
 
@@ -32,6 +34,14 @@ assertEqual(queued.entries[0]?.startPose?.y, -40);
 assertEqual(queued.entries[0]?.egoStopPose?.y, 0);
 assertEqual(queued.entries[0]?.exitPose?.y, 12);
 assertEqual(parseStoredStopSignPlan(JSON.stringify(plan))?.entries[0]?.catalogId, location.id);
+
+const reopened = stageStopSignCatalogLocation(plan, {...location, x: location.x + .1});
+assertEqual(reopened.plan.entries.length, 1);
+assertEqual(reopened.entryIndex, 0);
+assertEqual(reopened.plan.entries[0]?.startPose?.y, -40);
+assertEqual(reopened.plan.entries[0]?.egoStopPose?.y, 0);
+assertEqual(reopened.plan.entries[0]?.exitPose?.y, 12);
+assertEqual(reopened.plan.entries[0]?.catalogPosition?.x, location.x + .1);
 
 const implicitDraft = stageStopSignCatalogLocation(plan, {
     id: "gta-v-sign-0024",

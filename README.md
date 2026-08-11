@@ -68,7 +68,7 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 5. Move it beyond the sign to the desired continuation point and press **Capture End**.
 6. Keep the default **50 variants** and **20% motion variance**, or adjust them. Motion variance is capped at `25%`; weather, clock time, and vehicle color vary broadly.
 7. Press **Collect this scene**. Every variant produces one continuous attempt with `approach`, `brake_stop`, and `release` labels.
-8. Choose the next catalog sign and repeat. Saved scenes remain in the browser.
+8. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
 9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
 The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` preserves the captured scene exactly; later variants perturb route distance and speed within the selected bound, apply only centimeter-scale Stop jitter, and sample broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.

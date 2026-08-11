@@ -42,6 +42,8 @@ import {
     captureScenePose,
     cloneStopSignPlan,
     createStopSignPlan,
+    currentSceneStep,
+    isStopSignSceneCalibrated,
     LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY,
     migrateImplicitCatalogDrafts,
     parseStoredStopSignPlan,
@@ -240,15 +242,44 @@ export function App() {
         setPlan(staged.plan);
         setActiveEntryIndex(staged.entryIndex);
         setCandidateLocation(null);
-        setNotice({message: `${candidateLocation.id} added. Move to the desired starting point and capture Start.`, severity: "success"});
+        const scene = staged.plan.entries[staged.entryIndex];
+        setNotice({
+            message: scene && isStopSignSceneCalibrated(scene)
+                ? `${candidateLocation.id} saved setup opened with Start, Stop, and End restored.`
+                : `${candidateLocation.id} added. Move to the desired starting point and capture Start.`,
+            severity: "success",
+        });
+    };
+
+    const openSavedScene = (catalogId: string) => {
+        const entryIndex = plan.entries.findIndex((entry) => entry.catalogId === catalogId);
+        if (entryIndex < 0) {
+            setNotice({message: `${catalogId} is no longer in the saved scene library.`, severity: "warning"});
+            return;
+        }
+        setActiveEntryIndex(entryIndex);
+        setCandidateLocation(null);
+        setNotice({message: `${catalogId} loaded. Its saved Start, Stop, and End will be reused.`, severity: "success"});
     };
 
     const capturePoint = (field: ScenePoseField) => operate("capture-point", async () => {
         const state = await fetchControlState();
         const pose = capturePoseFromState(state);
+        const currentScene = plan.entries[activeEntryIndex];
         setPlan((current) => captureScenePose(current, activeEntryIndex, field, pose));
         const label = field === "startPose" ? "Start" : field === "egoStopPose" ? "Stop" : "End";
-        setNotice({message: `${label} captured at ${pose.x.toFixed(1)}, ${pose.y.toFixed(1)}.`, severity: "success"});
+        const sceneId = currentScene?.catalogId ?? currentScene?.id ?? "scene";
+        const completesCalibration = Boolean(
+            currentScene
+            && (isStopSignSceneCalibrated(currentScene)
+                || (field === "startPose" && currentScene.egoStopPose && currentScene.exitPose)
+                || (field === "egoStopPose" && currentScene.startPose && currentScene.exitPose)
+                || (field === "exitPose" && currentScene.startPose && currentScene.egoStopPose)),
+        );
+        const savedDetail = completesCalibration
+            ? `${sceneId} is saved and ready to reuse.`
+            : `${Math.min(3, currentSceneStep(currentScene) + 1)}/3 positions saved for ${sceneId}.`;
+        setNotice({message: `${label} captured at ${pose.x.toFixed(1)}, ${pose.y.toFixed(1)}. ${savedDetail}`, severity: "success"});
         await control.refresh();
     });
 
@@ -407,9 +438,10 @@ export function App() {
                             busyId={teleportingCatalogId}
                             activeCatalogId={plan.entries[activeEntryIndex]?.catalogId}
                             candidate={candidateLocation}
-                            savedCatalogIds={plan.entries.flatMap((entry) => entry.catalogId ? [entry.catalogId] : [])}
+                            savedScenes={plan.entries}
                             onTeleport={teleportToCatalogLocation}
                             onUseCandidate={acceptCandidateLocation}
+                            onOpenSaved={openSavedScene}
                         />
                         <PlanEditor
                             plan={plan}

@@ -30,7 +30,7 @@ func main() {
 }
 
 func runBackend(args []string, output io.Writer) error {
-	const backendBuildID = "2026-08-11-stop-sign-continuous-v11"
+	const backendBuildID = "2026-08-11-saved-stop-scenes-v12"
 	handled, err := dispatchBackendCommand(args, output)
 	if err != nil {
 		return err

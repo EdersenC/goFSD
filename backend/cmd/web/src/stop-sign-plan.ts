@@ -12,6 +12,12 @@ export const DEFAULT_MOTION_VARIANCE_PCT = 20;
 export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
 
 export type ScenePoseField = "startPose" | "egoStopPose" | "exitPose";
+export type CalibratedStopSignPlanEntry = StopSignPlanEntry & {
+    catalogId: string
+    startPose: Pose
+    egoStopPose: Pose
+    exitPose: Pose
+};
 
 export type StopSignPlanStats = {
     signCount: number
@@ -225,6 +231,15 @@ export function currentSceneStep(entry?: StopSignPlanEntry): 0 | 1 | 2 | 3 {
     if (!entry.egoStopPose) return 1;
     if (!entry.exitPose) return 2;
     return 3;
+}
+
+export function isStopSignSceneCalibrated(entry: StopSignPlanEntry): entry is CalibratedStopSignPlanEntry {
+    return Boolean(
+        entry.catalogId?.trim()
+        && entry.startPose && validPose(entry.startPose)
+        && entry.egoStopPose && validPose(entry.egoStopPose)
+        && entry.exitPose && validPose(entry.exitPose),
+    );
 }
 
 export function poseSummary(pose?: Pose): string {

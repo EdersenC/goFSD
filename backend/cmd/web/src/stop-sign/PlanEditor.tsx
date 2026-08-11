@@ -76,7 +76,7 @@ export function PlanEditor({
                         <Typography variant="overline" color="primary.main">Scene builder</Typography>
                         <Typography id="scene-builder-title" variant="h2">Capture Start → Stop → End</Typography>
                         <Typography variant="body2" color="text.secondary" sx={{mt: .5}}>
-                            Move the setup car to each point and capture it. Scenes save automatically in this browser.
+                            Move the setup car to each point and capture it. The three positions save automatically under this GTA sign ID.
                         </Typography>
                     </Box>
                     <Stack direction="row" sx={{gap: 2}}>
@@ -101,7 +101,7 @@ export function PlanEditor({
                 )}
 
                 {!entry ? (
-                    <Alert severity="info" sx={{mt: 1}}>Choose a sign in the catalog and press Teleport. That creates the scene.</Alert>
+                    <Alert severity="info" sx={{mt: 1}}>Teleport to preview a catalog sign, then choose Use this stop sign to create its reusable setup.</Alert>
                 ) : (
                     <>
                         <Stack direction="row" sx={{justifyContent: "space-between", alignItems: "center", mb: 1}}>

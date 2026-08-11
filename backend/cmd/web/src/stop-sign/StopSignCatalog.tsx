@@ -15,16 +15,19 @@ import {
 } from "@mui/material";
 import {useEffect, useMemo, useState} from "react";
 import {fetchStopSignCatalog} from "../api";
+import {SavedStopSignScenes} from "./SavedStopSignScenes";
 import type {StopSignCatalogLocation} from "./catalog";
+import type {StopSignPlanEntry} from "../types";
 
-export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, savedCatalogIds = [], onTeleport, onUseCandidate}: {
+export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, savedScenes = [], onTeleport, onUseCandidate, onOpenSaved}: {
     connected: boolean
     busyId?: string
     activeCatalogId?: string
     candidate?: StopSignCatalogLocation | null
-    savedCatalogIds?: readonly string[]
+    savedScenes?: readonly StopSignPlanEntry[]
     onTeleport: (location: StopSignCatalogLocation) => void
     onUseCandidate: () => void
+    onOpenSaved: (catalogId: string) => void
 }) {
     const [locations, setLocations] = useState<StopSignCatalogLocation[]>([]);
     const [error, setError] = useState("");
@@ -66,6 +69,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, 
                     <Chip size="small" label={locations.length > 0 ? `${locations.length} total` : "loading"} />
                 </Stack>
                 {error && <Alert severity="error" sx={{mt: 1.5}}>{error}</Alert>}
+                <SavedStopSignScenes scenes={savedScenes} activeCatalogId={activeCatalogId} onOpen={onOpenSaved} />
                 <TextField
                     label="Search all signs"
                     placeholder="ID, coordinates, type, or map"
@@ -113,7 +117,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, 
                     <Alert
                         severity="info"
                         sx={{mt: 1.5}}
-                        action={<Button color="inherit" size="small" onClick={onUseCandidate}>{savedCatalogIds.includes(candidate.id) ? "Open saved scene" : "Use this stop sign"}</Button>}
+                        action={<Button color="inherit" size="small" onClick={onUseCandidate}>{savedScenes.some((scene) => scene.catalogId === candidate.id) ? "Open saved scene" : "Use this stop sign"}</Button>}
                     >
                         Previewing {candidate.id}. It has not been added to the scene list.
                     </Alert>
