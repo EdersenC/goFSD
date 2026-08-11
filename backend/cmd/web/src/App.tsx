@@ -78,6 +78,9 @@ export function App() {
     const activeBatch = control.data?.runtime.stopSignBatch;
     const collectionActive = activeBatch?.state === "running" || control.data?.runtime.status === "runningAllScenes";
     const activeTraining = training.state.data?.activeJob;
+    const fivemLinked = Boolean(control.data?.runtime.fivemConnected);
+    const fivemControlReady = fivemLinked
+        && control.data?.runtime.appliedSafetyEpoch === control.data?.safetyEpoch;
 
     useEffect(() => {
         document.title = "Stop Sign Lab";
@@ -167,8 +170,8 @@ export function App() {
     }, [hold]);
 
     const startSetupCar = () => operate("setup", async () => {
-        if (!control.data?.runtime.fivemConnected) {
-            throw new Error("FiveM is not linked.");
+        if (!fivemControlReady) {
+            throw new Error("FiveM control is not synchronized. Run restart FSD in the server console.");
         }
         if (collectionActive || inference.status.data?.active) {
             throw new Error("Stop collection or inference before changing the setup car.");
@@ -210,8 +213,8 @@ export function App() {
         if (planErrors.length > 0) {
             throw new Error(planErrors[0]);
         }
-        if (!control.data?.runtime.fivemConnected) {
-            throw new Error("FiveM is not linked.");
+        if (!fivemControlReady) {
+            throw new Error("FiveM control is not synchronized. Run restart FSD in the server console.");
         }
         if (collectionActive) {
             throw new Error("A collection batch is already active.");
@@ -335,7 +338,8 @@ export function App() {
                     </Box>
                     <Stack direction="row" sx={{gap: 1, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end"}}>
                         <StatusChip label="API" active={!control.error} />
-                        <StatusChip label="FiveM" active={Boolean(control.data?.runtime.fivemConnected)} />
+                        <StatusChip label="FiveM" active={fivemLinked} />
+                        <StatusChip label="Control" active={fivemControlReady} />
                         <StatusChip label="Model" active={Boolean(inference.status.data?.controllerReady)} />
                         <Button href="/architecture" color="inherit" size="small">Architecture</Button>
                         <Tooltip title="Refresh all status"><span><Button aria-label="Refresh all status" color="inherit" disabled={pending.has("refresh")} onClick={refreshAll}><RefreshRounded /></Button></span></Tooltip>
@@ -357,7 +361,7 @@ export function App() {
                     <Stack sx={{gap: 2}}>
                         <TelemetryPanel control={control.data} />
                         <CollectionControls
-                            connected={Boolean(control.data?.runtime.fivemConnected)}
+                            connected={fivemControlReady}
                             active={collectionActive}
                             valid={planErrors.length === 0}
                             batchProgress={batchProgress(activeBatch)}

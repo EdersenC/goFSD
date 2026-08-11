@@ -70,6 +70,12 @@ for (const value of ["FiveM linked", "approach_braking", "4.25m/s", "16.50m", "A
     assert(telemetryMarkup.includes(value), `telemetry panel missing ${value}`);
 }
 
+const unsynchronizedMarkup = render(<TelemetryPanel control={{
+    ...control,
+    runtime: {...control.runtime, appliedSafetyEpoch: 1},
+}} />);
+assert(unsynchronizedMarkup.includes("Restart FSD"), "linked transport with a stale safety epoch must request a resource restart");
+
 console.log("stop-sign workspace render and phase-state tests passed");
 
 function render(node: React.ReactNode): string {

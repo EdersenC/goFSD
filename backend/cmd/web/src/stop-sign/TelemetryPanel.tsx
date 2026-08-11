@@ -4,6 +4,8 @@ import type {ControlState, RuntimeTelemetry} from "../types";
 export function TelemetryPanel({control}: {control?: ControlState}) {
     const telemetry = control?.telemetry;
     const runtime = control?.runtime;
+    const linked = Boolean(runtime?.fivemConnected);
+    const synchronized = linked && runtime?.appliedSafetyEpoch === control?.safetyEpoch;
     const phase = telemetry?.stopSignPhase ?? runtime?.stopSignBatch?.phase;
     const dwell = dwellPercent(telemetry);
     return (
@@ -13,8 +15,8 @@ export function TelemetryPanel({control}: {control?: ControlState}) {
                     <Typography id="telemetry-title" variant="h2">Live telemetry</Typography>
                     <Chip
                         size="small"
-                        color={runtime?.fivemConnected ? "success" : "default"}
-                        label={runtime?.fivemConnected ? "FiveM linked" : "FiveM offline"}
+                        color={synchronized ? "success" : linked ? "warning" : "default"}
+                        label={synchronized ? "FiveM linked" : linked ? "Restart FSD" : "FiveM offline"}
                     />
                 </Stack>
                 <Box sx={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 1, mt: 2}}>
