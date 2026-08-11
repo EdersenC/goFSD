@@ -46,12 +46,10 @@ from inference import (
 )
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
-    resolve_route_direction_defaults,
     STATE_INPUT_DEFINITIONS,
     StateInputConfig,
     default_inference_state_input_config,
     normalize_state_input_value,
-    resolve_state_input_cap,
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
@@ -629,7 +627,6 @@ class ModelRuntime:
     ) -> tuple[dict[str, float | bool], dict[str, torch.Tensor]]:
         raw_state_inputs: dict[str, float | bool] = {}
         normalized_state_inputs: dict[str, torch.Tensor] = {}
-        route_direction_defaults = resolve_route_direction_defaults(payload)
         for definition in STATE_INPUT_DEFINITIONS:
             if not config.is_enabled(definition.key):
                 continue
@@ -638,23 +635,10 @@ class ModelRuntime:
                 raw_value = payload[definition.key]
             elif definition.camel_key in payload:
                 raw_value = payload[definition.camel_key]
-            elif route_direction_defaults is not None and definition.key in route_direction_defaults:
-                raw_value = route_direction_defaults[definition.key]
-            if definition.key == "lead_vehicle_distance" and raw_value is None:
-                has_lead = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
-                if has_lead in (False, 0, 0.0):
-                    raw_value = resolve_state_input_cap(config, definition.key)
-                else:
-                    raise ValueError(f"request must include {definition.key} for this checkpoint")
-            else:
-                if raw_value is None:
-                    raise ValueError(f"request must include {definition.key} for this checkpoint")
-            if definition.key == "lead_vehicle_distance":
-                has_lead_raw = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
-                if has_lead_raw in (False, 0, 0.0):
-                    raw_value = resolve_state_input_cap(config, definition.key)
+            if raw_value is None:
+                raise ValueError(f"request must include {definition.key} for this checkpoint")
             normalized = normalize_state_input_value(definition.key, raw_value, config)
-            raw_state_inputs[definition.key] = (normalized >= 0.5) if definition.key == "has_lead_vehicle" else float(raw_value)
+            raw_state_inputs[definition.key] = float(raw_value)
             normalized_state_inputs[definition.key] = torch.tensor([normalized], dtype=torch.float32)
         return raw_state_inputs, normalized_state_inputs
 

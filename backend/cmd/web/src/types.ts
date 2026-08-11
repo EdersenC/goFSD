@@ -5,7 +5,7 @@ export type Pose = {
     heading: number
 };
 
-export const STOP_SIGN_PLAN_VERSION = "stop-sign-plan.v1" as const;
+export const STOP_SIGN_PLAN_VERSION = "stop-sign-plan.v2" as const;
 
 export type StopSignTime = {hour: number, minute: number};
 export type StopSignColor = {r: number, g: number, b: number};
@@ -16,6 +16,7 @@ export type StopSignVariation = {
     stopDistanceM?: number
     egoCenterOffsetM?: number
     startDistanceM?: number
+    exitDistanceM?: number
     targetSpeedMps?: number
     dwellMs?: number
     attemptCount?: number
@@ -30,6 +31,7 @@ export type StopSignPlanEntry = {
     stopDistanceM: number
     egoCenterOffsetM: number
     startDistanceM: number
+    exitDistanceM: number
     targetSpeedMps: number
     dwellMs: number
     attemptCount: number
@@ -54,9 +56,11 @@ export type StopSignBatchJob = {
     stopLinePose: Pose
     egoStopPose: Pose
     startPose: Pose
+    exitPose: Pose
     stopDistanceM: number
     egoCenterOffsetM: number
     startDistanceM: number
+    exitDistanceM: number
     targetSpeedMps: number
     dwellMs: number
     attemptCount: number
@@ -251,7 +255,7 @@ export type TrainingJobPhase = "waiting" | "starting" | "training" | "stopping" 
 export type TrainingJobMetrics = {
     trainLoss?: number
     valLoss?: number
-    driveScore?: number
+    stopSignScore?: number
     valControlMae?: number
 };
 

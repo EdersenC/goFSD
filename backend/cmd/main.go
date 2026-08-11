@@ -107,7 +107,6 @@ func runBackend(args []string, output io.Writer) error {
 	registerWebHandlers(mux)
 	registerProcessingHandlers(mux, processingService, datasetProcessor, runsRoot)
 	registerDataInspectorHandlers(mux, runsRoot, datasetProcessor)
-	registerParkingBatchHandlers(mux, controlStore)
 	registerStopSignBatchHandlers(mux, controlStore)
 	registerControlDispatchHandlers(mux, controlStore)
 
@@ -719,7 +718,7 @@ func runProcessRuns(args []string) error {
 	}
 
 	fmt.Printf(
-		"Processing %d trip folders from %s with workers=%d stop_sign_only=%t force=%t dataset_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
+		"Processing %d trip folders from %s with workers=%d stop_sign_only=%t force=%t dataset_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s\n",
 		len(tripDirs),
 		*root,
 		*workers,
@@ -734,8 +733,6 @@ func runProcessRuns(args []string) error {
 		datasetConfig.TelemetrySampleInterval,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
-		datasetConfig.FutureSpeedDeltaClip,
-		datasetConfig.FutureSpeedDeltaNormalize,
 	)
 
 	var completed int
@@ -909,7 +906,7 @@ func runReportRuns(args []string) error {
 	}
 
 	fmt.Printf(
-		"Reporting %d trip folders from %s stop_sign_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
+		"Reporting %d trip folders from %s stop_sign_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s\n",
 		len(tripDirs),
 		*root,
 		*stopSignOnly,
@@ -921,8 +918,6 @@ func runReportRuns(args []string) error {
 		datasetConfig.TelemetrySampleInterval,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
-		datasetConfig.FutureSpeedDeltaClip,
-		datasetConfig.FutureSpeedDeltaNormalize,
 	)
 
 	reports, reportErr := datasetproc.WriteRunDatasetReports(tripDirs, buildDatasetReportConfig(datasetConfig))
@@ -955,8 +950,6 @@ func buildDatasetReportConfig(datasetConfig capture.DatasetConfig) datasetproc.D
 		TelemetrySampleIntervalMs: int(datasetConfig.TelemetrySampleInterval / time.Millisecond),
 		SampleStride:              datasetConfig.SampleStride,
 		LabelTolerance:            datasetConfig.LabelTolerance.String(),
-		FutureSpeedDeltaClip:      datasetConfig.FutureSpeedDeltaClip,
-		FutureSpeedDeltaNormalize: datasetConfig.FutureSpeedDeltaNormalize,
 	}
 }
 
@@ -964,12 +957,11 @@ func printRunDatasetReportSummaries(reports []datasetproc.GeneratedRunDatasetRep
 	for _, generated := range reports {
 		summary := generated.Report.Summary
 		fmt.Printf(
-			"Report: run=%s trips=%d samples=%d stopped_share=%.3f future_speed_delta_clip_rate=%.3f path=%s\n",
+			"Report: run=%s trips=%d samples=%d stopped_share=%.3f path=%s\n",
 			generated.RunID,
 			summary.TripCount,
 			summary.SampleCount,
 			summary.StoppedSampleShare,
-			summary.FutureSpeedDeltaClip.AnyClipRate,
 			generated.ReportPath,
 		)
 	}

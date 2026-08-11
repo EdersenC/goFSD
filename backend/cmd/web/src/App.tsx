@@ -49,6 +49,8 @@ import {
 import {PhaseRail} from "./stop-sign/PhaseRail";
 import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
+import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
+import type {StopSignCatalogLocation} from "./stop-sign/catalog";
 import type {InferenceModel, InferenceStatus, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
 import {requireCurrentSafetyEpoch, runSafetyStartWithHoldBarrier} from "./workspace/safetyStartBarrier";
 import {ArchitectureOverview} from "./ArchitectureOverview";
@@ -181,6 +183,16 @@ export function App() {
             setNotice({message: "Setup car queued.", severity: "success"});
         }
         window.setTimeout(() => void control.refresh(), 250);
+    });
+
+    const setCatalogWaypoint = (location: StopSignCatalogLocation) => operate("catalog-waypoint", async () => {
+        if (!fivemControlReady) {
+            throw new Error("FiveM control is not synchronized. Run restart FSD in the server console.");
+        }
+        await sendControlCommand("setStopSignCatalogWaypoint", {
+            stopSignCatalogPosition: {x: location.x, y: location.y, z: location.z},
+        });
+        setNotice({message: `${location.id} waypoint queued. Use /tpwaypoint in FiveM, then calibrate the lane pose.`, severity: "success"});
     });
 
     const calibrateSign = () => operate("calibrate", async () => {
@@ -349,15 +361,22 @@ export function App() {
                 <PhaseRail phase={phase} />
 
                 <Box component="main" sx={{display: "grid", gridTemplateColumns: {xs: "1fr", lg: "minmax(0, 1.7fr) minmax(300px, .8fr)"}, gap: 2, mt: 2}}>
-                    <PlanEditor
-                        plan={plan}
-                        onChange={(next) => setPlan(cloneStopSignPlan(next))}
-                        onCalibrate={calibrateSign}
-                        onClearCalibration={clearCalibration}
-                        onApplyCalibration={applyCalibration}
-                        calibrationReady={Boolean(calibrationPose)}
-                        calibrationBusy={pending.has("calibrate")}
-                    />
+                    <Stack sx={{gap: 2}}>
+                        <StopSignCatalog
+                            connected={fivemControlReady}
+                            busy={pending.has("catalog-waypoint")}
+                            onSetWaypoint={setCatalogWaypoint}
+                        />
+                        <PlanEditor
+                            plan={plan}
+                            onChange={(next) => setPlan(cloneStopSignPlan(next))}
+                            onCalibrate={calibrateSign}
+                            onClearCalibration={clearCalibration}
+                            onApplyCalibration={applyCalibration}
+                            calibrationReady={Boolean(calibrationPose)}
+                            calibrationBusy={pending.has("calibrate")}
+                        />
+                    </Stack>
                     <Stack sx={{gap: 2}}>
                         <TelemetryPanel control={control.data} />
                         <CollectionControls
@@ -542,7 +561,7 @@ function InferencePanel({models, selected, status, pending, onSelect, onLoad, on
                     )}
                 </Stack>
                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 2}}>
-                    Output: future speed + trajectory + stop intent. Throttle and brake remain diagnostics.
+                    Output: future speed profile + stop intent. Throttle and brake remain diagnostics.
                 </Typography>
                 <Box sx={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 1, mt: 1.5}}>
                     <DataMetric label="Frames" value={status?.framesSeen ?? 0} />

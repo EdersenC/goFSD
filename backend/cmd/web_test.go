@@ -15,6 +15,7 @@ func TestWebRoutesServeMUIWorkspace(t *testing.T) {
 	}{
 		{path: "/", contentType: "text/html; charset=utf-8", bodyMarker: "Stop Sign Lab"},
 		{path: "/app.js", contentType: "text/javascript; charset=utf-8", bodyMarker: "Stop Sign Lab"},
+		{path: "/stop-sign-locations.csv", contentType: "text/csv; charset=utf-8", bodyMarker: "gta-v-sign-0463"},
 		{path: "/guide", contentType: "text/html; charset=utf-8", bodyMarker: "Stop Sign Lab"},
 		{path: "/architecture", contentType: "text/html; charset=utf-8", bodyMarker: "Stop Sign Lab"},
 	}
@@ -84,7 +85,9 @@ func TestMUIWorkspaceExposesStopSignTemporalWorkbench(t *testing.T) {
 		"/training/jobs",
 		"/inference/start",
 		"setStopSignTarget",
-		"stop-sign-plan.v1",
+		"setStopSignCatalogWaypoint",
+		"/stop-sign-locations.csv",
+		"stop-sign-plan.v2",
 		`Model \u2192 controller \u2192 game`,
 		"scripted after the configured dwell",
 	} {
@@ -103,7 +106,7 @@ func TestWebIndexLoadsOnlyTheBundledApplication(t *testing.T) {
 	if !strings.Contains(text, `<div id="root"></div>`) || !strings.Contains(text, `src="/app.js"`) {
 		t.Fatal("web index must load the MUI application root and bundle")
 	}
-	for _, legacy := range []string{"parking-batch-json", "app.ts", "<style>"} {
+	for _, legacy := range []string{"workflow-selector", "app.ts", "<style>"} {
 		if strings.Contains(text, legacy) {
 			t.Fatalf("web index still contains legacy UI marker %q", legacy)
 		}

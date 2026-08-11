@@ -21,6 +21,7 @@ from config import (
     DEFAULT_IMAGE_OFFSETS,
     DEFAULT_TELEMETRY_FEATURE_NAMES,
     DEFAULT_TELEMETRY_OFFSETS,
+    STOP_SIGN_AUX_TARGET_NAMES,
 )
 from control_contract import (
     DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
@@ -442,10 +443,6 @@ def _coerce_float(mapping: TelemetryMap, key: str) -> float:
     return result
 
 
-def wrap_degrees_delta(current_yaw: float, future_yaw: float) -> float:
-    return ((future_yaw - current_yaw + 180.0) % 360.0) - 180.0
-
-
 def flatten_grouped_mapping(mapping: TelemetryMap) -> TelemetryMap:
     if not isinstance(mapping, dict):
         raise TypeError(f"expected grouped telemetry mapping, got {type(mapping).__name__}")
@@ -465,15 +462,14 @@ def flatten_grouped_mapping(mapping: TelemetryMap) -> TelemetryMap:
 
 def build_telemetry_features(telemetry: TelemetryMap, feature_names: tuple[str, ...]) -> Tensor:
     telemetry = flatten_grouped_mapping(telemetry)
-    feature_builders = {
-        "current_speed": lambda: _coerce_float(telemetry, "currentSpeed"),
-        "yaw_sin": lambda: math.sin(math.radians(_coerce_float(telemetry, "yaw"))),
-        "yaw_cos": lambda: math.cos(math.radians(_coerce_float(telemetry, "yaw"))),
-        "yaw_rate": lambda: _coerce_float(telemetry, "yawRate"),
-        "steering": lambda: _coerce_float(telemetry, "Steering"),
-        "acceleration": lambda: _coerce_float(telemetry, "acceleration"),
-    }
-    return torch.tensor([feature_builders[name]() for name in feature_names], dtype=torch.float32)
+    if feature_names != DEFAULT_TELEMETRY_FEATURE_NAMES:
+        raise ValueError(
+            "stop-sign telemetry features must be exactly ['current_speed']"
+        )
+    return torch.tensor(
+        [_coerce_float(telemetry, "currentSpeed")],
+        dtype=torch.float32,
+    )
 
 
 def build_control_targets(telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
@@ -502,22 +498,10 @@ def derive_stop_intent(telemetry: TelemetryMap) -> float:
     return stop_probability
 
 
-derive_stop_probability = derive_stop_intent
-
-
 def build_aux_targets(current_telemetry: TelemetryMap, future_telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
-    current_telemetry = flatten_grouped_mapping(current_telemetry)
+    del current_telemetry
     future_telemetry = flatten_grouped_mapping(future_telemetry)
-    current_speed = _coerce_float(current_telemetry, "currentSpeed")
-    future_speed = _coerce_float(future_telemetry, "currentSpeed")
     target_builders = {
-        "future_speed": lambda: future_speed,
-        "future_speed_delta": lambda: future_speed - current_speed,
-        "future_yaw_delta": lambda: wrap_degrees_delta(
-            _coerce_float(current_telemetry, "yaw"),
-            _coerce_float(future_telemetry, "yaw"),
-        ),
-        "future_yaw_rate": lambda: _coerce_float(future_telemetry, "yawRate"),
         "expert_throttle": lambda: _bounded_unit_interval(future_telemetry, "expertThrottle"),
         "expert_brake": lambda: _bounded_unit_interval(future_telemetry, "expertBrake"),
         "actual_brake_pressure": lambda: _bounded_unit_interval(future_telemetry, "brakePressureAvg"),
@@ -571,6 +555,21 @@ class FsdDataset(Dataset[DatasetItem]):
         self.telemetry_feature_names = tuple(telemetry_feature_names)
         self.control_target_names = tuple(control_target_names)
         self.aux_target_names = tuple(aux_target_names)
+        if self.telemetry_feature_names != DEFAULT_TELEMETRY_FEATURE_NAMES:
+            raise ValueError(
+                "stop-sign telemetry features must be exactly ['current_speed']; "
+                "oracle geometry and generic driving state are not model inputs"
+            )
+        if self.control_target_names != DEFAULT_CONTROL_TARGET_NAMES:
+            raise ValueError(
+                "stop-sign control targets must be exactly "
+                f"{list(DEFAULT_CONTROL_TARGET_NAMES)}"
+            )
+        if self.aux_target_names != STOP_SIGN_AUX_TARGET_NAMES:
+            raise ValueError(
+                "stop-sign auxiliary targets must be exactly "
+                f"{list(STOP_SIGN_AUX_TARGET_NAMES)}"
+            )
         self.target_transforms = build_target_transform_registry(
             tuple(self.control_target_names) + tuple(self.aux_target_names),
             target_transforms,

@@ -10,7 +10,7 @@ import torch
 
 from config import DEFAULT_AUX_TARGET_NAMES
 from control_contract import (
-    PARKING_CONTROL_TARGET_NAMES,
+    STOP_SIGN_CONTROL_TARGET_NAMES,
     PLANNER_FORMAT,
     PLANNER_FORMAT_VERSION,
     control_contract_metadata,
@@ -29,7 +29,7 @@ def timeline_checkpoint() -> dict[str, object]:
     future_offsets = [1, 3, 5]
     sample_interval_ms = 40
     transforms = build_target_transform_registry(
-        PARKING_CONTROL_TARGET_NAMES + DEFAULT_AUX_TARGET_NAMES
+        STOP_SIGN_CONTROL_TARGET_NAMES + DEFAULT_AUX_TARGET_NAMES
     )
     return {
         "planner_format": PLANNER_FORMAT,
@@ -44,8 +44,9 @@ def timeline_checkpoint() -> dict[str, object]:
         "control_horizon_dt_ms": list(
             derive_control_horizon_dt_ms(future_offsets, sample_interval_ms)
         ),
-        "control_target_names": list(PARKING_CONTROL_TARGET_NAMES),
+        "control_target_names": list(STOP_SIGN_CONTROL_TARGET_NAMES),
         "aux_target_names": list(DEFAULT_AUX_TARGET_NAMES),
+        "telemetry_feature_names": ["current_speed"],
         "target_transforms": target_transform_metadata(transforms),
         "model_state_dict": {},
     }
@@ -67,12 +68,12 @@ class InferenceTimelineTests(unittest.TestCase):
                         object(),
                         torch.device("cpu"),
                         data_root="dataset-root",
-                        run_id="parking-run",
+                        run_id="stop-sign-run",
                         sample_index=0,
                         image_size=(96, 64),
                         expected_window_size=len(timeline.image_offsets),
                         timeline=timeline,
-                        control_target_names=PARKING_CONTROL_TARGET_NAMES,
+                        control_target_names=STOP_SIGN_CONTROL_TARGET_NAMES,
                         aux_target_names=DEFAULT_AUX_TARGET_NAMES,
                         target_transforms=None,
                     )

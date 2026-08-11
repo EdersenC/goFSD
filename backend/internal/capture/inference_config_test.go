@@ -131,8 +131,6 @@ frame_stride = 3
 	sample_stride = 9
 	telemetry_sample_interval_ms = 40
 label_tolerance = "75ms"
-future_speed_delta_clip = 1.5
-future_speed_delta_normalize = false
 sync_flash_brightness_threshold = 200.5
 sync_flash_frame_limit = 25
 `)
@@ -155,9 +153,6 @@ sync_flash_frame_limit = 25
 	}
 	if cfg.LabelTolerance != 75*time.Millisecond {
 		t.Fatalf("unexpected label tolerance: %s", cfg.LabelTolerance)
-	}
-	if cfg.FutureSpeedDeltaClip != 1.5 || cfg.FutureSpeedDeltaNormalize {
-		t.Fatalf("unexpected future-speed-delta transform config: %+v", cfg)
 	}
 	if cfg.SyncFlashBrightnessThreshold != 200.5 || cfg.SyncFlashFrameLimit != 25 {
 		t.Fatalf("unexpected sync-flash config: %+v", cfg)

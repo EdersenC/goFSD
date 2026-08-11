@@ -34,15 +34,8 @@ CONTROL_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
 }
 DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS = 50
 
-# Transitional symbols keep older utility imports readable while old parking
-# checkpoints are deliberately rejected by validate_checkpoint_control_contract.
-DESIRED_WHEEL_STEER_NORMALIZED = "desired_wheel_steer_normalized"
-DESIRED_SPEED_MPS = FUTURE_SPEED_MPS
-STOP_PROBABILITY = STOP_INTENT
-PARKING_CONTROL_TARGET_NAMES = STOP_SIGN_CONTROL_TARGET_NAMES
-
 LEGACY_CONTROL_CONTRACT_ERROR = (
-    "Checkpoint uses an incompatible legacy parking or actuator-output contract. "
+    "Checkpoint uses an incompatible actuator-output contract. "
     "The stop-sign planner requires (future_speed_mps, stop_intent) at fixed future "
     "horizons; legacy outputs cannot be safely adapted, so retraining is required."
 )
@@ -60,9 +53,6 @@ def require_stop_sign_control_target_names(
             f"expected={list(STOP_SIGN_CONTROL_TARGET_NAMES)} actual={list(resolved)}"
         )
     return resolved
-
-
-require_parking_control_target_names = require_stop_sign_control_target_names
 
 
 def control_contract_metadata() -> dict[str, Any]:
@@ -99,9 +89,6 @@ def apply_stop_sign_control_activations(
         ),
         dim=-1,
     )
-
-
-apply_parking_control_activations = apply_stop_sign_control_activations
 
 
 def derive_control_horizon_dt_ms(

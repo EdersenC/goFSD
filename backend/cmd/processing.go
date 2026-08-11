@@ -63,7 +63,6 @@ func datasetProcessorOptions(config capture.DatasetConfig) []datasetproc.Option 
 		datasetproc.WithImageOffsets(config.ImageOffsets),
 		datasetproc.WithLabelTolerance(config.LabelTolerance),
 		datasetproc.WithTelemetryTimelineConfig(config.TelemetryOffsets, config.FutureOffsets, config.TelemetrySampleInterval),
-		datasetproc.WithFutureSpeedDeltaTargetConfig(config.FutureSpeedDeltaClip, config.FutureSpeedDeltaNormalize),
 		datasetproc.WithSyncFlashDetection(config.SyncFlashBrightnessThreshold, config.SyncFlashFrameLimit),
 	}
 }

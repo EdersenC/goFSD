@@ -25,9 +25,11 @@ export type StopSignJob = {
     stopLinePose: StopSignPose
     egoStopPose: StopSignPose
     startPose: StopSignPose
+    exitPose: StopSignPose
     stopDistanceM: number
     egoCenterOffsetM: number
     startDistanceM: number
+    exitDistanceM: number
     targetSpeedMps: number
     dwellMs: number
     attemptCount: number
@@ -61,6 +63,8 @@ export type StopSignGoal = {
     stopLinePose: StopSignPose
     egoStopPose: StopSignPose
     startPose: StopSignPose
+    exitPose: StopSignPose
+    exitDistanceM: number
     targetSpeedMps: number
     dwellMs: number
     attemptIndex: number

@@ -24,7 +24,7 @@ Each sample uses five causal RGB frames and synchronized current-speed telemetry
 
 The perception boundary is RGB-only with respect to the stop sign and stopping geometry. These values may be recorded for expert generation, labels, scoring, debugging, and safety, but are not model perception inputs:
 
-- `signPose`, `stopLinePose`, `egoStopPose`, and `startPose`
+- `signPose`, `stopLinePose`, `egoStopPose`, `startPose`, and `exitPose`
 - distance to the sign or stop line
 - longitudinal, lateral, or heading error to the oracle pose
 - dwell completion or ground-truth phase as an input feature

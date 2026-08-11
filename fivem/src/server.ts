@@ -19,8 +19,8 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-10-stop-sign-temporal-v1";
-const PARKING_CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
+const SERVER_BUILD_ID = "2026-08-10-stop-sign-catalog-v3";
+const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
 type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "isTripComplete"> & {
@@ -128,14 +128,9 @@ type ControlCommandType =
     | "runAllScenes"
     | "endScene"
     | "endAllScenes"
-    | "setParkingTarget"
-    | "setParkingStart"
-    | "clearParkingTarget"
-    | "prepareParkingEvaluation"
-    | "startParkingRun"
-    | "startParkingBatch"
     | "setStopSignTarget"
     | "clearStopSignTarget"
+    | "setStopSignCatalogWaypoint"
     | "startStopSignBatch";
 type InferenceCommandType = "startEgo" | "stopEgo";
 
@@ -144,19 +139,10 @@ type ControlCommand = {
     type: ControlCommandType | InferenceCommandType
     safetyEpoch: number
     sceneName?: string
-    attemptCount?: number
-    seed?: string
-    parkingBatchId?: string
     planFingerprint?: string
-    parkingJobs?: Array<{
-        id: string
-        parkDest: {x: number, y: number, z: number, heading: number}
-        startDest: {x: number, y: number, z: number, heading: number}
-        collectionAmount: number
-        seed: string
-    }>
     stopSignBatchId?: string
     stopSignJobs?: StopSignJob[]
+    stopSignCatalogPosition?: {x: number, y: number, z: number}
     createdAt?: string
 }
 
@@ -167,17 +153,6 @@ type ControlStatusUpdate = {
     appliedSafetyEpoch: number
     inFlightSafetyStarts: number
     safetyStatusSequence: number
-    parkingBatch?: {
-        batchId: string
-        planFingerprint: string
-        state: "running" | "completed" | "stopped" | "failed"
-        jobId?: string
-        jobIndex: number
-        jobCount: number
-        completedJobs: number
-        startedAtMs: number
-        updatedAtMs: number
-    }
     stopSignBatch?: {
         batchId: string
         planFingerprint: string
@@ -241,20 +216,6 @@ type ControlTelemetryUpdate = {
     routeDistance: number
     leadVehicleDistance: number
     hasLeadVehicle: boolean
-    parkingTargetConfigured: boolean
-    parkingStartConfigured: boolean
-    parkingTargetPose?: {coords: [number, number, number], heading: number}
-    parkingStartPose?: {coords: [number, number, number], heading: number}
-    parkingLongitudinalError: number
-    parkingLateralError: number
-    parkingHeadingError: number
-    parkingDistance: number
-    parkingInsideBay: boolean
-    parkingAligned: boolean
-    parkingParked: boolean
-    parkingAttemptIndex: number
-    parkingAttemptCount: number
-    parkingPhase: string
     stopSignTargetConfigured: boolean
     stopSignPose?: StopSignPose
     stopLinePose?: StopSignPose
@@ -315,7 +276,7 @@ class ApiRequestError extends Error {
     }
 }
 
-function formatParkingAttemptProgress(attemptIndex: unknown, attemptCount: unknown): string {
+function formatAttemptProgress(attemptIndex: unknown, attemptCount: unknown): string {
     const count = Math.trunc(Number(attemptCount ?? 0));
     if (count <= 0) {
         return "--/--";
@@ -345,7 +306,7 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
 
         const result = await captureApiRequest("/capture/start", {
             cropToWindow: false,
-            sourceId: PARKING_CAPTURE_SOURCE_ID,
+            sourceId: CAPTURE_SOURCE_ID,
             outputFile: tripStorage.videoFileRelative
         });
 
@@ -512,7 +473,6 @@ onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
             status: update?.status ?? "idle",
             activeSceneName: update?.activeSceneName ?? "",
             lastError: update?.lastError ?? "",
-            parkingBatch: update?.parkingBatch,
             stopSignBatch: update?.stopSignBatch,
             appliedSafetyEpoch,
             inFlightSafetyStarts: update?.inFlightSafetyStarts ?? 0,
@@ -562,7 +522,7 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             `hasLead=${String(Boolean(update?.hasLeadVehicle))} ` +
             `leadDistance=${Number(update?.leadVehicleDistance ?? 0).toFixed(2)} ` +
             `stopSign=${String(update?.stopSignPhase ?? "idle")} ` +
-            `attempt=${formatParkingAttemptProgress(update?.stopSignAttemptIndex, update?.stopSignAttemptCount)}`
+            `attempt=${formatAttemptProgress(update?.stopSignAttemptIndex, update?.stopSignAttemptCount)}`
         );
     }
     try {
@@ -602,20 +562,6 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             routeDistance: update?.routeDistance ?? 0,
             leadVehicleDistance: update?.leadVehicleDistance ?? 0,
             hasLeadVehicle: Boolean(update?.hasLeadVehicle),
-            parkingTargetConfigured: Boolean(update?.parkingTargetConfigured),
-            parkingStartConfigured: Boolean(update?.parkingStartConfigured),
-            parkingTargetPose: apiParkingPose(update?.parkingTargetPose),
-            parkingStartPose: apiParkingPose(update?.parkingStartPose),
-            parkingLongitudinalError: update?.parkingLongitudinalError ?? 0,
-            parkingLateralError: update?.parkingLateralError ?? 0,
-            parkingHeadingError: update?.parkingHeadingError ?? 0,
-            parkingDistance: update?.parkingDistance ?? 0,
-            parkingInsideBay: Boolean(update?.parkingInsideBay),
-            parkingAligned: Boolean(update?.parkingAligned),
-            parkingParked: Boolean(update?.parkingParked),
-            parkingAttemptIndex: update?.parkingAttemptIndex ?? 0,
-            parkingAttemptCount: update?.parkingAttemptCount ?? 0,
-            parkingPhase: update?.parkingPhase ?? "idle",
             stopSignTargetConfigured: Boolean(update?.stopSignTargetConfigured),
             stopSignPose: apiStopSignPose(update?.stopSignPose),
             stopLinePose: apiStopSignPose(update?.stopLinePose),
@@ -638,18 +584,6 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
         console.error(`[control] failed to push telemetry update: ${err?.message ?? err}`);
     }
 });
-
-function apiParkingPose(pose: ControlTelemetryUpdate["parkingTargetPose"]) {
-    if (!pose || !Array.isArray(pose.coords) || pose.coords.length !== 3) {
-        return undefined;
-    }
-    const [x, y, z] = pose.coords.map(Number);
-    const heading = Number(pose.heading);
-    if (![x, y, z, heading].every(Number.isFinite)) {
-        return undefined;
-    }
-    return {x, y, z, heading};
-}
 
 function apiStopSignPose(pose: StopSignPose | undefined) {
     if (!pose || ![pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)) {
@@ -809,8 +743,6 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
         existingTrip.vehicleData.push(...data.vehicleData);
         existingTrip.endTime = data.endTime;
         existingTrip.chunkDurationMs = Math.max(0, data.endTime - existingTrip.syncTime);
-        existingTrip.parkingGoal = data.parkingGoal ?? existingTrip.parkingGoal;
-        existingTrip.parkingOutcome = data.parkingOutcome ?? existingTrip.parkingOutcome;
         existingTrip.stopSignGoal = data.stopSignGoal ?? existingTrip.stopSignGoal;
         existingTrip.stopSignOutcome = data.stopSignOutcome ?? existingTrip.stopSignOutcome;
     } else {
@@ -1627,14 +1559,12 @@ function flushTrip(
         vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
         vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
         tripProfile: trip.tripProfile ?? null,
-        parkingGoal: trip.parkingGoal ?? null,
-        parkingOutcome: trip.parkingOutcome ?? null,
         stopSignGoal: trip.stopSignGoal ?? null,
         stopSignOutcome: trip.stopSignOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 4,
+        telemetrySchemaVersion: 5,
         telemetrySummary,
         videoFile: tripStorage.videoFile,
         logFile: tripStorage.logFile
@@ -1664,14 +1594,12 @@ function flushTrip(
         vehicleModel: trip.tripProfile?.vehicleModel ?? trip.vehicle?.model ?? "",
         vehicleColor: trip.tripProfile?.vehicleColorName ?? "",
         tripProfile: trip.tripProfile ?? null,
-        parkingGoal: trip.parkingGoal ?? null,
-        parkingOutcome: trip.parkingOutcome ?? null,
         stopSignGoal: trip.stopSignGoal ?? null,
         stopSignOutcome: trip.stopSignOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 4,
+        telemetrySchemaVersion: 5,
         telemetrySummary,
         file: runFile,
         tripDir: tripStorage.tripDir,

@@ -44,6 +44,7 @@ export function ArchitectureOverview() {
                         <ContractRow name="stopLinePose" detail="Sign pose minus stopDistanceM" />
                         <ContractRow name="egoStopPose" detail="Stop line minus egoCenterOffsetM" />
                         <ContractRow name="startPose" detail="Ego stop pose minus startDistanceM" />
+                        <ContractRow name="exitPose" detail="Sign pose plus exitDistanceM" />
                         <Divider sx={{my: 1.5}} />
                         <Typography variant="body2" color="text.secondary">
                             Signed line distance is positive before the line and negative after it. The scoring oracle uses front-bumper distance; the RGB policy does not receive it.
@@ -72,6 +73,7 @@ export function ArchitectureOverview() {
                         </Typography>
                     </Section>
                     <Section title="Runtime ownership">
+                        <ContractRow name="Catalog" detail="463 physical prop locations for navigation only" />
                         <ContractRow name="FiveM" detail="Scene setup, expert clips, physical telemetry" />
                         <ContractRow name="Go backend" detail="Capture, batch queue, processing, guarded controller" />
                         <ContractRow name="Python" detail="Temporal dataset, training, checkpoint server" />

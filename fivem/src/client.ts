@@ -6,19 +6,11 @@ import {
     type InnerCityDrivingSceneVariant
 } from "./datasets/inner-city-driving";
 import {CONTROL_TELEMETRY_SAMPLE_INTERVAL_MS} from "./controlTelemetry";
-import {PARKING_SCENE_NAME} from "./parking/runner";
-import {
-    executeParkingBatch,
-    ParkingBatchCommandJob,
-} from "./parking/batch";
-import {
-    resolveParkingOperationCompletionStatus,
-    resolveStopCommandStatus,
-} from "./parking/control-status";
-import {ParkingPose} from "./parking/types";
+import {resolveStopCommandStatus} from "./control-status";
 import {parseStopSignJobs} from "./stop-sign/batch";
 import {STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
 import {StopSignPose} from "./stop-sign/types";
+import {setStopSignCatalogWaypoint} from "./stop-sign/catalog-waypoint";
 import {
     canAcknowledgeControlSafetyEpochSync,
     ControlSafetyBarrier,
@@ -39,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-10-stop-sign-temporal-v1";
+const CLIENT_BUILD_ID = "2026-08-10-stop-sign-catalog-v3";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -70,17 +62,12 @@ type ControlCommandType =
     | "endAllScenes"
     | "startEgo"
     | "stopEgo"
-    | "setParkingTarget"
-    | "setParkingStart"
-    | "clearParkingTarget"
-    | "prepareParkingEvaluation"
-    | "startParkingRun"
-    | "startParkingBatch"
     | "setStopSignTarget"
     | "clearStopSignTarget"
+    | "setStopSignCatalogWaypoint"
     | "startStopSignBatch";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
-type ControlParkingBatchProgress = {
+type ControlStopSignBatchProgress = {
     batchId: string
     planFingerprint: string
     state: "running" | "completed" | "stopped" | "failed"
@@ -90,8 +77,6 @@ type ControlParkingBatchProgress = {
     completedJobs: number
     startedAtMs: number
     updatedAtMs: number
-};
-type ControlStopSignBatchProgress = ControlParkingBatchProgress & {
     attemptIndex: number
     attemptCount: number
     phase: string
@@ -102,13 +87,10 @@ type ControlCommand = {
     type: ControlCommandType
     safetyEpoch: number
     sceneName?: string
-    attemptCount?: number
-    seed?: string
-    parkingBatchId?: string
     planFingerprint?: string
-    parkingJobs?: ParkingBatchCommandJob[]
     stopSignBatchId?: string
     stopSignJobs?: unknown
+    stopSignCatalogPosition?: unknown
 }
 
 type AvailableScene = {
@@ -152,20 +134,6 @@ type ControlTelemetryUpdate = {
     routeDistance: number
     leadVehicleDistance: number
     hasLeadVehicle: boolean
-    parkingTargetConfigured: boolean
-    parkingStartConfigured: boolean
-    parkingTargetPose?: ParkingPose
-    parkingStartPose?: ParkingPose
-    parkingLongitudinalError: number
-    parkingLateralError: number
-    parkingHeadingError: number
-    parkingDistance: number
-    parkingInsideBay: boolean
-    parkingAligned: boolean
-    parkingParked: boolean
-    parkingAttemptIndex: number
-    parkingAttemptCount: number
-    parkingPhase: string
     stopSignTargetConfigured: boolean
     stopSignPose?: StopSignPose
     stopLinePose?: StopSignPose
@@ -186,10 +154,6 @@ type ControlTelemetryUpdate = {
 }
 
 const CONTROL_REGISTER_INTERVAL_MS = 5000;
-let parkingBatchActive = false;
-let parkingBatchStopRequested = false;
-let parkingRunActive = false;
-let parkingRunStopRequested = false;
 let stopSignBatchActive = false;
 let stopSignBatchStopRequested = false;
 const controlSafetyBarrier = new ControlSafetyBarrier();
@@ -198,7 +162,6 @@ type ReportedControlStatus = {
     status: ControlRuntimeStatus
     activeSceneName: string
     lastError: string
-    parkingBatch?: ControlParkingBatchProgress
     stopSignBatch?: ControlStopSignBatchProgress
 };
 
@@ -259,10 +222,9 @@ function reportControlStatus(
     status: ControlRuntimeStatus,
     activeSceneName = "",
     lastError = "",
-    parkingBatch?: ControlParkingBatchProgress,
     stopSignBatch?: ControlStopSignBatchProgress,
 ) {
-    reportedControlStatus = {status, activeSceneName, lastError, parkingBatch, stopSignBatch};
+    reportedControlStatus = {status, activeSceneName, lastError, stopSignBatch};
     publishControlStatus();
 }
 
@@ -342,18 +304,9 @@ async function executeEgoControl(safetyStart?: SafetyStartLease) {
 }
 
 function stopEgoControl() {
-    const parkingOperationActive = requestParkingWorkStop();
+    const stopSignOperationActive = requestStopSignWorkStop();
     const stoppedSynchronously = sceneManager.endAllScenes();
-    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, parkingOperationActive));
-}
-
-function setParkingTarget() {
-    const target = sceneManager.setParkingTarget();
-    reportControlStatus("runningScene", "ego-control");
-    log(
-        `[parking] target ready heading=${target.pose.heading.toFixed(2)} `
-        + `bay=${target.bay.widthM.toFixed(1)}x${target.bay.lengthM.toFixed(1)}m`
-    );
+    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, stopSignOperationActive));
 }
 
 function setStopSignTarget() {
@@ -361,142 +314,14 @@ function setStopSignTarget() {
     reportControlStatus("runningScene", "ego-control");
     log(
         `[stop-sign] target ready sign=(${target.signPose.x.toFixed(2)}, ${target.signPose.y.toFixed(2)}) `
-        + `line=(${target.stopLinePose.x.toFixed(2)}, ${target.stopLinePose.y.toFixed(2)})`
+        + `line=(${target.stopLinePose.x.toFixed(2)}, ${target.stopLinePose.y.toFixed(2)}) `
+        + `exit=(${target.exitPose.x.toFixed(2)}, ${target.exitPose.y.toFixed(2)})`
     );
 }
 
 function clearStopSignTarget() {
     sceneManager.clearStopSignTarget();
     reportControlStatus("runningScene", "ego-control");
-}
-
-function setParkingStart() {
-    const setup = sceneManager.setParkingStart();
-    reportControlStatus("runningScene", "ego-control");
-    log(
-        `[parking] start ready distance=${Math.abs(setup.startOffset.longitudinalM).toFixed(2)}m `
-        + `lateral=${setup.startOffset.lateralM.toFixed(2)}m `
-        + `heading=${setup.startOffset.headingDeg.toFixed(2)}deg`
-    );
-}
-
-function clearParkingTarget() {
-    sceneManager.clearParkingTarget();
-    reportControlStatus("runningScene", "ego-control");
-}
-
-async function executeParkingRunControl(attemptCount: unknown, seed?: string, safetyStart?: SafetyStartLease) {
-    safetyStart?.throwIfStale();
-    parkingRunActive = true;
-    parkingRunStopRequested = false;
-    reportControlStatus("runningScene", PARKING_SCENE_NAME);
-    try {
-        await sceneManager.startParkingRun(attemptCount, seed);
-        const finalHoldApplied = parkingRunStopRequested && sceneManager.endAllScenes();
-        safetyStart?.throwIfStale();
-        const status = resolveParkingOperationCompletionStatus(parkingRunStopRequested, finalHoldApplied);
-        reportControlStatus(status, status === "runningScene" ? "ego-control" : "");
-    } catch (error: any) {
-        const message = error?.message ?? "Failed to run forward-bay parking";
-        reportControlStatus("error", PARKING_SCENE_NAME, message);
-        throw error;
-    } finally {
-        parkingRunActive = false;
-        parkingRunStopRequested = false;
-    }
-}
-
-async function executeParkingBatchControl(
-    batchIdValue: unknown,
-    planFingerprintValue: unknown,
-    jobs: unknown,
-    safetyStart?: SafetyStartLease,
-) {
-    safetyStart?.throwIfStale();
-    if (parkingBatchActive) {
-        throw new Error("A parking collection batch is already active");
-    }
-    const batchId = typeof batchIdValue === "string" ? batchIdValue.trim() : "";
-    if (!batchId) {
-        throw new Error("startParkingBatch command missing parkingBatchId");
-    }
-    const planFingerprint = typeof planFingerprintValue === "string" ? planFingerprintValue.trim() : "";
-    if (!/^sha256:[0-9a-f]{64}$/.test(planFingerprint)) {
-        throw new Error("startParkingBatch command missing a valid planFingerprint");
-    }
-
-    parkingBatchActive = true;
-    parkingBatchStopRequested = false;
-    const startedAtMs = Date.now();
-    const jobCount = Array.isArray(jobs) ? jobs.length : 0;
-    let currentJobId = "";
-    let currentJobIndex = 0;
-    let completedJobs = 0;
-    const progress = (
-        state: ControlParkingBatchProgress["state"]
-    ): ControlParkingBatchProgress => ({
-        batchId,
-        planFingerprint,
-        state,
-        jobId: currentJobId || undefined,
-        jobIndex: currentJobIndex,
-        jobCount,
-        completedJobs,
-        startedAtMs,
-        updatedAtMs: Date.now(),
-    });
-    reportControlStatus("runningAllScenes", `parking-batch:${batchId}`, "", progress("running"));
-    try {
-        completedJobs = await executeParkingBatch(jobs, {
-            setParkingTarget: (pose) => {
-                sceneManager.setParkingTarget(pose);
-            },
-            setParkingStart: (pose) => {
-                sceneManager.setParkingStart(pose);
-            },
-            startParkingRun: (collectionAmount, seed) => (
-                sceneManager.startParkingRun(collectionAmount, seed)
-            ),
-            stopRequested: () => parkingBatchStopRequested || (safetyStart?.isStale() ?? false),
-            onJobStart: (job, jobIndex) => {
-                safetyStart?.throwIfStale();
-                currentJobId = job.id;
-                currentJobIndex = jobIndex;
-                reportControlStatus(
-                    "runningAllScenes",
-                    `parking-batch:${batchId}`,
-                    "",
-                    progress("running")
-                );
-            },
-            onJobComplete: (_job, jobIndex) => {
-                safetyStart?.throwIfStale();
-                completedJobs = jobIndex;
-                reportControlStatus(
-                    "runningAllScenes",
-                    `parking-batch:${batchId}`,
-                    "",
-                    progress("running")
-                );
-            },
-        });
-        safetyStart?.throwIfStale();
-        log(`[parking] batch=${batchId} completedJobs=${completedJobs}`);
-        if (parkingBatchStopRequested) {
-            const finalHoldApplied = sceneManager.endAllScenes();
-            const status = resolveParkingOperationCompletionStatus(true, finalHoldApplied);
-            reportControlStatus(status, "", "", progress("stopped"));
-        } else {
-            reportControlStatus("runningScene", "ego-control", "", progress("completed"));
-        }
-    } catch (error: any) {
-        const message = error?.message ?? `Failed to execute parking batch "${batchId}"`;
-        reportControlStatus("error", `parking-batch:${batchId}`, message, progress("failed"));
-        throw error;
-    } finally {
-        parkingBatchActive = false;
-        parkingBatchStopRequested = false;
-    }
 }
 
 async function executeStopSignBatchControl(
@@ -545,7 +370,6 @@ async function executeStopSignBatchControl(
             state === "running" ? "runningAllScenes" : (state === "failed" ? "error" : "runningScene"),
             state === "running" ? `stop-sign-batch:${batchId}` : "ego-control",
             "",
-            undefined,
             progress(state),
         );
     };
@@ -575,7 +399,7 @@ async function executeStopSignBatchControl(
         publishProgress(stopSignBatchStopRequested ? "stopped" : "completed");
     } catch (error: any) {
         const message = error?.message ?? `Failed to execute stop-sign batch "${batchId}"`;
-        reportControlStatus("error", `stop-sign-batch:${batchId}`, message, undefined, progress("failed"));
+        reportControlStatus("error", `stop-sign-batch:${batchId}`, message, progress("failed"));
         throw error;
     } finally {
         stopSignBatchActive = false;
@@ -583,47 +407,23 @@ async function executeStopSignBatchControl(
     }
 }
 
-async function prepareParkingEvaluationControl(seed?: string, safetyStart?: SafetyStartLease) {
-    safetyStart?.throwIfStale();
-    reportControlStatus("runningScene", "parking-evaluation");
-    try {
-        const goal = await sceneManager.prepareParkingEvaluation(seed);
-        safetyStart?.throwIfStale();
-        reportControlStatus("runningScene", "parking-evaluation");
-        log(
-            `[parking] evaluation ready seed=${goal.seed} `
-            + `start=(${goal.startPose.coords.map((value) => value.toFixed(2)).join(", ")})`
-        );
-    } catch (error: any) {
-        const message = error?.message ?? "Failed to prepare parking evaluation";
-        reportControlStatus("error", "parking-evaluation", message);
-        throw error;
-    }
-}
-
 function requestEndScene() {
-    const parkingOperationActive = requestParkingWorkStop();
+    const stopSignOperationActive = requestStopSignWorkStop();
     const stoppedSynchronously = sceneManager.endScene();
-    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, parkingOperationActive));
+    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, stopSignOperationActive));
 }
 
 function requestEndAllScenes() {
-    const parkingOperationActive = requestParkingWorkStop();
+    const stopSignOperationActive = requestStopSignWorkStop();
     const stoppedSynchronously = sceneManager.endAllScenes();
-    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, parkingOperationActive));
+    reportControlStatus(resolveStopCommandStatus(stoppedSynchronously, stopSignOperationActive));
 }
 
-function requestParkingWorkStop(): boolean {
-    if (parkingBatchActive) {
-        parkingBatchStopRequested = true;
-    }
-    if (parkingRunActive) {
-        parkingRunStopRequested = true;
-    }
+function requestStopSignWorkStop(): boolean {
     if (stopSignBatchActive) {
         stopSignBatchStopRequested = true;
     }
-    return parkingBatchActive || parkingRunActive || stopSignBatchActive;
+    return stopSignBatchActive;
 }
 
 function requireCommandSafetyEpoch(command: ControlCommand): number {
@@ -648,7 +448,7 @@ function acceptNonStartCommand(command: ControlCommand): boolean {
 }
 
 function cleanupInterruptedSafetyStart() {
-    requestParkingWorkStop();
+    requestStopSignWorkStop();
     sceneManager.forceSafeCleanup("safety epoch superseded the active start");
     reportControlStatus("idle");
 }
@@ -745,20 +545,6 @@ setTick(() => {
         routeDistance,
         leadVehicleDistance,
         hasLeadVehicle: telemetry.hasLeadVehicle,
-        parkingTargetConfigured: telemetry.parkingTargetConfigured,
-        parkingStartConfigured: telemetry.parkingStartConfigured,
-        parkingTargetPose: telemetry.parkingTargetPose,
-        parkingStartPose: telemetry.parkingStartPose,
-        parkingLongitudinalError: telemetry.parkingLongitudinalError,
-        parkingLateralError: telemetry.parkingLateralError,
-        parkingHeadingError: telemetry.parkingHeadingError,
-        parkingDistance: telemetry.parkingDistance,
-        parkingInsideBay: telemetry.parkingInsideBay,
-        parkingAligned: telemetry.parkingAligned,
-        parkingParked: telemetry.parkingParked,
-        parkingAttemptIndex: telemetry.parkingAttemptIndex,
-        parkingAttemptCount: telemetry.parkingAttemptCount,
-        parkingPhase: telemetry.parkingPhase,
         stopSignTargetConfigured: telemetry.stopSignTargetConfigured,
         stopSignPose: telemetry.stopSignPose,
         stopLinePose: telemetry.stopLinePose,
@@ -832,30 +618,6 @@ RegisterCommand("stopEgo", () => {
     stopEgoControl();
 }, false);
 
-RegisterCommand("setParkingTarget", () => {
-    try {
-        setParkingTarget();
-    } catch (error: any) {
-        log(`[parking] target calibration failed: ${error?.message ?? error}`);
-    }
-}, false);
-
-RegisterCommand("setParkingStart", () => {
-    try {
-        setParkingStart();
-    } catch (error: any) {
-        log(`[parking] start calibration failed: ${error?.message ?? error}`);
-    }
-}, false);
-
-RegisterCommand("clearParkingTarget", () => {
-    try {
-        clearParkingTarget();
-    } catch (error: any) {
-        log(`[parking] target clear failed: ${error?.message ?? error}`);
-    }
-}, false);
-
 RegisterCommand("setStopSignTarget", () => {
     try {
         setStopSignTarget();
@@ -869,22 +631,6 @@ RegisterCommand("clearStopSignTarget", () => {
         clearStopSignTarget();
     } catch (error: any) {
         log(`[stop-sign] target clear failed: ${error?.message ?? error}`);
-    }
-}, false);
-
-RegisterCommand("startParkingRun", async (_source: number, args: string[]) => {
-    try {
-        await executeParkingRunControl(args[0], args[1]);
-    } catch (error: any) {
-        log(`[parking] run failed: ${error?.message ?? error}`);
-    }
-}, false);
-
-RegisterCommand("prepareParkingEvaluation", async (_source: number, args: string[]) => {
-    try {
-        await prepareParkingEvaluationControl(args[0]);
-    } catch (error: any) {
-        log(`[parking] evaluation setup failed: ${error?.message ?? error}`);
     }
 }, false);
 
@@ -932,38 +678,6 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
                 applyEmergencyCommandEpoch(command);
                 stopEgoControl();
                 break;
-            case "setParkingTarget":
-                if (!acceptNonStartCommand(command)) break;
-                setParkingTarget();
-                break;
-            case "setParkingStart":
-                if (!acceptNonStartCommand(command)) break;
-                setParkingStart();
-                break;
-            case "clearParkingTarget":
-                if (!acceptNonStartCommand(command)) break;
-                clearParkingTarget();
-                break;
-            case "prepareParkingEvaluation":
-                await executeGuardedControlStart(command, (safetyStart) => (
-                    prepareParkingEvaluationControl(command.seed, safetyStart)
-                ));
-                break;
-            case "startParkingRun":
-                await executeGuardedControlStart(command, (safetyStart) => (
-                    executeParkingRunControl(command.attemptCount, command.seed, safetyStart)
-                ));
-                break;
-            case "startParkingBatch":
-                await executeGuardedControlStart(command, (safetyStart) => (
-                    executeParkingBatchControl(
-                        command.parkingBatchId,
-                        command.planFingerprint,
-                        command.parkingJobs,
-                        safetyStart,
-                    )
-                ));
-                break;
             case "setStopSignTarget":
                 if (!acceptNonStartCommand(command)) break;
                 setStopSignTarget();
@@ -972,6 +686,14 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
                 if (!acceptNonStartCommand(command)) break;
                 clearStopSignTarget();
                 break;
+            case "setStopSignCatalogWaypoint": {
+                if (!acceptNonStartCommand(command)) break;
+                const position = setStopSignCatalogWaypoint(command.stopSignCatalogPosition, {
+                    setNewWaypoint: (x, y) => SetNewWaypoint(x, y),
+                });
+                log(`[client] stop-sign catalog waypoint set x=${position.x.toFixed(2)} y=${position.y.toFixed(2)} z=${position.z.toFixed(2)}; use /tpwaypoint to travel`);
+                break;
+            }
             case "startStopSignBatch":
                 await executeGuardedControlStart(command, (safetyStart) => (
                     executeStopSignBatchControl(
@@ -1040,6 +762,7 @@ on("onClientResourceStop", (resourceName: string) => {
     }
     clearTick(playerGodModeTickId);
     sceneManager.forceSafeCleanup("FiveM client resource stopped");
+    sceneManager.shutdownWorldIsolation();
     disablePlayerGodMode(playerSetupOperations);
 });
 

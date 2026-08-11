@@ -144,7 +144,7 @@ function StopSignEntryEditor({entry, index, onChange, onRemove, onApplyCalibrati
                     <Box>
                         <Typography sx={{fontWeight: 800}}>{entry.id || `sign-${index + 1}`}</Typography>
                         <Typography variant="caption" color="text.secondary">
-                            {entry.startDistanceM} m start · {entry.stopDistanceM} m stop · {entry.targetSpeedMps} m/s
+                            {entry.startDistanceM} m start · {entry.stopDistanceM} m stop · {entry.exitDistanceM} m exit · {entry.targetSpeedMps} m/s
                         </Typography>
                     </Box>
                     <IconButton
@@ -174,6 +174,7 @@ function StopSignEntryEditor({entry, index, onChange, onRemove, onApplyCalibrati
                     <NumberField label="Stop distance (m)" value={entry.stopDistanceM} onChange={(value) => onChange({...entry, stopDistanceM: value})} />
                     <NumberField label="Ego-center offset (m)" value={entry.egoCenterOffsetM} onChange={(value) => onChange({...entry, egoCenterOffsetM: value})} />
                     <NumberField label="Start distance (m)" value={entry.startDistanceM} onChange={(value) => onChange({...entry, startDistanceM: value})} />
+                    <NumberField label="Exit distance (m)" value={entry.exitDistanceM} onChange={(value) => onChange({...entry, exitDistanceM: value})} />
                     <NumberField label="Target speed (m/s)" value={entry.targetSpeedMps} onChange={(value) => onChange({...entry, targetSpeedMps: value})} />
                     <NumberField label="Dwell (ms)" value={entry.dwellMs} onChange={(value) => onChange({...entry, dwellMs: value})} />
                     <NumberField label="Attempts" value={entry.attemptCount} onChange={(value) => onChange({...entry, attemptCount: value})} />
@@ -224,6 +225,7 @@ function VariantEditor({variant, onChange, onRemove}: {variant: StopSignVariatio
                 <OptionalNumberField label="Stop distance (m)" value={variant.stopDistanceM} onChange={(value) => onChange({...variant, stopDistanceM: value})} />
                 <OptionalNumberField label="Start distance (m)" value={variant.startDistanceM} onChange={(value) => onChange({...variant, startDistanceM: value})} />
                 <OptionalNumberField label="Ego-center offset (m)" value={variant.egoCenterOffsetM} onChange={(value) => onChange({...variant, egoCenterOffsetM: value})} />
+                <OptionalNumberField label="Exit distance (m)" value={variant.exitDistanceM} onChange={(value) => onChange({...variant, exitDistanceM: value})} />
                 <OptionalNumberField label="Target speed (m/s)" value={variant.targetSpeedMps} onChange={(value) => onChange({...variant, targetSpeedMps: value})} />
                 <OptionalNumberField label="Dwell (ms)" value={variant.dwellMs} onChange={(value) => onChange({...variant, dwellMs: value})} />
                 <OptionalNumberField label="Attempts" value={variant.attemptCount} onChange={(value) => onChange({...variant, attemptCount: value})} />

@@ -299,8 +299,6 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		ControlTargetNames:           append([]string(nil), cfg.ControlOutputNames...),
 		AuxTargetNames:               append([]string(nil), cfg.AuxOutputNames...),
 		LabelTolerance:               datasetConfig.LabelTolerance,
-		FutureSpeedDeltaClip:         datasetConfig.FutureSpeedDeltaClip,
-		FutureSpeedDeltaNormalize:    datasetConfig.FutureSpeedDeltaNormalize,
 		SyncFlashBrightnessThreshold: datasetConfig.SyncFlashBrightnessThreshold,
 		SyncFlashFrameLimit:          datasetConfig.SyncFlashFrameLimit,
 	}); err != nil {

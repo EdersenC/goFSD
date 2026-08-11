@@ -5,12 +5,10 @@ export type ControlDispatchCommandType =
     | "endAllScenes"
     | "startEgo"
     | "stopEgo"
-    | "setParkingTarget"
-    | "setParkingStart"
-    | "clearParkingTarget"
-    | "prepareParkingEvaluation"
-    | "startParkingRun"
-    | "startParkingBatch";
+    | "setStopSignTarget"
+    | "clearStopSignTarget"
+    | "setStopSignCatalogWaypoint"
+    | "startStopSignBatch";
 
 export type ControlDispatchCommand = {
     id: string
@@ -102,12 +100,10 @@ const commandTypes = new Set<ControlDispatchCommandType>([
     "endAllScenes",
     "startEgo",
     "stopEgo",
-    "setParkingTarget",
-    "setParkingStart",
-    "clearParkingTarget",
-    "prepareParkingEvaluation",
-    "startParkingRun",
-    "startParkingBatch",
+    "setStopSignTarget",
+    "clearStopSignTarget",
+    "setStopSignCatalogWaypoint",
+    "startStopSignBatch",
 ]);
 
 export function parseControlDispatchConfirmation(

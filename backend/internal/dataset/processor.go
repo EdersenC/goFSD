@@ -20,27 +20,25 @@ import (
 )
 
 const (
-	defaultFFmpegBin                 = "ffmpeg"
-	defaultFFprobeBin                = "ffprobe"
-	defaultImageWidth                = 224
-	defaultImageHeight               = 224
-	defaultWindowSize                = 3
-	defaultFrameStride               = 2
-	defaultSampleStride              = 2
-	defaultFutureTelemetryCount      = 6
-	defaultTelemetrySampleInterval   = 50 * time.Millisecond
-	defaultLabelTolerance            = 100 * time.Millisecond
-	defaultFutureSpeedDeltaClip      = 2.0
-	defaultFutureSpeedDeltaNormalize = true
-	defaultFlashBrightnessThreshold  = 245.0
-	defaultFlashFrameLimit           = 90
-	defaultStoppedSampleBurst        = 3
-	defaultStoppedSampleSpacing      = 2.0
-	futureTargetSmoothingRadius      = 2
-	processingConfigVersion          = 5
-	processingWorkspacePrefix        = ".processing-work-"
-	processingJournalVersion         = 1
-	processingJournalFile            = "promotion.json"
+	defaultFFmpegBin                = "ffmpeg"
+	defaultFFprobeBin               = "ffprobe"
+	defaultImageWidth               = 224
+	defaultImageHeight              = 224
+	defaultWindowSize               = 3
+	defaultFrameStride              = 2
+	defaultSampleStride             = 2
+	defaultFutureTelemetryCount     = 6
+	defaultTelemetrySampleInterval  = 50 * time.Millisecond
+	defaultLabelTolerance           = 100 * time.Millisecond
+	defaultFlashBrightnessThreshold = 245.0
+	defaultFlashFrameLimit          = 90
+	defaultStoppedSampleBurst       = 3
+	defaultStoppedSampleSpacing     = 2.0
+	futureTargetSmoothingRadius     = 2
+	processingConfigVersion         = 5
+	processingWorkspacePrefix       = ".processing-work-"
+	processingJournalVersion        = 1
+	processingJournalFile           = "promotion.json"
 )
 
 var (
@@ -112,13 +110,9 @@ type GroupedLabelControl struct {
 }
 
 type GroupedLabelAux struct {
-	FutureSpeedDelta        any       `json:"future_speed_delta,omitempty"`
-	FutureSpeedDeltaTarget  any       `json:"future_speed_delta_target,omitempty"`
 	FutureSpeed             any       `json:"future_speed,omitempty"`
 	FutureSpeedTarget       any       `json:"future_speed_target,omitempty"`
-	FutureYawDelta          any       `json:"future_yaw_delta,omitempty"`
 	FutureHorizonSeconds    any       `json:"future_horizon_seconds,omitempty"`
-	YawRate                 any       `json:"yaw_rate,omitempty"`
 	RouteForwardDelta       any       `json:"routeForwardDelta,omitempty"`
 	StopSignPhase           any       `json:"stopSignPhase,omitempty"`
 	FutureSpeedTargetsMps   []float64 `json:"future_speed_targets_mps,omitempty"`
@@ -144,13 +138,6 @@ type GroupedTelemetryControl struct {
 	ExpertBrake                       any `json:"expertBrake,omitempty"`
 	ExpertStopProbability             any `json:"expertStopProbability,omitempty"`
 	ExpertGoProbability               any `json:"expertGoProbability,omitempty"`
-}
-
-type leanParkingTelemetry struct {
-	currentSpeed                      float64
-	expertDesiredWheelSteerNormalized float64
-	expertDesiredSpeedMps             float64
-	expertStopProbability             float64
 }
 
 type GroupedTelemetryAux struct {
@@ -193,8 +180,6 @@ type sampleBuildStats struct {
 	MissingFutureLabelCount         int
 	MissingRouteForwardDeltaCount   int
 	MissingFutureSpeedTargetCount   int
-	MissingFutureYawTargetCount     int
-	MissingYawRateTargetCount       int
 	InvalidFutureHorizonCount       int
 	InvalidDerivedLabelCount        int
 }
@@ -224,12 +209,6 @@ func (s sampleBuildStats) zeroSampleReasons() map[string]int {
 	if s.MissingFutureSpeedTargetCount > 0 {
 		reasons["missing_future_speed_target"] = s.MissingFutureSpeedTargetCount
 	}
-	if s.MissingFutureYawTargetCount > 0 {
-		reasons["missing_future_yaw_target"] = s.MissingFutureYawTargetCount
-	}
-	if s.MissingYawRateTargetCount > 0 {
-		reasons["missing_yaw_rate_target"] = s.MissingYawRateTargetCount
-	}
 	if s.InvalidFutureHorizonCount > 0 {
 		reasons["invalid_future_horizon"] = s.InvalidFutureHorizonCount
 	}
@@ -240,25 +219,23 @@ func (s sampleBuildStats) zeroSampleReasons() map[string]int {
 }
 
 type Processor struct {
-	ffmpegBin                 string
-	ffprobeBin                string
-	newCommand                commandFactory
-	imageWidth                int
-	imageHeight               int
-	windowSize                int
-	frameStride               int
-	imageOffsets              []int
-	sampleStride              int
-	labelTolerance            time.Duration
-	telemetryOffsets          []int
-	futureOffsets             []int
-	telemetrySampleInterval   time.Duration
-	futureSpeedDeltaClip      float64
-	futureSpeedDeltaNormalize bool
-	flashBrightnessThreshold  float64
-	flashFrameLimit           int
-	force                     bool
-	datasetOnly               bool
+	ffmpegBin                string
+	ffprobeBin               string
+	newCommand               commandFactory
+	imageWidth               int
+	imageHeight              int
+	windowSize               int
+	frameStride              int
+	imageOffsets             []int
+	sampleStride             int
+	labelTolerance           time.Duration
+	telemetryOffsets         []int
+	futureOffsets            []int
+	telemetrySampleInterval  time.Duration
+	flashBrightnessThreshold float64
+	flashFrameLimit          int
+	force                    bool
+	datasetOnly              bool
 }
 
 type Option func(*Processor)
@@ -311,19 +288,17 @@ func NewProcessor(opts ...Option) *Processor {
 		newCommand: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			return exec.CommandContext(ctx, name, args...)
 		},
-		imageWidth:                defaultImageWidth,
-		imageHeight:               defaultImageHeight,
-		windowSize:                defaultWindowSize,
-		frameStride:               defaultFrameStride,
-		sampleStride:              defaultSampleStride,
-		labelTolerance:            defaultLabelTolerance,
-		telemetryOffsets:          defaultTelemetryHistoryOffsets(),
-		futureOffsets:             defaultFutureOffsets(),
-		telemetrySampleInterval:   defaultTelemetrySampleInterval,
-		futureSpeedDeltaClip:      defaultFutureSpeedDeltaClip,
-		futureSpeedDeltaNormalize: defaultFutureSpeedDeltaNormalize,
-		flashBrightnessThreshold:  defaultFlashBrightnessThreshold,
-		flashFrameLimit:           defaultFlashFrameLimit,
+		imageWidth:               defaultImageWidth,
+		imageHeight:              defaultImageHeight,
+		windowSize:               defaultWindowSize,
+		frameStride:              defaultFrameStride,
+		sampleStride:             defaultSampleStride,
+		labelTolerance:           defaultLabelTolerance,
+		telemetryOffsets:         defaultTelemetryHistoryOffsets(),
+		futureOffsets:            defaultFutureOffsets(),
+		telemetrySampleInterval:  defaultTelemetrySampleInterval,
+		flashBrightnessThreshold: defaultFlashBrightnessThreshold,
+		flashFrameLimit:          defaultFlashFrameLimit,
 	}
 
 	for _, opt := range opts {
@@ -350,9 +325,6 @@ func NewProcessor(opts ...Option) *Processor {
 	}
 	if p.labelTolerance <= 0 {
 		p.labelTolerance = defaultLabelTolerance
-	}
-	if p.futureSpeedDeltaClip <= 0 {
-		p.futureSpeedDeltaClip = defaultFutureSpeedDeltaClip
 	}
 	if p.flashFrameLimit < 1 {
 		p.flashFrameLimit = defaultFlashFrameLimit
@@ -406,13 +378,6 @@ func WithTelemetryTimelineConfig(telemetryOffsets []int, futureOffsets []int, sa
 	}
 }
 
-func WithFutureSpeedDeltaTargetConfig(clip float64, normalize bool) Option {
-	return func(p *Processor) {
-		p.futureSpeedDeltaClip = clip
-		p.futureSpeedDeltaNormalize = normalize
-	}
-}
-
 func WithSyncFlashDetection(brightnessThreshold float64, frameLimit int) Option {
 	return func(p *Processor) {
 		p.flashBrightnessThreshold = brightnessThreshold
@@ -433,22 +398,20 @@ func WithDatasetOnly(datasetOnly bool) Option {
 }
 
 type processingFingerprintConfig struct {
-	Version                   int           `json:"version"`
-	ImageWidth                int           `json:"image_width"`
-	ImageHeight               int           `json:"image_height"`
-	ImageOffsets              []int         `json:"image_offsets"`
-	SampleStride              int           `json:"sample_stride"`
-	LabelTolerance            time.Duration `json:"label_tolerance_ns"`
-	TelemetryOffsets          []int         `json:"telemetry_offsets"`
-	FutureOffsets             []int         `json:"future_offsets"`
-	TelemetrySampleInterval   time.Duration `json:"telemetry_sample_interval_ns"`
-	FutureSpeedDeltaClip      float64       `json:"future_speed_delta_clip"`
-	FutureSpeedDeltaNormalize bool          `json:"future_speed_delta_normalize"`
-	FlashBrightnessThreshold  float64       `json:"flash_brightness_threshold"`
-	FlashFrameLimit           int           `json:"flash_frame_limit"`
-	StoppedSampleBurst        int           `json:"stopped_sample_burst"`
-	StoppedSampleSpacing      float64       `json:"stopped_sample_spacing"`
-	FutureSmoothingRadius     int           `json:"future_smoothing_radius"`
+	Version                  int           `json:"version"`
+	ImageWidth               int           `json:"image_width"`
+	ImageHeight              int           `json:"image_height"`
+	ImageOffsets             []int         `json:"image_offsets"`
+	SampleStride             int           `json:"sample_stride"`
+	LabelTolerance           time.Duration `json:"label_tolerance_ns"`
+	TelemetryOffsets         []int         `json:"telemetry_offsets"`
+	FutureOffsets            []int         `json:"future_offsets"`
+	TelemetrySampleInterval  time.Duration `json:"telemetry_sample_interval_ns"`
+	FlashBrightnessThreshold float64       `json:"flash_brightness_threshold"`
+	FlashFrameLimit          int           `json:"flash_frame_limit"`
+	StoppedSampleBurst       int           `json:"stopped_sample_burst"`
+	StoppedSampleSpacing     float64       `json:"stopped_sample_spacing"`
+	FutureSmoothingRadius    int           `json:"future_smoothing_radius"`
 }
 
 type processingWorkspace struct {
@@ -481,22 +444,20 @@ type promotionJournalOperation struct {
 // ConfigFingerprint identifies every processor setting that affects published output.
 func (p *Processor) ConfigFingerprint() string {
 	payload := processingFingerprintConfig{
-		Version:                   processingConfigVersion,
-		ImageWidth:                p.imageWidth,
-		ImageHeight:               p.imageHeight,
-		ImageOffsets:              append([]int(nil), p.imageOffsets...),
-		SampleStride:              p.sampleStride,
-		LabelTolerance:            p.labelTolerance,
-		TelemetryOffsets:          append([]int(nil), p.telemetryOffsets...),
-		FutureOffsets:             append([]int(nil), p.futureOffsets...),
-		TelemetrySampleInterval:   p.telemetrySampleInterval,
-		FutureSpeedDeltaClip:      p.futureSpeedDeltaClip,
-		FutureSpeedDeltaNormalize: p.futureSpeedDeltaNormalize,
-		FlashBrightnessThreshold:  p.flashBrightnessThreshold,
-		FlashFrameLimit:           p.flashFrameLimit,
-		StoppedSampleBurst:        defaultStoppedSampleBurst,
-		StoppedSampleSpacing:      defaultStoppedSampleSpacing,
-		FutureSmoothingRadius:     futureTargetSmoothingRadius,
+		Version:                  processingConfigVersion,
+		ImageWidth:               p.imageWidth,
+		ImageHeight:              p.imageHeight,
+		ImageOffsets:             append([]int(nil), p.imageOffsets...),
+		SampleStride:             p.sampleStride,
+		LabelTolerance:           p.labelTolerance,
+		TelemetryOffsets:         append([]int(nil), p.telemetryOffsets...),
+		FutureOffsets:            append([]int(nil), p.futureOffsets...),
+		TelemetrySampleInterval:  p.telemetrySampleInterval,
+		FlashBrightnessThreshold: p.flashBrightnessThreshold,
+		FlashFrameLimit:          p.flashFrameLimit,
+		StoppedSampleBurst:       defaultStoppedSampleBurst,
+		StoppedSampleSpacing:     defaultStoppedSampleSpacing,
+		FutureSmoothingRadius:    futureTargetSmoothingRadius,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -657,8 +618,6 @@ func (p *Processor) buildStagedOutputs(
 		p.telemetryOffsets,
 		p.futureOffsets,
 		p.telemetrySampleInterval,
-		p.futureSpeedDeltaClip,
-		p.futureSpeedDeltaNormalize,
 	)
 	if stopSignTimeline {
 		samples = decorateStopSignSamples(samples, metadata)
@@ -1030,8 +989,6 @@ func buildDatasetSamples(
 	telemetryOffsets []int,
 	futureOffsets []int,
 	telemetrySampleInterval time.Duration,
-	futureSpeedDeltaClip float64,
-	futureSpeedDeltaNormalize bool,
 ) []DatasetSample {
 	samples, _ := buildDatasetSamplesWithStats(
 		frames,
@@ -1044,8 +1001,6 @@ func buildDatasetSamples(
 		telemetryOffsets,
 		futureOffsets,
 		telemetrySampleInterval,
-		futureSpeedDeltaClip,
-		futureSpeedDeltaNormalize,
 	)
 	return samples
 }
@@ -1061,8 +1016,6 @@ func buildDatasetSamplesWithStats(
 	telemetryOffsets []int,
 	futureOffsets []int,
 	telemetrySampleInterval time.Duration,
-	futureSpeedDeltaClip float64,
-	futureSpeedDeltaNormalize bool,
 ) ([]DatasetSample, sampleBuildStats) {
 	return buildDatasetSamplesWithImageOffsetsAndStats(
 		frames,
@@ -1074,8 +1027,6 @@ func buildDatasetSamplesWithStats(
 		telemetryOffsets,
 		futureOffsets,
 		telemetrySampleInterval,
-		futureSpeedDeltaClip,
-		futureSpeedDeltaNormalize,
 	)
 }
 
@@ -1089,8 +1040,6 @@ func buildDatasetSamplesWithImageOffsetsAndStats(
 	telemetryOffsets []int,
 	futureOffsets []int,
 	telemetrySampleInterval time.Duration,
-	futureSpeedDeltaClip float64,
-	futureSpeedDeltaNormalize bool,
 ) ([]DatasetSample, sampleBuildStats) {
 	var stats sampleBuildStats
 	if len(frames) == 0 ||
@@ -1115,19 +1064,6 @@ func buildDatasetSamplesWithImageOffsetsAndStats(
 			telemetrySampleInterval,
 		)
 	}
-	if isLeanParkingTimeline(labels) {
-		return buildLeanParkingSamplesWithImageOffsetsAndStats(
-			frames,
-			labels,
-			anchorPTS,
-			imageOffsets,
-			sampleStride,
-			telemetryOffsets,
-			futureOffsets,
-			telemetrySampleInterval,
-		)
-	}
-
 	toleranceSeconds := tolerance.Seconds()
 	telemetryAlignmentTolerance := telemetryAlignmentTolerance(tolerance, telemetrySampleInterval)
 	samples := make([]DatasetSample, 0)
@@ -1185,16 +1121,6 @@ func buildDatasetSamplesWithImageOffsetsAndStats(
 			stats.MissingFutureSpeedTargetCount++
 			continue
 		}
-		futureYawTarget, ok := smoothedFutureYaw(labels, futureLabelIndex, futureTargetSmoothingRadius)
-		if !ok {
-			stats.MissingFutureYawTargetCount++
-			continue
-		}
-		yawRateTarget, ok := smoothedYawRate(labels, futureLabelIndex, futureTargetSmoothingRadius)
-		if !ok {
-			stats.MissingYawRateTargetCount++
-			continue
-		}
 		routeForwardDeltaTarget, ok := smoothedRouteForwardDelta(labels, labelIndex, futureTargetSmoothingRadius)
 		if !ok {
 			stats.MissingRouteForwardDeltaCount++
@@ -1209,12 +1135,8 @@ func buildDatasetSamplesWithImageOffsetsAndStats(
 			label.Label,
 			futureLabel.Label,
 			futureSpeedTarget,
-			futureYawTarget,
-			yawRateTarget,
 			routeForwardDeltaTarget,
 			futureHorizonSeconds,
-			futureSpeedDeltaClip,
-			futureSpeedDeltaNormalize,
 		)
 		if !ok {
 			stats.InvalidDerivedLabelCount++
@@ -1232,241 +1154,6 @@ func buildDatasetSamplesWithImageOffsetsAndStats(
 	}
 
 	return samples, stats
-}
-
-func buildLeanParkingSamplesWithImageOffsetsAndStats(
-	frames []VideoFrame,
-	labels []timedLabel,
-	anchorPTS float64,
-	imageOffsets []int,
-	sampleStride int,
-	telemetryOffsets []int,
-	futureOffsets []int,
-	telemetrySampleInterval time.Duration,
-) ([]DatasetSample, sampleBuildStats) {
-	var stats sampleBuildStats
-	maxInterpolationGap := 2 * telemetrySampleInterval
-	samples := make([]DatasetSample, 0)
-
-	for anchorIndex := 0; anchorIndex < len(frames); anchorIndex += sampleStride {
-		stats.CandidateWindowCount++
-		window, ok := buildFrameWindowAtOffsets(frames, anchorIndex, imageOffsets)
-		if !ok {
-			stats.IncompleteFrameHistoryCount++
-			continue
-		}
-
-		anchorFrame := frames[anchorIndex]
-		anchorGameTime := anchorFrame.PTS - anchorPTS
-		anchorTelemetry, ok := interpolateLeanParkingTelemetry(labels, anchorGameTime, maxInterpolationGap)
-		if !ok {
-			stats.MissingCurrentLabelCount++
-			continue
-		}
-		history, ok := buildLeanParkingHistory(
-			labels,
-			anchorGameTime,
-			telemetryOffsets,
-			telemetrySampleInterval,
-			maxInterpolationGap,
-		)
-		if !ok {
-			stats.IncompleteTelemetryHistoryCount++
-			continue
-		}
-		future, ok := buildLeanParkingFuture(
-			labels,
-			anchorGameTime,
-			futureOffsets,
-			telemetrySampleInterval,
-			maxInterpolationGap,
-		)
-		if !ok {
-			stats.IncompleteTelemetryFutureCount++
-			continue
-		}
-
-		samples = append(samples, DatasetSample{
-			AnchorVideoPTS:   anchorFrame.PTS,
-			AnchorGameTime:   anchorGameTime,
-			FramePaths:       window,
-			TelemetryHistory: history,
-			TelemetryFuture:  future,
-			Label:            leanParkingLabel(anchorTelemetry),
-		})
-		stats.GeneratedSampleCount++
-	}
-
-	return samples, stats
-}
-
-func isLeanParkingTimeline(labels []timedLabel) bool {
-	for _, label := range labels {
-		for _, key := range []string{
-			"expertDesiredWheelSteerNormalized",
-			"expertDesiredSpeedMps",
-			"expertStopProbability",
-		} {
-			if _, exists := label.Label[key]; exists {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func buildLeanParkingHistory(
-	labels []timedLabel,
-	anchorTime float64,
-	telemetryOffsets []int,
-	sampleInterval time.Duration,
-	maxInterpolationGap time.Duration,
-) ([]GroupedTelemetryItem, bool) {
-	if !validTelemetryOffsets(telemetryOffsets) || sampleInterval <= 0 {
-		return nil, false
-	}
-
-	firstOffset := telemetryOffsets[0]
-	history := make([]GroupedTelemetryItem, 0, -firstOffset+1)
-	for offset := firstOffset; offset <= 0; offset++ {
-		targetTime := anchorTime + float64(offset)*sampleInterval.Seconds()
-		telemetry, ok := interpolateLeanParkingTelemetry(labels, targetTime, maxInterpolationGap)
-		if !ok {
-			return nil, false
-		}
-		history = append(history, leanParkingHistoryItem(telemetry))
-	}
-	return history, true
-}
-
-func buildLeanParkingFuture(
-	labels []timedLabel,
-	anchorTime float64,
-	futureOffsets []int,
-	sampleInterval time.Duration,
-	maxInterpolationGap time.Duration,
-) ([]GroupedTelemetryItem, bool) {
-	if !validFutureOffsets(futureOffsets) || sampleInterval <= 0 {
-		return nil, false
-	}
-
-	horizonLength := futureOffsets[len(futureOffsets)-1]
-	future := make([]GroupedTelemetryItem, 0, horizonLength)
-	for offset := 1; offset <= horizonLength; offset++ {
-		targetTime := anchorTime + float64(offset)*sampleInterval.Seconds()
-		telemetry, ok := interpolateLeanParkingTelemetry(labels, targetTime, maxInterpolationGap)
-		if !ok {
-			return nil, false
-		}
-		future = append(future, leanParkingFutureItem(telemetry))
-	}
-	return future, true
-}
-
-func interpolateLeanParkingTelemetry(
-	labels []timedLabel,
-	targetTime float64,
-	maxGap time.Duration,
-) (leanParkingTelemetry, bool) {
-	if len(labels) == 0 || !isFiniteFloat64(targetTime) || maxGap <= 0 {
-		return leanParkingTelemetry{}, false
-	}
-
-	rightIndex := sort.Search(len(labels), func(index int) bool {
-		return labels[index].RelativeSeconds >= targetTime
-	})
-	if rightIndex < len(labels) && nearlyEqualSeconds(labels[rightIndex].RelativeSeconds, targetTime) {
-		return parseLeanParkingTelemetry(labels[rightIndex].Label)
-	}
-	if rightIndex == 0 || rightIndex >= len(labels) {
-		return leanParkingTelemetry{}, false
-	}
-
-	left := labels[rightIndex-1]
-	right := labels[rightIndex]
-	gapSeconds := right.RelativeSeconds - left.RelativeSeconds
-	if !isFiniteFloat64(gapSeconds) || gapSeconds <= 0 || gapSeconds > maxGap.Seconds() {
-		return leanParkingTelemetry{}, false
-	}
-	leftTelemetry, ok := parseLeanParkingTelemetry(left.Label)
-	if !ok {
-		return leanParkingTelemetry{}, false
-	}
-	rightTelemetry, ok := parseLeanParkingTelemetry(right.Label)
-	if !ok {
-		return leanParkingTelemetry{}, false
-	}
-	ratio := (targetTime - left.RelativeSeconds) / gapSeconds
-	if !isFiniteFloat64(ratio) || ratio < 0 || ratio > 1 {
-		return leanParkingTelemetry{}, false
-	}
-
-	return leanParkingTelemetry{
-		currentSpeed:                      interpolateFloat64(leftTelemetry.currentSpeed, rightTelemetry.currentSpeed, ratio),
-		expertDesiredWheelSteerNormalized: interpolateFloat64(leftTelemetry.expertDesiredWheelSteerNormalized, rightTelemetry.expertDesiredWheelSteerNormalized, ratio),
-		expertDesiredSpeedMps:             interpolateFloat64(leftTelemetry.expertDesiredSpeedMps, rightTelemetry.expertDesiredSpeedMps, ratio),
-		expertStopProbability:             interpolateFloat64(leftTelemetry.expertStopProbability, rightTelemetry.expertStopProbability, ratio),
-	}, true
-}
-
-func parseLeanParkingTelemetry(source map[string]any) (leanParkingTelemetry, bool) {
-	currentSpeed, ok := numberField(source["currentSpeed"])
-	if !ok || !isFiniteFloat64(currentSpeed) || currentSpeed < 0 {
-		return leanParkingTelemetry{}, false
-	}
-	desiredSteer, ok := numberField(source["expertDesiredWheelSteerNormalized"])
-	if !ok || !isFiniteFloat64(desiredSteer) || desiredSteer < -1 || desiredSteer > 1 {
-		return leanParkingTelemetry{}, false
-	}
-	desiredSpeed, ok := numberField(source["expertDesiredSpeedMps"])
-	if !ok || !isFiniteFloat64(desiredSpeed) || desiredSpeed < 0 {
-		return leanParkingTelemetry{}, false
-	}
-	stopProbability, ok := numberField(source["expertStopProbability"])
-	if !ok || !isFiniteFloat64(stopProbability) || stopProbability < 0 || stopProbability > 1 {
-		return leanParkingTelemetry{}, false
-	}
-	return leanParkingTelemetry{
-		currentSpeed:                      currentSpeed,
-		expertDesiredWheelSteerNormalized: desiredSteer,
-		expertDesiredSpeedMps:             desiredSpeed,
-		expertStopProbability:             stopProbability,
-	}, true
-}
-
-func leanParkingHistoryItem(telemetry leanParkingTelemetry) GroupedTelemetryItem {
-	return GroupedTelemetryItem{
-		Aux: GroupedTelemetryAux{CurrentSpeed: telemetry.currentSpeed},
-	}
-}
-
-func leanParkingFutureItem(telemetry leanParkingTelemetry) GroupedTelemetryItem {
-	return GroupedTelemetryItem{
-		Control: GroupedTelemetryControl{
-			ExpertDesiredWheelSteerNormalized: telemetry.expertDesiredWheelSteerNormalized,
-			ExpertDesiredSpeedMps:             telemetry.expertDesiredSpeedMps,
-			ExpertStopProbability:             telemetry.expertStopProbability,
-		},
-		Aux: GroupedTelemetryAux{CurrentSpeed: telemetry.currentSpeed},
-	}
-}
-
-func leanParkingLabel(telemetry leanParkingTelemetry) GroupedLabel {
-	return GroupedLabel{
-		Control: GroupedLabelControl{
-			ExpertDesiredWheelSteerNormalized: telemetry.expertDesiredWheelSteerNormalized,
-			ExpertDesiredSpeedMps:             telemetry.expertDesiredSpeedMps,
-			ExpertStopProbability:             telemetry.expertStopProbability,
-		},
-	}
-}
-
-func interpolateFloat64(left float64, right float64, ratio float64) float64 {
-	return left + (right-left)*ratio
-}
-
-func nearlyEqualSeconds(left float64, right float64) bool {
-	return math.Abs(left-right) <= 1e-9
 }
 
 func buildPastOnlyFrameWindow(frames []VideoFrame, anchorIndex int, windowSize int, frameStride int) ([]string, bool) {
@@ -1646,26 +1333,14 @@ func buildTrainingLabel(
 	current map[string]any,
 	future map[string]any,
 	futureSpeedTarget float64,
-	futureYawTarget float64,
-	yawRateTarget float64,
 	routeForwardDeltaTarget float64,
 	futureHorizonSeconds float64,
-	futureSpeedDeltaClip float64,
-	futureSpeedDeltaNormalize bool,
 ) (GroupedLabel, bool) {
-	currentSpeed, ok := numberField(current["currentSpeed"])
-	if !ok {
-		return GroupedLabel{}, false
-	}
 	futureSpeed, ok := numberField(future["currentSpeed"])
 	if !ok {
 		return GroupedLabel{}, false
 	}
-	currentYaw, ok := numberField(current["yaw"])
-	if !ok || !isFiniteFloat64(currentYaw) || !isFiniteFloat64(futureYawTarget) {
-		return GroupedLabel{}, false
-	}
-	if !isFiniteFloat64(yawRateTarget) || !isFiniteFloat64(routeForwardDeltaTarget) ||
+	if !isFiniteFloat64(futureSpeedTarget) || !isFiniteFloat64(routeForwardDeltaTarget) ||
 		!isFiniteFloat64(futureHorizonSeconds) || futureHorizonSeconds <= 0 {
 		return GroupedLabel{}, false
 	}
@@ -1674,19 +1349,9 @@ func buildTrainingLabel(
 	if steering, ok := current["Steering"]; ok {
 		derived.Control.Steering = cloneValue(steering)
 	}
-	futureSpeedDelta := futureSpeedTarget - currentSpeed
-	clippedFutureSpeedDelta := clampFloat64(futureSpeedDelta, -futureSpeedDeltaClip, futureSpeedDeltaClip)
-	futureSpeedDeltaTarget := clippedFutureSpeedDelta
-	if futureSpeedDeltaNormalize {
-		futureSpeedDeltaTarget = clippedFutureSpeedDelta / futureSpeedDeltaClip
-	}
-	derived.Aux.FutureSpeedDelta = clippedFutureSpeedDelta
-	derived.Aux.FutureSpeedDeltaTarget = futureSpeedDeltaTarget
 	derived.Aux.FutureSpeed = futureSpeed
 	derived.Aux.FutureSpeedTarget = futureSpeedTarget
-	derived.Aux.FutureYawDelta = wrapHeadingDeltaDegrees(futureYawTarget - currentYaw)
 	derived.Aux.FutureHorizonSeconds = futureHorizonSeconds
-	derived.Aux.YawRate = yawRateTarget
 	derived.Aux.RouteForwardDelta = routeForwardDeltaTarget
 	return derived, true
 }
@@ -1792,13 +1457,9 @@ func flattenGroupedLabel(label GroupedLabel) map[string]any {
 	appendIfPresent(flat, "expertBrake", label.Control.ExpertBrake)
 	appendIfPresent(flat, "expertStopProbability", label.Control.ExpertStopProbability)
 	appendIfPresent(flat, "expertGoProbability", label.Control.ExpertGoProbability)
-	appendIfPresent(flat, "future_speed_delta", label.Aux.FutureSpeedDelta)
-	appendIfPresent(flat, "future_speed_delta_target", label.Aux.FutureSpeedDeltaTarget)
 	appendIfPresent(flat, "future_speed", label.Aux.FutureSpeed)
 	appendIfPresent(flat, "future_speed_target", label.Aux.FutureSpeedTarget)
-	appendIfPresent(flat, "future_yaw_delta", label.Aux.FutureYawDelta)
 	appendIfPresent(flat, "future_horizon_seconds", label.Aux.FutureHorizonSeconds)
-	appendIfPresent(flat, "yaw_rate", label.Aux.YawRate)
 	appendIfPresent(flat, "routeForwardDelta", label.Aux.RouteForwardDelta)
 	appendIfPresent(flat, "stopSignPhase", label.Aux.StopSignPhase)
 	return flat
@@ -1884,67 +1545,6 @@ func smoothedFutureSpeed(labels []timedLabel, centerIndex int, radius int) (floa
 	return sum / float64(count), true
 }
 
-func smoothedFutureYaw(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
-	if centerIndex < 0 || centerIndex >= len(labels) {
-		return 0, false
-	}
-	startIndex := centerIndex - radius
-	if startIndex < 0 {
-		startIndex = 0
-	}
-	endIndex := centerIndex + radius
-	if endIndex >= len(labels) {
-		endIndex = len(labels) - 1
-	}
-
-	var sumSin float64
-	var sumCos float64
-	count := 0
-	for index := startIndex; index <= endIndex; index++ {
-		yaw, ok := numberField(labels[index].Label["yaw"])
-		if !ok {
-			continue
-		}
-		radians := degreesToRadians(normalizeYawDegrees(yaw))
-		sumSin += math.Sin(radians)
-		sumCos += math.Cos(radians)
-		count++
-	}
-	if count == 0 {
-		return 0, false
-	}
-	return normalizeYawDegrees(radiansToDegrees(math.Atan2(sumSin, sumCos))), true
-}
-
-func smoothedYawRate(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
-	if centerIndex < 0 || centerIndex >= len(labels) {
-		return 0, false
-	}
-	startIndex := centerIndex - radius
-	if startIndex < 0 {
-		startIndex = 0
-	}
-	endIndex := centerIndex + radius
-	if endIndex >= len(labels) {
-		endIndex = len(labels) - 1
-	}
-
-	var sum float64
-	count := 0
-	for index := startIndex; index <= endIndex; index++ {
-		yawRate, ok := resolvedYawRate(labels, index)
-		if !ok {
-			continue
-		}
-		sum += yawRate
-		count++
-	}
-	if count == 0 {
-		return 0, false
-	}
-	return sum / float64(count), true
-}
-
 func smoothedRouteForwardDelta(labels []timedLabel, centerIndex int, radius int) (float64, bool) {
 	if centerIndex < 0 || centerIndex >= len(labels) {
 		return 0, false
@@ -2004,81 +1604,12 @@ func headingForwardVector(heading float64) (float64, float64) {
 	return math.Sin(radians), math.Cos(radians)
 }
 
-func resolvedYawRate(labels []timedLabel, index int) (float64, bool) {
-	if index < 0 || index >= len(labels) {
-		return 0, false
-	}
-	if yawRate, ok := numberField(labels[index].Label["yawRate"]); ok && isFiniteFloat64(yawRate) {
-		return yawRate, true
-	}
-
-	leftIndex := index - 1
-	rightIndex := index + 1
-	switch {
-	case leftIndex >= 0 && rightIndex < len(labels):
-		return derivedYawRateBetween(labels[leftIndex], labels[rightIndex])
-	case leftIndex >= 0:
-		return derivedYawRateBetween(labels[leftIndex], labels[index])
-	case rightIndex < len(labels):
-		return derivedYawRateBetween(labels[index], labels[rightIndex])
-	default:
-		return 0, false
-	}
-}
-
-func derivedYawRateBetween(left timedLabel, right timedLabel) (float64, bool) {
-	leftYaw, ok := numberField(left.Label["yaw"])
-	if !ok || !isFiniteFloat64(leftYaw) {
-		return 0, false
-	}
-	rightYaw, ok := numberField(right.Label["yaw"])
-	if !ok || !isFiniteFloat64(rightYaw) {
-		return 0, false
-	}
-	deltaSeconds := right.RelativeSeconds - left.RelativeSeconds
-	if !isFiniteFloat64(deltaSeconds) || deltaSeconds <= 0 {
-		return 0, false
-	}
-	deltaDegrees := wrapHeadingDeltaDegrees(rightYaw - leftYaw)
-	return degreesToRadians(deltaDegrees) / deltaSeconds, true
-}
-
-func clampFloat64(value float64, minimum float64, maximum float64) float64 {
-	if value < minimum {
-		return minimum
-	}
-	if value > maximum {
-		return maximum
-	}
-	return value
-}
-
-func normalizeYawDegrees(value float64) float64 {
-	normalized := math.Mod(value, 360.0)
-	if normalized < 0 {
-		normalized += 360.0
-	}
-	return normalized
-}
-
-func wrapHeadingDeltaDegrees(value float64) float64 {
-	delta := math.Mod(value+180.0, 360.0)
-	if delta < 0 {
-		delta += 360.0
-	}
-	return delta - 180.0
-}
-
 func isFiniteFloat64(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func degreesToRadians(value float64) float64 {
 	return value * math.Pi / 180.0
-}
-
-func radiansToDegrees(value float64) float64 {
-	return value * 180.0 / math.Pi
 }
 
 func clampInt(value int, minimum int, maximum int) int {

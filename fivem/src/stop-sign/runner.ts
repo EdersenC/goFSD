@@ -20,7 +20,7 @@ import {
     STOP_SIGN_STOP_POSITION_TOLERANCE_M,
     STOP_SIGN_STOP_SPEED_MPS,
 } from "./expert";
-import {gtaForwardVector, poseBehind, relativeStopLinePose} from "./geometry";
+import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
     StopSignBehaviorPhase,
     StopSignGoal,
@@ -47,7 +47,7 @@ export type StopSignBatchHooks = {
 };
 
 export class StopSignRunner {
-    private target: {signPose: StopSignPose; stopLinePose: StopSignPose; egoStopPose: StopSignPose} | null = null;
+    private target: {signPose: StopSignPose; stopLinePose: StopSignPose; egoStopPose: StopSignPose; exitPose: StopSignPose} | null = null;
     private phase: StopSignRuntimePhase = "idle";
     private running = false;
     private localStopRequested = false;
@@ -78,14 +78,22 @@ export class StopSignRunner {
         }
         const stopLinePose = poseBehind(signPose, stopDistanceM);
         const egoStopPose = poseBehind(stopLinePose, egoCenterOffsetM);
-        return this.configureTarget(signPose, stopLinePose, egoStopPose);
+        const exitPose = poseAhead(signPose, STOP_SIGN_GO_DISTANCE_M);
+        return this.configureTarget(signPose, stopLinePose, egoStopPose, 5000, exitPose);
     }
 
-    configureTarget(signPose: StopSignPose, stopLinePose: StopSignPose, egoStopPose: StopSignPose, dwellMs = 5000) {
+    configureTarget(
+        signPose: StopSignPose,
+        stopLinePose: StopSignPose,
+        egoStopPose: StopSignPose,
+        dwellMs = 5000,
+        exitPose = poseAhead(signPose, STOP_SIGN_GO_DISTANCE_M),
+    ) {
         this.target = {
             signPose: clonePose(signPose),
             stopLinePose: clonePose(stopLinePose),
             egoStopPose: clonePose(egoStopPose),
+            exitPose: clonePose(exitPose),
         };
         this.phase = "idle";
         this.targetDwellMs = Math.max(500, Math.trunc(dwellMs));
@@ -144,7 +152,7 @@ export class StopSignRunner {
                     break;
                 }
                 hooks.onJobStart?.(job, jobOffset + 1);
-                this.configureTarget(job.signPose, job.stopLinePose, job.egoStopPose, job.dwellMs);
+                this.configureTarget(job.signPose, job.stopLinePose, job.egoStopPose, job.dwellMs, job.exitPose);
                 applyEnvironment(job);
                 const ego = buildStopSignEgo(job);
                 this.phase = "spawning";
@@ -193,6 +201,7 @@ export class StopSignRunner {
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
         await resetVehicleAtPose(ego.vehicle.id, job.startPose);
         await ensurePlayerIsDriver(ego.vehicle.id);
+        SetNewWaypoint(job.exitPose.x, job.exitPose.y);
         const goal = buildGoal(job, this.attemptIndex);
         const capturePayload = {
             runId,
@@ -212,7 +221,7 @@ export class StopSignRunner {
                 ...capturePayload,
                 syncTime,
                 fromDestination: poseCoords(job.startPose),
-                toDestination: poseCoords(job.signPose),
+                toDestination: poseCoords(job.exitPose),
                 tripProfile: buildTripProfile(job),
                 goal,
             });
@@ -320,7 +329,8 @@ export class StopSignRunner {
             applyExpertControl(ego.vehicle.id, speedMps, supervision);
             this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
 
-            if (phase === "release" && centerError.longitudinalM >= STOP_SIGN_GO_DISTANCE_M) {
+            const exitError = relativeStopLinePose(pose, job.exitPose);
+            if (phase === "release" && reachedExitPose(exitError)) {
                 this.phase = "complete";
                 this.latestTelemetry = {...this.latestTelemetry, stopSignPhase: "complete"};
                 return outcome(true, "succeeded", "", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
@@ -344,6 +354,7 @@ export class StopSignRunner {
         }
         const speedMps = Math.max(0, GetEntitySpeed(vehicle));
         const error = relativeStopLinePose(pose, this.target.egoStopPose);
+        const exitError = relativeStopLinePose(pose, this.target.exitPose);
         const frontDistanceM = signedFrontBumperDistance(vehicle, pose, this.target.stopLinePose);
         if (!this.evaluationArmed && error.longitudinalM <= -5) {
             this.evaluationArmed = true;
@@ -364,7 +375,7 @@ export class StopSignRunner {
             this.phase = "idle";
         } else if (this.evaluationDwellStartedAtMs !== null && dwellElapsedMs < this.targetDwellMs) {
             this.phase = "stop_hold";
-        } else if (this.evaluationDwellStartedAtMs !== null && error.longitudinalM < STOP_SIGN_GO_DISTANCE_M) {
+        } else if (this.evaluationDwellStartedAtMs !== null && !reachedExitPose(exitError)) {
             this.phase = "release";
         } else if (this.evaluationDwellStartedAtMs !== null) {
             this.phase = "complete";
@@ -495,6 +506,8 @@ function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
         stopLinePose: clonePose(job.stopLinePose),
         egoStopPose: clonePose(job.egoStopPose),
         startPose: clonePose(job.startPose),
+        exitPose: clonePose(job.exitPose),
+        exitDistanceM: job.exitDistanceM,
         targetSpeedMps: job.targetSpeedMps,
         dwellMs: job.dwellMs,
         attemptIndex,
@@ -502,6 +515,12 @@ function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
         seed: job.seed,
         variationId: job.variationId,
     };
+}
+
+function reachedExitPose(error: ReturnType<typeof relativeStopLinePose>): boolean {
+    const crossedExitPlane = error.longitudinalM >= 0;
+    const nearExitPose = error.distanceM <= 1;
+    return nearExitPose || (crossedExitPlane && Math.abs(error.lateralM) <= 1.5);
 }
 
 function telemetryForTarget(
@@ -623,11 +642,12 @@ function clonePose(pose: StopSignPose): StopSignPose {
     return {...pose};
 }
 
-function cloneTarget(target: {signPose: StopSignPose; stopLinePose: StopSignPose; egoStopPose: StopSignPose}) {
+function cloneTarget(target: {signPose: StopSignPose; stopLinePose: StopSignPose; egoStopPose: StopSignPose; exitPose: StopSignPose}) {
     return {
         signPose: clonePose(target.signPose),
         stopLinePose: clonePose(target.stopLinePose),
         egoStopPose: clonePose(target.egoStopPose),
+        exitPose: clonePose(target.exitPose),
     };
 }
 

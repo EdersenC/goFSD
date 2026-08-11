@@ -74,8 +74,6 @@ source_id = 'auto'
 
 [dataset]
 data_root = 'S:\fsd_fivem_data'
-future_speed_delta_clip = 2.0
-future_speed_delta_normalize = true
 image_height = 480
 image_width = 480
 window_size = 5
@@ -140,16 +138,6 @@ val_pin_memory = false
 val_prefetch_factor = 1
 val_split = 1.0
 
-[loader.turn_oversampling]
-enabled = false
-straight_weight = 0.4
-light_turn_weight = 2.5
-medium_turn_weight = 1.5
-sharp_turn_weight = 0.4
-light_turn_threshold = 0.05
-medium_turn_threshold = 0.15
-sharp_turn_threshold = 0.30
-
 [loader.phase_balancing]
 enabled = true
 
@@ -182,7 +170,7 @@ cap = 5.0
 
 [training]
 device = 'auto'
-early_stopping_metric = 'drive_score'
+early_stopping_metric = 'stop_sign_score'
 early_stopping_min_delta = 0.0
 early_stopping_patience = 6
 epochs = 150

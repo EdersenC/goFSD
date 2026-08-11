@@ -269,12 +269,12 @@ func TestProcessingServiceRecoversQueuedAndRunningTrips(t *testing.T) {
 
 func TestProcessingServiceRecoveryPredicateLeavesExcludedTripUntouched(t *testing.T) {
 	runsRoot := t.TempDir()
-	parkingTrip := createReadyProcessingTrip(t, runsRoot, 0, "queued")
-	parkingSceneDir := filepath.Join(runsRoot, "run-a", "parking-forward-bay_default")
-	if err := os.Rename(filepath.Dir(parkingTrip), parkingSceneDir); err != nil {
-		t.Fatalf("move parking fixture into parking scene: %v", err)
+	stopSignTrip := createReadyProcessingTrip(t, runsRoot, 0, "queued")
+	stopSignSceneDir := filepath.Join(runsRoot, "run-a", "stop-sign_temporal-v1")
+	if err := os.Rename(filepath.Dir(stopSignTrip), stopSignSceneDir); err != nil {
+		t.Fatalf("move fixture into stop-sign scene: %v", err)
 	}
-	parkingTrip = filepath.Join(parkingSceneDir, filepath.Base(parkingTrip))
+	stopSignTrip = filepath.Join(stopSignSceneDir, filepath.Base(stopSignTrip))
 
 	legacyTrip := createReadyProcessingTrip(t, runsRoot, 1, "queued")
 	legacyWorkspace := filepath.Join(legacyTrip, processingWorkspacePrefix+"untouched")
@@ -290,7 +290,7 @@ func TestProcessingServiceRecoveryPredicateLeavesExcludedTripUntouched(t *testin
 		ReadinessPollInterval: time.Millisecond,
 		RecoveryTripPredicate: func(tripDir string) bool {
 			sceneDir := filepath.Base(filepath.Dir(filepath.Clean(tripDir)))
-			return sceneDir == "parking-forward-bay_default"
+			return sceneDir == "stop-sign_temporal-v1"
 		},
 	}, harness.factory)
 	if err != nil {
@@ -306,8 +306,8 @@ func TestProcessingServiceRecoveryPredicateLeavesExcludedTripUntouched(t *testin
 		t.Fatalf("WaitIdle: %v", err)
 	}
 
-	if harness.callCount(parkingTrip) != 1 {
-		t.Fatalf("included parking trip was not recovered once: %d", harness.callCount(parkingTrip))
+	if harness.callCount(stopSignTrip) != 1 {
+		t.Fatalf("included stop-sign trip was not recovered once: %d", harness.callCount(stopSignTrip))
 	}
 	if harness.callCount(legacyTrip) != 0 {
 		t.Fatalf("excluded legacy trip was recovered: %d", harness.callCount(legacyTrip))

@@ -7,31 +7,31 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$parkingProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$parkingWebRoot = Join-Path $parkingProjectRoot "backend\cmd\web"
-$parkingBackendMode = if ($BackendArgs.Count -eq 0) { "serve" } else { $BackendArgs[0].Trim() }
-$parkingShouldBuildWeb = (-not $SkipWebBuild) -and ($parkingBackendMode -eq "serve")
+$stopSignProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$stopSignWebRoot = Join-Path $stopSignProjectRoot "backend\cmd\web"
+$stopSignBackendMode = if ($BackendArgs.Count -eq 0) { "serve" } else { $BackendArgs[0].Trim() }
+$stopSignShouldBuildWeb = (-not $SkipWebBuild) -and ($stopSignBackendMode -eq "serve")
 
-if ($parkingShouldBuildWeb) {
-    $parkingNpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $parkingNpmCommand) {
+if ($stopSignShouldBuildWeb) {
+    $stopSignNpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $stopSignNpmCommand) {
         throw "Node.js npm.cmd was not found on PATH; install the Stop Sign Lab web dependencies before starting the backend"
     }
-    $parkingWebBuild = Start-Process `
-        -FilePath $parkingNpmCommand.Source `
-        -ArgumentList @("--prefix", $parkingWebRoot, "run", "build") `
+    $stopSignWebBuild = Start-Process `
+        -FilePath $stopSignNpmCommand.Source `
+        -ArgumentList @("--prefix", $stopSignWebRoot, "run", "build") `
         -NoNewWindow `
         -Wait `
         -PassThru
-    if ($parkingWebBuild.ExitCode -ne 0) {
-        throw "Stop Sign Lab web build failed with exit code $($parkingWebBuild.ExitCode)"
+    if ($stopSignWebBuild.ExitCode -ne 0) {
+        throw "Stop Sign Lab web build failed with exit code $($stopSignWebBuild.ExitCode)"
     }
 }
 
 # WSL can pass Windows PowerShell a truncated PATHEXT, which breaks Go's downloaded toolchain lookup.
-$parkingPathExtensions = @($env:PATHEXT -split ";" | Where-Object { $_ })
-if ($parkingPathExtensions -notcontains ".EXE") {
-    $env:PATHEXT = (@(".COM", ".EXE", ".BAT", ".CMD") + $parkingPathExtensions) -join ";"
+$stopSignPathExtensions = @($env:PATHEXT -split ";" | Where-Object { $_ })
+if ($stopSignPathExtensions -notcontains ".EXE") {
+    $env:PATHEXT = (@(".COM", ".EXE", ".BAT", ".CMD") + $stopSignPathExtensions) -join ";"
 }
 
 function ConvertTo-WindowsCommandLineArgument {
@@ -76,27 +76,27 @@ if ($DataRoot.Trim()) {
     $env:FSD_DATA_ROOT = "S:\fsd_fivem_data"
 }
 
-Set-Location (Join-Path $parkingProjectRoot "backend")
-$parkingGoCommand = Get-Command go.exe -ErrorAction SilentlyContinue
-$parkingGoPath = if ($parkingGoCommand) { $parkingGoCommand.Source } else { "" }
-if (-not $parkingGoPath) {
-    $parkingGoCandidate = Join-Path $env:ProgramFiles "Go\bin\go.exe"
-    if (Test-Path -LiteralPath $parkingGoCandidate -PathType Leaf) {
-        $parkingGoPath = $parkingGoCandidate
+Set-Location (Join-Path $stopSignProjectRoot "backend")
+$stopSignGoCommand = Get-Command go.exe -ErrorAction SilentlyContinue
+$stopSignGoPath = if ($stopSignGoCommand) { $stopSignGoCommand.Source } else { "" }
+if (-not $stopSignGoPath) {
+    $stopSignGoCandidate = Join-Path $env:ProgramFiles "Go\bin\go.exe"
+    if (Test-Path -LiteralPath $stopSignGoCandidate -PathType Leaf) {
+        $stopSignGoPath = $stopSignGoCandidate
     }
 }
-if (-not $parkingGoPath) {
+if (-not $stopSignGoPath) {
     throw "Windows Go was not found on PATH or under Program Files\Go\bin"
 }
 
-$parkingGoArguments = @("run", "./cmd") + $BackendArgs
-$parkingGoArgumentLine = ($parkingGoArguments | ForEach-Object {
+$stopSignGoArguments = @("run", "./cmd") + $BackendArgs
+$stopSignGoArgumentLine = ($stopSignGoArguments | ForEach-Object {
     ConvertTo-WindowsCommandLineArgument $_
 }) -join " "
-$parkingGoProcess = Start-Process `
-    -FilePath $parkingGoPath `
-    -ArgumentList $parkingGoArgumentLine `
+$stopSignGoProcess = Start-Process `
+    -FilePath $stopSignGoPath `
+    -ArgumentList $stopSignGoArgumentLine `
     -NoNewWindow `
     -Wait `
     -PassThru
-exit $parkingGoProcess.ExitCode
+exit $stopSignGoProcess.ExitCode

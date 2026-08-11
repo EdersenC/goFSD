@@ -9,11 +9,9 @@ The four operator milestones are:
 3. **Stop + Dwell** — stop at the derived ego pose and remain stopped for the configured dwell, normally `5000 ms`.
 4. **Go** — V0 releases with `scripted_dwell_release_v0`. The model does not decide when the dwell is finished yet.
 
-Parking and general-driving modules may remain in the tree for reference, but they are legacy paths. They are not the active product, dataset contract, or operator workflow.
-
 ## Start the lab
 
-1. Open [`parking-lab.code-workspace`](parking-lab.code-workspace). The filename is retained for compatibility; its tasks and folder name are Stop Sign Lab.
+1. Open [`stop-sign-lab.code-workspace`](stop-sign-lab.code-workspace).
 2. Run the **Stop Sign Lab: Start** task, or run:
 
    ```bash
@@ -45,7 +43,7 @@ The deploy command validates the existing resource directory and copies only `di
 restart FSD
 ```
 
-Then join the session and confirm the workbench status strip reports both the API and FiveM online. Do not run the deploy watcher with `sudo`; point `FIVEM_RESOURCE_DIR` at the resource owned by the normal FiveM user.
+Then join the session and confirm the workbench status strip reports the API online, FiveM linked, and Control synchronized. Do not run the deploy watcher with `sudo`; point `FIVEM_RESOURCE_DIR` at the resource owned by the normal FiveM user.
 
 ## One operator workbench
 
@@ -53,7 +51,7 @@ The Stop Sign Lab uses one persistent **Collect → Data → Train → Evaluate*
 
 | Area | Purpose |
 |---|---|
-| **Collect** | Register stop-sign poses, set base conditions and variants, queue ordered attempts, and watch the live phase/telemetry. |
+| **Collect** | Search the 463-prop GTA catalog, navigate to signs, register calibrated lane poses, queue ordered attempts, and watch live telemetry. |
 | **Data** | Process completed trips, inspect readiness and phase coverage, and keep failed attempts diagnosable but out of expert training by default. |
 | **Train** | Train from independent stop-sign locations, with phase-balanced sampling and a fixed temporal output contract. |
 | **Evaluate** | Load a compatible checkpoint, pass the guarded safety preflight, and compare predicted speed/stop intent with the closed-loop result. |
@@ -62,23 +60,25 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 
 ## First stop-sign collection
 
-1. Select **Start setup car** and enter the driver seat.
-2. Place the setup car at the stop-sign reference point with its heading aligned to the vehicle's intended travel direction. The heading describes travel through the intersection, not the physical sign prop's facing direction.
-3. Select **Calibrate current sign**, then copy the accepted live pose into the desired plan entry with **Use live pose**.
-4. Set the stop-line distance, ego-center offset, approach distance, target speed, dwell, attempts, and base environment.
-5. Add variations for weather, time, vehicle model/color, speed, distances, dwell, or attempt count. Blank variation fields inherit the entry's base values.
-6. Add more physical stop-sign entries as needed, review the total signs/variations/attempts, then select **Queue collection**.
-7. Watch the fine phase labels: `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`.
-8. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
+1. Search the **Stop-sign catalog**, select a physical prop, and choose **Set GTA waypoint**. Run `/tpwaypoint` in FiveM to travel there.
+2. Select **Start setup car** and remain in its driver seat.
+3. Place the setup car at the lane reference point with its heading aligned to the vehicle's intended travel direction. The catalog prop position and quaternion are navigation references, not a training pose.
+4. Select **Calibrate current sign**, then copy the accepted live pose into the desired plan entry with **Use live pose**.
+5. Set the stop-line distance, ego-center offset, approach distance, exit distance, target speed, dwell, attempts, and base environment.
+6. Add variations for weather, time, vehicle model/color, speed, distances, dwell, or attempt count. Blank variation fields inherit the entry's base values.
+7. Add more physical stop-sign entries as needed, review the total signs/variations/attempts, then select **Queue collection**.
+8. Watch the fine phase labels: `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`.
+9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
 The browser keeps the draft plan locally. The backend expands it deterministically in entry order and then variation order. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan JSON, limits, geometry, and collection checklist.
 
 ## Geometry contract
 
-Every attempt has exactly four distinct poses:
+Every attempt has exactly five distinct poses:
 
 ```text
 signPose
+   ├─ forward by exitDistanceM ──────> exitPose
    └─ back by stopDistanceM ──────────> stopLinePose
           └─ back by egoCenterOffsetM ─> egoStopPose
                  └─ back by startDistanceM ─> startPose
@@ -88,8 +88,9 @@ signPose
 - `stopLinePose` is where the vehicle's front must not cross before completing the stop.
 - `egoStopPose` is the target for the vehicle center, accounting for front overhang and clearance.
 - `startPose` is the deterministic reset pose for the approach.
+- `exitPose` is the exact scripted-release waypoint beyond the sign.
 
-Derived poses are validated again at the FiveM boundary; clients cannot send contradictory geometry. The defaults are a `3.0 m` sign-to-line offset, `2.5 m` line-to-ego-center offset, `40.0 m` approach, `8.0 m/s` target speed, and `5000 ms` dwell.
+Derived poses are validated again at the FiveM boundary; clients cannot send contradictory geometry. The defaults are a `3.0 m` sign-to-line offset, `2.5 m` line-to-ego-center offset, `40.0 m` approach, `8.0 m` sign-to-exit distance, `8.0 m/s` target speed, and `5000 ms` dwell.
 
 ## Data and model contract
 

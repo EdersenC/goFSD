@@ -88,17 +88,17 @@ class CheckpointSanityTests(unittest.TestCase):
     def test_summarize_control_ranges_marks_flat_outputs(self) -> None:
         summary = summarize_control_ranges([
             {
-                "control_target_names": ["steering", "acceleration"],
+                "control_target_names": ["future_speed_mps", "stop_intent"],
                 "pred_controls": [[[0.1, 0.5], [0.1, 0.50001]]],
             },
             {
-                "control_target_names": ["steering", "acceleration"],
+                "control_target_names": ["future_speed_mps", "stop_intent"],
                 "pred_controls": [[[0.1, 0.50002], [0.1, 0.50003]]],
             },
         ])
 
-        self.assertTrue(bool(summary["steering"]["flat"]))
-        self.assertTrue(bool(summary["acceleration"]["flat"]))
+        self.assertTrue(bool(summary["future_speed_mps"]["flat"]))
+        self.assertTrue(bool(summary["stop_intent"]["flat"]))
 
     def test_resolve_debug_dir_accepts_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

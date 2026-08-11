@@ -1,5 +1,5 @@
 import {StopSignJob, StopSignPose} from "./types";
-import {poseBehind} from "./geometry";
+import {poseAhead, poseBehind} from "./geometry";
 
 const derivedPoseToleranceM = 1e-4;
 
@@ -26,6 +26,7 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
     const stopDistanceM = boundedNumber(raw.stopDistanceM, `stopSignJobs[${index}].stopDistanceM`, 0.5, 15);
     const egoCenterOffsetM = boundedNumber(raw.egoCenterOffsetM, `stopSignJobs[${index}].egoCenterOffsetM`, 0.5, 8);
     const startDistanceM = boundedNumber(raw.startDistanceM, `stopSignJobs[${index}].startDistanceM`, 5, 250);
+    const exitDistanceM = boundedNumber(raw.exitDistanceM, `stopSignJobs[${index}].exitDistanceM`, 2, 50);
     const time = isRecord(raw.time) ? raw.time : {};
     const vehicle = isRecord(raw.vehicle) ? raw.vehicle : {};
     const color = isRecord(vehicle.color) ? {
@@ -42,9 +43,11 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
         stopLinePose: parsePose(raw.stopLinePose, `stopSignJobs[${index}].stopLinePose`),
         egoStopPose: parsePose(raw.egoStopPose, `stopSignJobs[${index}].egoStopPose`),
         startPose: parsePose(raw.startPose, `stopSignJobs[${index}].startPose`),
+        exitPose: parsePose(raw.exitPose, `stopSignJobs[${index}].exitPose`),
         stopDistanceM,
         egoCenterOffsetM,
         startDistanceM,
+        exitDistanceM,
         targetSpeedMps,
         dwellMs,
         attemptCount,
@@ -67,9 +70,11 @@ function validateDerivedGeometry(job: StopSignJob, index: number) {
     const expectedStopLine = poseBehind(job.signPose, job.stopDistanceM);
     const expectedEgoStop = poseBehind(expectedStopLine, job.egoCenterOffsetM);
     const expectedStart = poseBehind(expectedEgoStop, job.startDistanceM);
+    const expectedExit = poseAhead(job.signPose, job.exitDistanceM);
     requireMatchingPose(job.stopLinePose, expectedStopLine, `stopSignJobs[${index}].stopLinePose`);
     requireMatchingPose(job.egoStopPose, expectedEgoStop, `stopSignJobs[${index}].egoStopPose`);
     requireMatchingPose(job.startPose, expectedStart, `stopSignJobs[${index}].startPose`);
+    requireMatchingPose(job.exitPose, expectedExit, `stopSignJobs[${index}].exitPose`);
 }
 
 function requireMatchingPose(actual: StopSignPose, expected: StopSignPose, label: string) {

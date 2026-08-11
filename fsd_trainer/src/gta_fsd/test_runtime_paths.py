@@ -33,7 +33,7 @@ class RuntimePathTests(unittest.TestCase):
 
     def test_data_root_environment_keeps_runtime_artifacts_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / "parking-data"
+            data_root = Path(tmp) / "stop-sign-data"
             config_path = write_runnable_stop_sign_config(Path(tmp))
             with patch.dict(os.environ, {"FSD_DATA_ROOT": str(data_root)}):
                 self.assertEqual(resolve_data_root(r"S:\fsd_fivem_data"), str(data_root))
@@ -58,7 +58,7 @@ class RuntimePathTests(unittest.TestCase):
 
     def test_empty_training_runs_directory_has_no_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / "parking-data"
+            data_root = Path(tmp) / "stop-sign-data"
             with patch.dict(os.environ, {"FSD_DATA_ROOT": str(data_root)}):
                 self.assertEqual(discover_models(DEFAULT_CONFIG_PATH), [])
 

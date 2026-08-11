@@ -21,7 +21,7 @@ func TestExpandDerivesOrderedStopAndStartPoses(t *testing.T) {
 				AttemptCount:   intPtr(3),
 				Variations: []Variation{
 					{ID: "clear"},
-					{ID: "rain", Weather: stringPtr(" rain "), TargetSpeedMPS: float64Ptr(7.5)},
+					{ID: "rain", Weather: stringPtr(" rain "), TargetSpeedMPS: float64Ptr(7.5), ExitDistanceM: float64Ptr(20)},
 				},
 			},
 			{
@@ -50,10 +50,13 @@ func TestExpandDerivesOrderedStopAndStartPoses(t *testing.T) {
 	assertPoseNear(t, first[0].StopLinePose, Pose{X: 100, Y: 196, Z: 8, Heading: 0})
 	assertPoseNear(t, first[0].EgoStopPose, Pose{X: 100, Y: 193.5, Z: 8, Heading: 0})
 	assertPoseNear(t, first[0].StartPose, Pose{X: 100, Y: 163.5, Z: 8, Heading: 0})
+	assertPoseNear(t, first[0].ExitPose, Pose{X: 100, Y: 208, Z: 8, Heading: 0})
+	assertPoseNear(t, first[1].ExitPose, Pose{X: 100, Y: 220, Z: 8, Heading: 0})
 	assertPoseNear(t, first[2].StopLinePose, Pose{X: 52, Y: -10, Z: 2, Heading: 90})
 	assertPoseNear(t, first[2].EgoStopPose, Pose{X: 54.5, Y: -10, Z: 2, Heading: 90})
 	assertPoseNear(t, first[2].StartPose, Pose{X: 74.5, Y: -10, Z: 2, Heading: 90})
-	if first[1].Weather != "RAIN" || first[1].TargetSpeedMPS != 7.5 || first[1].AttemptCount != 3 {
+	assertPoseNear(t, first[2].ExitPose, Pose{X: 42, Y: -10, Z: 2, Heading: 90})
+	if first[1].Weather != "RAIN" || first[1].TargetSpeedMPS != 7.5 || first[1].ExitDistanceM != 20 || first[1].AttemptCount != 3 {
 		t.Fatalf("variation did not inherit and override settings: %+v", first[1])
 	}
 	if first[1].Seed != "fresh-1:northbound:rain" {
@@ -74,7 +77,7 @@ func TestExpandUsesDocumentedDefaults(t *testing.T) {
 		t.Fatalf("Expand: %v", err)
 	}
 	job := jobs[0]
-	if job.StopDistanceM != DefaultStopDistanceM || job.EgoCenterOffsetM != DefaultEgoCenterOffsetM || job.StartDistanceM != DefaultStartDistanceM ||
+	if job.StopDistanceM != DefaultStopDistanceM || job.EgoCenterOffsetM != DefaultEgoCenterOffsetM || job.StartDistanceM != DefaultStartDistanceM || job.ExitDistanceM != DefaultExitDistanceM ||
 		job.TargetSpeedMPS != DefaultTargetSpeedMPS || job.DwellMS != DefaultDwellMS ||
 		job.AttemptCount != DefaultAttemptCount || job.Weather != DefaultWeather ||
 		job.Time != (TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute}) {
@@ -133,6 +136,7 @@ func TestExpandRejectsInvalidPlans(t *testing.T) {
 		{name: "stop distance", edit: func(plan *Plan) { plan.Entries[0].StopDistanceM = float64Ptr(0) }, want: "stopDistanceM"},
 		{name: "ego center offset", edit: func(plan *Plan) { plan.Entries[0].EgoCenterOffsetM = float64Ptr(0) }, want: "egoCenterOffsetM"},
 		{name: "start distance", edit: func(plan *Plan) { plan.Entries[0].StartDistanceM = float64Ptr(251) }, want: "startDistanceM"},
+		{name: "exit distance", edit: func(plan *Plan) { plan.Entries[0].ExitDistanceM = float64Ptr(1) }, want: "exitDistanceM"},
 		{name: "target speed", edit: func(plan *Plan) { plan.Entries[0].TargetSpeedMPS = float64Ptr(41) }, want: "targetSpeedMps"},
 		{name: "dwell", edit: func(plan *Plan) { plan.Entries[0].DwellMS = intPtr(200) }, want: "dwellMs"},
 		{name: "attempts", edit: func(plan *Plan) { plan.Entries[0].AttemptCount = intPtr(51) }, want: "attemptCount"},
@@ -171,6 +175,11 @@ func TestValidateExpandedJobRejectsContradictoryGeometry(t *testing.T) {
 	tampered.EgoStopPose.X += 0.25
 	if err := ValidateExpandedJob(tampered); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "egoStopPose") {
 		t.Fatalf("expected contradictory ego stop rejection, got=%v", err)
+	}
+	tampered = jobs[0]
+	tampered.ExitPose.Y += 0.25
+	if err := ValidateExpandedJob(tampered); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "exitPose") {
+		t.Fatalf("expected contradictory exit rejection, got=%v", err)
 	}
 }
 

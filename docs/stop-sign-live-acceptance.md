@@ -33,8 +33,9 @@ Join the session, open [http://127.0.0.1:8080/](http://127.0.0.1:8080/), and kee
 - [ ] **Hold** or `Alt+Shift+H` stops motion and settles to a fresh idle safety epoch.
 - [ ] A stale pre-Hold start is rejected rather than executed later.
 - [ ] The setup command puts the player in the driver seat and preserves the controlled car.
+- [ ] A catalog selection sets the expected GTA map waypoint, and `/tpwaypoint` reaches the physical sign without changing plan geometry.
 - [ ] Live sign calibration returns the expected world pose and travel heading.
-- [ ] The derived stop line, ego stop pose, and start pose are on the correct side of the sign and aligned with the lane.
+- [ ] The derived stop line, ego stop pose, start pose, and exit pose are on the correct side of the sign and aligned with the lane.
 - [ ] A queued attempt resets to the exact derived start pose before capture.
 - [ ] The selected monitor contains GTA, and the captured RGB clip shows the intended approach.
 - [ ] Nearby traffic/NPC isolation behaves as intended without deleting the controlled vehicle.
@@ -47,7 +48,7 @@ Collect at least one clean success and deliberate failures that exercise the saf
 - [ ] `cruise_approach`: it establishes a stable approach speed.
 - [ ] `decelerate`: it brakes smoothly without throttle/brake overlap or visible oscillation.
 - [ ] `stop_hold`: the front remains behind the stop line, the vehicle center reaches the ego stop tolerance, and speed remains near zero for the full dwell.
-- [ ] `release`: the car leaves only after the scripted V0 dwell completes.
+- [ ] `release`: the car leaves only after the scripted V0 dwell completes and reaches the exact derived exit pose.
 - [ ] Crossing without stopping, stopping too early, collision, timeout, and operator stop produce inspectable failed outcomes.
 
 ## Data acceptance
@@ -67,7 +68,7 @@ For a completed attempt, verify:
 - [ ] RGB and 50 ms telemetry align at the capture flash.
 - [ ] The five fine phases appear in the expected temporal order.
 - [ ] Current speed, expert desired speed, expert throttle/brake, physical brake pressure, and outcome are finite and plausible.
-- [ ] `stopSignGoal` contains all four poses, the resolved variation, dwell, seed, and `scripted_dwell_release_v0`.
+- [ ] `stopSignGoal` contains all five poses, the resolved variation, dwell, seed, and `scripted_dwell_release_v0`.
 - [ ] A successful trip is training eligible; a failed trip is retained but excluded by default.
 - [ ] Trips from one physical sign share a location split group; distinct signs have distinct groups.
 - [ ] The model input excludes oracle sign/line/error geometry.

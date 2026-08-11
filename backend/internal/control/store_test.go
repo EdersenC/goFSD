@@ -2,7 +2,6 @@ package control
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -13,98 +12,6 @@ func TestEnqueueValidatesStartSceneRequiresName(t *testing.T) {
 
 	if _, err := store.Enqueue(CommandRequest{Type: CommandStartScene}); err == nil {
 		t.Fatal("expected validation error for empty sceneName")
-	}
-}
-
-func TestEnqueueAcceptsParkingTargetCommands(t *testing.T) {
-	store := NewStore()
-
-	for _, commandType := range []CommandType{
-		CommandSetParkingTarget,
-		CommandSetParkingStart,
-		CommandClearParkingTarget,
-	} {
-		command, err := store.Enqueue(CommandRequest{Type: commandType})
-		if err != nil {
-			t.Fatalf("enqueue %s: %v", commandType, err)
-		}
-		if command.Type != commandType {
-			t.Fatalf("unexpected command: got=%s want=%s", command.Type, commandType)
-		}
-	}
-}
-
-func TestEnqueuePrepareParkingEvaluationCarriesSeed(t *testing.T) {
-	store := NewStore()
-
-	command, err := store.Enqueue(CommandRequest{
-		Type:        CommandPrepareParkingEvaluation,
-		SafetyEpoch: currentSafetyEpochPtr(store),
-		Seed:        "  evaluation-seed-7  ",
-	})
-	if err != nil {
-		t.Fatalf("enqueue parking evaluation: %v", err)
-	}
-	if command.Type != CommandPrepareParkingEvaluation {
-		t.Fatalf("unexpected command type: %s", command.Type)
-	}
-	if command.Seed != "evaluation-seed-7" {
-		t.Fatalf("expected normalized evaluation seed, got=%q", command.Seed)
-	}
-}
-
-func TestEnqueueStartParkingRunCarriesAttemptOptions(t *testing.T) {
-	store := NewStore()
-
-	command, err := store.Enqueue(CommandRequest{
-		Type:         CommandStartParkingRun,
-		SafetyEpoch:  currentSafetyEpochPtr(store),
-		AttemptCount: 12,
-		Seed:         "  training-seed-42  ",
-	})
-	if err != nil {
-		t.Fatalf("enqueue parking run: %v", err)
-	}
-	if command.AttemptCount != 12 {
-		t.Fatalf("unexpected attempt count: %+v", command)
-	}
-	if command.Seed != "training-seed-42" {
-		t.Fatalf("expected normalized seed, got=%q", command.Seed)
-	}
-}
-
-func TestEnqueueStartParkingRunValidatesAttemptCount(t *testing.T) {
-	for _, attemptCount := range []int{-1, 0, maximumParkingAttemptCount + 1} {
-		t.Run(fmt.Sprintf("attempts_%d", attemptCount), func(t *testing.T) {
-			store := NewStore()
-			_, err := store.Enqueue(CommandRequest{
-				Type:         CommandStartParkingRun,
-				AttemptCount: attemptCount,
-			})
-			if !errors.Is(err, ErrInvalidCommand) {
-				t.Fatalf("expected invalid command error, got=%v", err)
-			}
-		})
-	}
-
-	for _, attemptCount := range []int{1, maximumParkingAttemptCount} {
-		store := NewStore()
-		if _, err := store.Enqueue(CommandRequest{
-			Type:         CommandStartParkingRun,
-			SafetyEpoch:  currentSafetyEpochPtr(store),
-			AttemptCount: attemptCount,
-		}); err != nil {
-			t.Fatalf("expected attempt count %d to be valid: %v", attemptCount, err)
-		}
-	}
-}
-
-func TestEnqueueStartParkingBatchRequiresPlanFingerprint(t *testing.T) {
-	store := NewStore()
-	request := validParkingBatchCommandRequest(currentSafetyEpochPtr(store))
-	request.PlanFingerprint = ""
-	if _, err := store.Enqueue(request); !errors.Is(err, ErrInvalidCommand) {
-		t.Fatalf("expected missing plan fingerprint to be invalid, got=%v", err)
 	}
 }
 
@@ -127,6 +34,45 @@ func TestEnqueueStartStopSignBatchCarriesJobsWithoutAliasing(t *testing.T) {
 	secondState := store.State()
 	if secondState.PendingCommands[0].StopSignJobs[0].Vehicle.Color.G != 128 {
 		t.Fatalf("state returned aliased stop-sign job memory: %+v", secondState.PendingCommands[0])
+	}
+}
+
+func TestEnqueueStopSignCatalogWaypointValidatesAndClonesPosition(t *testing.T) {
+	store := NewStore()
+	position := &WorldPosition{X: -2335.7034, Y: 3269.0288, Z: 31.81049}
+	command, err := store.Enqueue(CommandRequest{
+		Type:                    CommandSetStopSignCatalogWaypoint,
+		StopSignCatalogPosition: position,
+	})
+	if err != nil {
+		t.Fatalf("enqueue stop-sign catalog waypoint: %v", err)
+	}
+	position.X = 0
+	if command.StopSignCatalogPosition == nil || command.StopSignCatalogPosition.X != -2335.7034 {
+		t.Fatalf("enqueue retained caller-owned position: %+v", command.StopSignCatalogPosition)
+	}
+
+	state := store.State()
+	state.PendingCommands[0].StopSignCatalogPosition.Y = 0
+	secondState := store.State()
+	if got := secondState.PendingCommands[0].StopSignCatalogPosition.Y; got != 3269.0288 {
+		t.Fatalf("state returned aliased catalog position: got=%f", got)
+	}
+
+	for name, invalid := range map[string]*WorldPosition{
+		"missing":       nil,
+		"non-finite":    {X: math.Inf(1)},
+		"out-of-bounds": {X: 20_000},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.Enqueue(CommandRequest{
+				Type:                    CommandSetStopSignCatalogWaypoint,
+				StopSignCatalogPosition: invalid,
+			})
+			if !errors.Is(err, ErrInvalidCommand) {
+				t.Fatalf("expected invalid command, got=%v", err)
+			}
+		})
 	}
 }
 
@@ -160,11 +106,11 @@ func TestPollReturnsCommandsInOrder(t *testing.T) {
 	now := time.Date(2026, 4, 11, 2, 0, 0, 0, time.UTC)
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
 
-	first, err := store.Enqueue(CommandRequest{Type: CommandSetParkingTarget})
+	first, err := store.Enqueue(CommandRequest{Type: CommandSetStopSignTarget})
 	if err != nil {
 		t.Fatalf("enqueue first: %v", err)
 	}
-	second, err := store.Enqueue(CommandRequest{Type: CommandClearParkingTarget})
+	second, err := store.Enqueue(CommandRequest{Type: CommandClearStopSignTarget})
 	if err != nil {
 		t.Fatalf("enqueue second: %v", err)
 	}
@@ -189,15 +135,12 @@ func TestEmergencyHoldFlushesUndeliveredCommandsAndPreservesStopFIFO(t *testing.
 	store := NewStore()
 
 	commandsToFlush := []CommandRequest{
-		{Type: CommandSetParkingTarget},
+		{Type: CommandSetStopSignTarget},
 		{Type: CommandStartScene, SafetyEpoch: currentSafetyEpochPtr(store), SceneName: "inner-city-driving:default"},
 		{Type: CommandRunAllScenes, SafetyEpoch: currentSafetyEpochPtr(store)},
 		{Type: CommandStartEgo, SafetyEpoch: currentSafetyEpochPtr(store)},
-		{Type: CommandSetParkingStart},
-		{Type: CommandPrepareParkingEvaluation, SafetyEpoch: currentSafetyEpochPtr(store), Seed: "evaluation-1"},
-		{Type: CommandStartParkingRun, SafetyEpoch: currentSafetyEpochPtr(store), AttemptCount: 3, Seed: "run-1"},
-		validParkingBatchCommandRequest(currentSafetyEpochPtr(store)),
-		{Type: CommandClearParkingTarget},
+		validStopSignBatchCommandRequest(currentSafetyEpochPtr(store)),
+		{Type: CommandClearStopSignTarget},
 	}
 	for _, request := range commandsToFlush {
 		mustEnqueueCommand(t, store, request)
@@ -237,7 +180,7 @@ func TestEmergencyHoldFlushesUndeliveredCommandsAndPreservesStopFIFO(t *testing.
 
 func TestEmergencyStopInsertedAfterDeliveredUnacknowledgedStop(t *testing.T) {
 	store := NewStore()
-	mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetParkingTarget})
+	mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetStopSignTarget})
 	firstStop := mustEnqueueCommand(t, store, CommandRequest{Type: CommandEndAllScenes})
 
 	delivered := store.Poll("")
@@ -329,7 +272,7 @@ func TestDispatchConfirmationRejectsMissingAndStaleGuardedCommands(t *testing.T)
 		t.Fatalf("missing command must be rejected, got=%+v", missing)
 	}
 
-	unoffered := mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetParkingTarget})
+	unoffered := mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetStopSignTarget})
 	unofferedConfirmation, err := store.ConfirmDispatch(unoffered.ID)
 	if err != nil {
 		t.Fatalf("confirm unoffered command: %v", err)
@@ -371,7 +314,7 @@ func TestPolledEmergencyCommandRemainsConfirmableUnderHistoryPressure(t *testing
 	}
 
 	for index := 0; index < 8; index++ {
-		mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetParkingTarget})
+		mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetStopSignTarget})
 	}
 	if redelivered := store.Poll(""); redelivered == nil || redelivered.ID != stop.ID {
 		t.Fatalf("failed confirmation transport must re-offer the pinned emergency command, got=%+v", redelivered)
@@ -396,7 +339,7 @@ func TestMotionStartsRequireCurrentSafetyEpoch(t *testing.T) {
 		}
 	}
 
-	if _, err := store.Enqueue(CommandRequest{Type: CommandSetParkingTarget}); err != nil {
+	if _, err := store.Enqueue(CommandRequest{Type: CommandSetStopSignTarget}); err != nil {
 		t.Fatalf("non-start setup command must not require an epoch: %v", err)
 	}
 }
@@ -455,7 +398,7 @@ func TestCommandsCarryAcceptedSafetyEpoch(t *testing.T) {
 		}
 	}
 
-	setup := mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetParkingTarget})
+	setup := mustEnqueueCommand(t, store, CommandRequest{Type: CommandSetStopSignTarget})
 	if setup.SafetyEpoch != epoch {
 		t.Fatalf("ordinary command epoch: got=%d want=%d", setup.SafetyEpoch, epoch)
 	}
@@ -610,11 +553,11 @@ func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
 	now := time.Date(2026, 4, 11, 2, 0, 0, 0, time.UTC)
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
 
-	first, err := store.Enqueue(CommandRequest{Type: CommandSetParkingTarget})
+	first, err := store.Enqueue(CommandRequest{Type: CommandSetStopSignTarget})
 	if err != nil {
 		t.Fatalf("enqueue first: %v", err)
 	}
-	_, err = store.Enqueue(CommandRequest{Type: CommandClearParkingTarget})
+	_, err = store.Enqueue(CommandRequest{Type: CommandClearStopSignTarget})
 	if err != nil {
 		t.Fatalf("enqueue second: %v", err)
 	}
@@ -638,8 +581,8 @@ func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
 	if len(state.PendingCommands) != 1 {
 		t.Fatalf("expected 1 pending command, got %d", len(state.PendingCommands))
 	}
-	if state.PendingCommands[0].Type != CommandClearParkingTarget {
-		t.Fatalf("expected pending clearParkingTarget, got %s", state.PendingCommands[0].Type)
+	if state.PendingCommands[0].Type != CommandClearStopSignTarget {
+		t.Fatalf("expected pending clearStopSignTarget, got %s", state.PendingCommands[0].Type)
 	}
 
 	now = now.Add(11 * time.Second)
@@ -649,62 +592,11 @@ func TestStateTracksPendingCommandsAndConnectivity(t *testing.T) {
 	}
 }
 
-func TestStateTracksParkingBatchProgress(t *testing.T) {
-	store := NewStore()
-	state := store.UpdateStatus(StatusUpdate{
-		Status:          StatusRunningAllScenes,
-		ActiveSceneName: "parking-batch:morning-lot",
-		ParkingBatch: &ParkingBatchProgress{
-			BatchID:         " morning-lot ",
-			PlanFingerprint: " sha256:plan-exact ",
-			State:           "running",
-			JobID:           " bay-2:right ",
-			JobIndex:        2,
-			JobCount:        6,
-			CompletedJobs:   1,
-			StartedAtMs:     100,
-			UpdatedAtMs:     200,
-		},
-	})
-
-	if state.ParkingBatch == nil {
-		t.Fatal("expected parking batch progress")
-	}
-	if state.ParkingBatch.BatchID != "morning-lot" || state.ParkingBatch.PlanFingerprint != "sha256:plan-exact" || state.ParkingBatch.JobID != "bay-2:right" {
-		t.Fatalf("expected normalized progress, got=%+v", state.ParkingBatch)
-	}
-	if state.ParkingBatch.JobIndex != 2 || state.ParkingBatch.CompletedJobs != 1 {
-		t.Fatalf("unexpected progress counters: %+v", state.ParkingBatch)
-	}
-
-	store.UpdateStatus(StatusUpdate{Status: StatusIdle})
-	if got := store.State().Runtime.ParkingBatch; got != nil {
-		t.Fatalf("idle transition should clear stale batch progress: %+v", got)
-	}
-
-	store.UpdateStatus(StatusUpdate{
-		Status: StatusRunningScene,
-		ParkingBatch: &ParkingBatchProgress{
-			BatchID:         "morning-lot",
-			PlanFingerprint: "sha256:completed-plan",
-			State:           "completed",
-			JobIndex:        6,
-			JobCount:        6,
-			CompletedJobs:   6,
-		},
-	})
-	store.UpdateStatus(StatusUpdate{Status: StatusIdle})
-	if got := store.State().Runtime.ParkingBatch; got == nil || got.State != "completed" || got.PlanFingerprint != "sha256:completed-plan" {
-		t.Fatalf("terminal batch evidence must survive later idle status, got=%+v", got)
-	}
-}
-
 func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	now := time.Date(2026, 4, 18, 1, 2, 3, 0, time.UTC)
 	store := NewStore(WithNowFunc(func() time.Time { return now }))
 
-	targetPose := &ParkingPose{X: 10, Y: 20, Z: 3, Heading: 90}
-	startPose := &ParkingPose{X: 21, Y: 20, Z: 3, Heading: 90}
+	signPose := &StopSignPose{X: 10, Y: 20, Z: 3, Heading: 90}
 	telemetry := store.UpdateTelemetry(TelemetryUpdate{
 		CurrentSpeed:        4.25,
 		CurrentYaw:          182.5,
@@ -714,8 +606,7 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 		LeadVehicleDistance: 18.5,
 		HasLeadVehicle:      true,
 		TimestampMs:         123456,
-		ParkingTargetPose:   targetPose,
-		ParkingStartPose:    startPose,
+		StopSignPose:        signPose,
 	})
 	if telemetry == nil {
 		t.Fatal("expected telemetry snapshot")
@@ -735,14 +626,11 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	if !telemetry.HasLeadVehicle || telemetry.LeadVehicleDistance != 18.5 {
 		t.Fatalf("unexpected lead telemetry: %+v", telemetry)
 	}
-	if telemetry.ParkingTargetPose == nil || telemetry.ParkingTargetPose.Heading != 90 {
-		t.Fatalf("expected exact parking target pose: %+v", telemetry.ParkingTargetPose)
+	if telemetry.StopSignPose == nil || telemetry.StopSignPose.Heading != 90 {
+		t.Fatalf("expected exact stop-sign pose: %+v", telemetry.StopSignPose)
 	}
-	if telemetry.ParkingStartPose == nil || telemetry.ParkingStartPose.X != 21 {
-		t.Fatalf("expected exact parking start pose: %+v", telemetry.ParkingStartPose)
-	}
-	targetPose.X = 999
-	if telemetry.ParkingTargetPose.X != 10 {
+	signPose.X = 999
+	if telemetry.StopSignPose.X != 10 {
 		t.Fatal("telemetry must clone the caller's pose")
 	}
 
@@ -767,56 +655,6 @@ func TestUpdateTelemetryExposesLatestSpeedSnapshot(t *testing.T) {
 	}
 	if latest := store.LatestTelemetry(); latest == nil || latest.CurrentSpeed != 4.25 {
 		t.Fatalf("unexpected latest telemetry: %+v", latest)
-	}
-}
-
-func TestUpdateTelemetryCopiesParkingStateAcrossSnapshots(t *testing.T) {
-	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
-	store := NewStore(WithNowFunc(func() time.Time { return now }))
-	positionX := 42.5
-
-	updated := store.UpdateTelemetry(TelemetryUpdate{
-		PositionX:                &positionX,
-		ParkingTargetConfigured:  true,
-		ParkingStartConfigured:   true,
-		ParkingLongitudinalError: -1.25,
-		ParkingLateralError:      0.45,
-		ParkingHeadingError:      -7.5,
-		ParkingDistance:          1.33,
-		ParkingInsideBay:         true,
-		ParkingAligned:           true,
-		ParkingParked:            true,
-		ParkingAttemptIndex:      3,
-		ParkingAttemptCount:      10,
-		ParkingPhase:             "  parked  ",
-	})
-	assertParkingTelemetry(t, updated)
-	if updated.PositionX == nil || *updated.PositionX != 42.5 {
-		t.Fatalf("unexpected copied position: %+v", updated.PositionX)
-	}
-
-	*updated.PositionX = -99
-	updated.ParkingPhase = "mutated"
-	assertParkingTelemetry(t, store.State().Telemetry)
-	assertParkingTelemetry(t, store.LatestTelemetry())
-
-	history := store.TelemetryHistorySnapshot(1)
-	if len(history) != 1 {
-		t.Fatalf("expected one telemetry history entry, got=%d", len(history))
-	}
-	assertParkingTelemetry(t, &history[0])
-	*history[0].PositionX = -100
-	if freshHistory := store.TelemetryHistorySnapshot(1); freshHistory[0].PositionX == nil || *freshHistory[0].PositionX != 42.5 {
-		t.Fatalf("expected history snapshots to be independent copies, got=%+v", freshHistory[0].PositionX)
-	}
-}
-
-func TestUpdateTelemetryDefaultsEmptyParkingPhaseToIdle(t *testing.T) {
-	store := NewStore()
-
-	telemetry := store.UpdateTelemetry(TelemetryUpdate{ParkingPhase: "  "})
-	if telemetry.ParkingPhase != parkingPhaseIdle {
-		t.Fatalf("unexpected default parking phase: got=%q want=%q", telemetry.ParkingPhase, parkingPhaseIdle)
 	}
 }
 
@@ -857,34 +695,6 @@ func TestUpdateTelemetryCopiesStopSignTemporalStateAndGeometry(t *testing.T) {
 	state := store.State().Telemetry
 	if state == nil || state.StopSignPose == nil || state.StopSignPose.X != 100 || state.StopLinePose == nil || state.StopLinePose.X != 104 {
 		t.Fatalf("stop-sign poses must be independent snapshots: %+v", state)
-	}
-}
-
-func assertParkingTelemetry(t *testing.T, telemetry *RuntimeTelemetry) {
-	t.Helper()
-	if telemetry == nil {
-		t.Fatal("expected parking telemetry")
-	}
-	if !telemetry.ParkingTargetConfigured {
-		t.Fatalf("expected configured parking target: %+v", telemetry)
-	}
-	if !telemetry.ParkingStartConfigured {
-		t.Fatalf("expected configured parking start: %+v", telemetry)
-	}
-	if telemetry.ParkingLongitudinalError != -1.25 || telemetry.ParkingLateralError != 0.45 {
-		t.Fatalf("unexpected parking position error: %+v", telemetry)
-	}
-	if telemetry.ParkingHeadingError != -7.5 || telemetry.ParkingDistance != 1.33 {
-		t.Fatalf("unexpected parking heading/distance: %+v", telemetry)
-	}
-	if !telemetry.ParkingInsideBay || !telemetry.ParkingAligned || !telemetry.ParkingParked {
-		t.Fatalf("unexpected parking completion flags: %+v", telemetry)
-	}
-	if telemetry.ParkingAttemptIndex != 3 || telemetry.ParkingAttemptCount != 10 {
-		t.Fatalf("unexpected parking attempt state: %+v", telemetry)
-	}
-	if telemetry.ParkingPhase != "parked" {
-		t.Fatalf("unexpected parking phase: got=%q", telemetry.ParkingPhase)
 	}
 }
 
@@ -1130,9 +940,6 @@ func guardedStartCommandRequests(safetyEpoch *uint64) []CommandRequest {
 		{Type: CommandStartScene, SafetyEpoch: safetyEpoch, SceneName: "inner-city-driving:default"},
 		{Type: CommandRunAllScenes, SafetyEpoch: safetyEpoch},
 		{Type: CommandStartEgo, SafetyEpoch: safetyEpoch},
-		{Type: CommandPrepareParkingEvaluation, SafetyEpoch: safetyEpoch, Seed: "evaluation"},
-		{Type: CommandStartParkingRun, SafetyEpoch: safetyEpoch, AttemptCount: 2, Seed: "parking-run"},
-		validParkingBatchCommandRequest(safetyEpoch),
 		validStopSignBatchCommandRequest(safetyEpoch),
 	}
 }
@@ -1151,9 +958,11 @@ func validStopSignBatchCommandRequest(safetyEpoch *uint64) CommandRequest {
 			StopLinePose:     StopSignPose{X: 10, Y: 17, Z: 2, Heading: 0},
 			EgoStopPose:      StopSignPose{X: 10, Y: 14.5, Z: 2, Heading: 0},
 			StartPose:        StopSignPose{X: 10, Y: -25.5, Z: 2, Heading: 0},
+			ExitPose:         StopSignPose{X: 10, Y: 28, Z: 2, Heading: 0},
 			StopDistanceM:    3,
 			EgoCenterOffsetM: 2.5,
 			StartDistanceM:   40,
+			ExitDistanceM:    8,
 			TargetSpeedMPS:   8,
 			DwellMS:          5000,
 			AttemptCount:     3,
@@ -1164,20 +973,6 @@ func validStopSignBatchCommandRequest(safetyEpoch *uint64) CommandRequest {
 				Color: &StopSignColor{R: 255, G: 128, B: 64},
 			},
 			Seed: "fresh:alta:base",
-		}},
-	}
-}
-
-func validParkingBatchCommandRequest(safetyEpoch *uint64) CommandRequest {
-	return CommandRequest{
-		Type:            CommandStartParkingBatch,
-		SafetyEpoch:     safetyEpoch,
-		ParkingBatchID:  "hold-barrier-batch",
-		PlanFingerprint: "sha256:375c329e8c5f35f94222cd3e2307e6e4d6b9fc7b113055acfdbf5a232b202203",
-		ParkingJobs: []ParkingBatchJob{{
-			ID:               "bay-1:base",
-			CollectionAmount: 1,
-			Seed:             "hold-barrier-batch:bay-1:base",
 		}},
 	}
 }

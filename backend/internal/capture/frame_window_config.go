@@ -18,8 +18,6 @@ const (
 	defaultDatasetImageWidth                 = 224
 	defaultDatasetImageHeight                = 224
 	defaultDatasetLabelTolerance             = 100 * time.Millisecond
-	defaultDatasetFutureSpeedDeltaClip       = 2.0
-	defaultDatasetFutureSpeedDeltaNormalize  = true
 	defaultSyncFlashBrightnessThreshold      = 245.0
 	defaultDatasetSyncFlashFrameLimit        = 90
 	missingDatasetFrameStrideMessage         = "dataset.frame_stride must be configured explicitly"
@@ -41,8 +39,6 @@ type DatasetConfig struct {
 	ControlTargetNames           []string
 	AuxTargetNames               []string
 	LabelTolerance               time.Duration
-	FutureSpeedDeltaClip         float64
-	FutureSpeedDeltaNormalize    bool
 	SyncFlashBrightnessThreshold float64
 	SyncFlashFrameLimit          int
 }
@@ -67,8 +63,6 @@ type datasetSection struct {
 	ControlTargetNames           []string `toml:"control_target_names"`
 	AuxTargetNames               []string `toml:"aux_target_names"`
 	LabelTolerance               string   `toml:"label_tolerance"`
-	FutureSpeedDeltaClip         *float64 `toml:"future_speed_delta_clip"`
-	FutureSpeedDeltaNormalize    *bool    `toml:"future_speed_delta_normalize"`
 	SyncFlashBrightnessThreshold *float64 `toml:"sync_flash_brightness_threshold"`
 	SyncFlashFrameLimit          *int     `toml:"sync_flash_frame_limit"`
 }
@@ -88,8 +82,6 @@ func DefaultDatasetConfig() DatasetConfig {
 		ControlTargetNames:           []string{"future_speed_mps", "stop_intent"},
 		AuxTargetNames:               []string{"expert_throttle", "expert_brake", "actual_brake_pressure"},
 		LabelTolerance:               defaultDatasetLabelTolerance,
-		FutureSpeedDeltaClip:         defaultDatasetFutureSpeedDeltaClip,
-		FutureSpeedDeltaNormalize:    defaultDatasetFutureSpeedDeltaNormalize,
 		SyncFlashBrightnessThreshold: defaultSyncFlashBrightnessThreshold,
 		SyncFlashFrameLimit:          defaultDatasetSyncFlashFrameLimit,
 	}
@@ -162,12 +154,6 @@ func LoadDatasetConfig(path string) (DatasetConfig, error) {
 			return DatasetConfig{}, fmt.Errorf("invalid dataset.label_tolerance: %w", err)
 		}
 		cfg.LabelTolerance = labelTolerance
-	}
-	if parsed.Dataset.FutureSpeedDeltaClip != nil {
-		cfg.FutureSpeedDeltaClip = *parsed.Dataset.FutureSpeedDeltaClip
-	}
-	if parsed.Dataset.FutureSpeedDeltaNormalize != nil {
-		cfg.FutureSpeedDeltaNormalize = *parsed.Dataset.FutureSpeedDeltaNormalize
 	}
 	if parsed.Dataset.SyncFlashBrightnessThreshold != nil {
 		cfg.SyncFlashBrightnessThreshold = *parsed.Dataset.SyncFlashBrightnessThreshold
@@ -251,9 +237,6 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	}
 	if cfg.LabelTolerance <= 0 {
 		return fmt.Errorf("%s label_tolerance must be > 0", prefix)
-	}
-	if cfg.FutureSpeedDeltaClip <= 0 {
-		return fmt.Errorf("%s future_speed_delta_clip must be > 0", prefix)
 	}
 	if cfg.SyncFlashBrightnessThreshold <= 0 {
 		return fmt.Errorf("%s sync_flash_brightness_threshold must be > 0", prefix)

@@ -15,6 +15,7 @@ import {
     TrainingJobSpec,
     TrainingState,
 } from "./types";
+import {parseStopSignCatalogCsv, type StopSignCatalogLocation} from "./stop-sign/catalog";
 
 export class ApiError extends Error {
     constructor(
@@ -40,6 +41,14 @@ export function fetchControlState(signal?: AbortSignal): Promise<ControlState> {
         signal,
         cache: "no-store",
     });
+}
+
+export async function fetchStopSignCatalog(signal?: AbortSignal): Promise<StopSignCatalogLocation[]> {
+    const response = await fetch("/stop-sign-locations.csv", {signal, cache: "no-store"});
+    if (!response.ok) {
+        throw new ApiError(`Failed to load stop-sign catalog: ${response.status}`, response.status);
+    }
+    return parseStopSignCatalogCsv(await response.text());
 }
 
 export function sendControlCommand(type: string, payload: Record<string, unknown> = {}, signal?: AbortSignal) {

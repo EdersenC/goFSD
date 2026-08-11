@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -21,26 +22,19 @@ var (
 type CommandType string
 
 const (
-	CommandStartScene               CommandType = "startScene"
-	CommandRunAllScenes             CommandType = "runAllScenes"
-	CommandEndScene                 CommandType = "endScene"
-	CommandEndAllScenes             CommandType = "endAllScenes"
-	CommandStartEgo                 CommandType = "startEgo"
-	CommandStopEgo                  CommandType = "stopEgo"
-	CommandSetParkingTarget         CommandType = "setParkingTarget"
-	CommandSetParkingStart          CommandType = "setParkingStart"
-	CommandClearParkingTarget       CommandType = "clearParkingTarget"
-	CommandPrepareParkingEvaluation CommandType = "prepareParkingEvaluation"
-	CommandStartParkingRun          CommandType = "startParkingRun"
-	CommandStartParkingBatch        CommandType = "startParkingBatch"
-	CommandStartStopSignBatch       CommandType = "startStopSignBatch"
-	CommandSetStopSignTarget        CommandType = "setStopSignTarget"
-	CommandClearStopSignTarget      CommandType = "clearStopSignTarget"
+	CommandStartScene                 CommandType = "startScene"
+	CommandRunAllScenes               CommandType = "runAllScenes"
+	CommandEndScene                   CommandType = "endScene"
+	CommandEndAllScenes               CommandType = "endAllScenes"
+	CommandStartEgo                   CommandType = "startEgo"
+	CommandStopEgo                    CommandType = "stopEgo"
+	CommandStartStopSignBatch         CommandType = "startStopSignBatch"
+	CommandSetStopSignTarget          CommandType = "setStopSignTarget"
+	CommandClearStopSignTarget        CommandType = "clearStopSignTarget"
+	CommandSetStopSignCatalogWaypoint CommandType = "setStopSignCatalogWaypoint"
 )
 
 const (
-	maximumParkingAttemptCount  = 50
-	parkingPhaseIdle            = "idle"
 	StopSignPhaseAccelerate     = "accelerate"
 	StopSignPhaseCruiseApproach = "cruise_approach"
 	StopSignPhaseDecelerate     = "decelerate"
@@ -59,47 +53,34 @@ const (
 )
 
 type Command struct {
-	ID              string             `json:"id"`
-	Type            CommandType        `json:"type"`
-	SafetyEpoch     uint64             `json:"safetyEpoch"`
-	SceneName       string             `json:"sceneName,omitempty"`
-	AttemptCount    int                `json:"attemptCount,omitempty"`
-	Seed            string             `json:"seed,omitempty"`
-	ParkingBatchID  string             `json:"parkingBatchId,omitempty"`
-	PlanFingerprint string             `json:"planFingerprint,omitempty"`
-	ParkingJobs     []ParkingBatchJob  `json:"parkingJobs,omitempty"`
-	StopSignBatchID string             `json:"stopSignBatchId,omitempty"`
-	StopSignJobs    []StopSignBatchJob `json:"stopSignJobs,omitempty"`
-	CreatedAt       string             `json:"createdAt"`
+	ID                      string             `json:"id"`
+	Type                    CommandType        `json:"type"`
+	SafetyEpoch             uint64             `json:"safetyEpoch"`
+	SceneName               string             `json:"sceneName,omitempty"`
+	PlanFingerprint         string             `json:"planFingerprint,omitempty"`
+	StopSignBatchID         string             `json:"stopSignBatchId,omitempty"`
+	StopSignJobs            []StopSignBatchJob `json:"stopSignJobs,omitempty"`
+	StopSignCatalogPosition *WorldPosition     `json:"stopSignCatalogPosition,omitempty"`
+	CreatedAt               string             `json:"createdAt"`
 }
 
 type CommandRequest struct {
 	Type CommandType `json:"type"`
 	// SafetyEpoch is a required optimistic precondition for commands that can begin motion.
-	SafetyEpoch     *uint64            `json:"safetyEpoch,omitempty"`
-	SceneName       string             `json:"sceneName,omitempty"`
-	AttemptCount    int                `json:"attemptCount,omitempty"`
-	Seed            string             `json:"seed,omitempty"`
-	ParkingBatchID  string             `json:"parkingBatchId,omitempty"`
-	PlanFingerprint string             `json:"planFingerprint,omitempty"`
-	ParkingJobs     []ParkingBatchJob  `json:"parkingJobs,omitempty"`
-	StopSignBatchID string             `json:"stopSignBatchId,omitempty"`
-	StopSignJobs    []StopSignBatchJob `json:"stopSignJobs,omitempty"`
+	SafetyEpoch             *uint64            `json:"safetyEpoch,omitempty"`
+	SceneName               string             `json:"sceneName,omitempty"`
+	PlanFingerprint         string             `json:"planFingerprint,omitempty"`
+	StopSignBatchID         string             `json:"stopSignBatchId,omitempty"`
+	StopSignJobs            []StopSignBatchJob `json:"stopSignJobs,omitempty"`
+	StopSignCatalogPosition *WorldPosition     `json:"stopSignCatalogPosition,omitempty"`
 }
 
-type ParkingPose struct {
-	X       float64 `json:"x"`
-	Y       float64 `json:"y"`
-	Z       float64 `json:"z"`
-	Heading float64 `json:"heading"`
-}
-
-type ParkingBatchJob struct {
-	ID               string      `json:"id"`
-	ParkDest         ParkingPose `json:"parkDest"`
-	StartDest        ParkingPose `json:"startDest"`
-	CollectionAmount int         `json:"collectionAmount"`
-	Seed             string      `json:"seed"`
+// WorldPosition identifies a GTA map location without pretending that a
+// roadside prop position is a calibrated lane pose.
+type WorldPosition struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	Z float64 `json:"z"`
 }
 
 type StopSignPose = stopsignbatch.Pose
@@ -112,23 +93,10 @@ type StatusUpdate struct {
 	Status               RuntimeStatus          `json:"status"`
 	ActiveSceneName      string                 `json:"activeSceneName,omitempty"`
 	LastError            string                 `json:"lastError,omitempty"`
-	ParkingBatch         *ParkingBatchProgress  `json:"parkingBatch,omitempty"`
 	StopSignBatch        *StopSignBatchProgress `json:"stopSignBatch,omitempty"`
 	AppliedSafetyEpoch   uint64                 `json:"appliedSafetyEpoch"`
 	InFlightSafetyStarts int                    `json:"inFlightSafetyStarts"`
 	SafetyStatusSequence uint64                 `json:"safetyStatusSequence,omitempty"`
-}
-
-type ParkingBatchProgress struct {
-	BatchID         string `json:"batchId"`
-	PlanFingerprint string `json:"planFingerprint,omitempty"`
-	State           string `json:"state"`
-	JobID           string `json:"jobId,omitempty"`
-	JobIndex        int    `json:"jobIndex"`
-	JobCount        int    `json:"jobCount"`
-	CompletedJobs   int    `json:"completedJobs"`
-	StartedAtMs     int64  `json:"startedAtMs,omitempty"`
-	UpdatedAtMs     int64  `json:"updatedAtMs,omitempty"`
 }
 
 type StopSignBatchProgress struct {
@@ -185,20 +153,6 @@ type TelemetryUpdate struct {
 	RouteDistance                 float64       `json:"routeDistance"`
 	LeadVehicleDistance           float64       `json:"leadVehicleDistance"`
 	HasLeadVehicle                bool          `json:"hasLeadVehicle"`
-	ParkingTargetConfigured       bool          `json:"parkingTargetConfigured"`
-	ParkingStartConfigured        bool          `json:"parkingStartConfigured"`
-	ParkingLongitudinalError      float64       `json:"parkingLongitudinalError"`
-	ParkingLateralError           float64       `json:"parkingLateralError"`
-	ParkingHeadingError           float64       `json:"parkingHeadingError"`
-	ParkingDistance               float64       `json:"parkingDistance"`
-	ParkingInsideBay              bool          `json:"parkingInsideBay"`
-	ParkingAligned                bool          `json:"parkingAligned"`
-	ParkingParked                 bool          `json:"parkingParked"`
-	ParkingAttemptIndex           int           `json:"parkingAttemptIndex"`
-	ParkingAttemptCount           int           `json:"parkingAttemptCount"`
-	ParkingPhase                  string        `json:"parkingPhase"`
-	ParkingTargetPose             *ParkingPose  `json:"parkingTargetPose,omitempty"`
-	ParkingStartPose              *ParkingPose  `json:"parkingStartPose,omitempty"`
 	StopSignTargetConfigured      bool          `json:"stopSignTargetConfigured"`
 	StopSignPose                  *StopSignPose `json:"stopSignPose,omitempty"`
 	StopLinePose                  *StopSignPose `json:"stopLinePose,omitempty"`
@@ -257,20 +211,6 @@ type RuntimeTelemetry struct {
 	RouteDistance                 float64       `json:"routeDistance"`
 	LeadVehicleDistance           float64       `json:"leadVehicleDistance"`
 	HasLeadVehicle                bool          `json:"hasLeadVehicle"`
-	ParkingTargetConfigured       bool          `json:"parkingTargetConfigured"`
-	ParkingStartConfigured        bool          `json:"parkingStartConfigured"`
-	ParkingLongitudinalError      float64       `json:"parkingLongitudinalError"`
-	ParkingLateralError           float64       `json:"parkingLateralError"`
-	ParkingHeadingError           float64       `json:"parkingHeadingError"`
-	ParkingDistance               float64       `json:"parkingDistance"`
-	ParkingInsideBay              bool          `json:"parkingInsideBay"`
-	ParkingAligned                bool          `json:"parkingAligned"`
-	ParkingParked                 bool          `json:"parkingParked"`
-	ParkingAttemptIndex           int           `json:"parkingAttemptIndex"`
-	ParkingAttemptCount           int           `json:"parkingAttemptCount"`
-	ParkingPhase                  string        `json:"parkingPhase"`
-	ParkingTargetPose             *ParkingPose  `json:"parkingTargetPose,omitempty"`
-	ParkingStartPose              *ParkingPose  `json:"parkingStartPose,omitempty"`
 	StopSignTargetConfigured      bool          `json:"stopSignTargetConfigured"`
 	StopSignPose                  *StopSignPose `json:"stopSignPose,omitempty"`
 	StopLinePose                  *StopSignPose `json:"stopLinePose,omitempty"`
@@ -304,7 +244,6 @@ type RuntimeState struct {
 	UpdatedAt            string                 `json:"updatedAt,omitempty"`
 	FiveMConnected       bool                   `json:"fivemConnected"`
 	LastPollAt           string                 `json:"lastPollAt,omitempty"`
-	ParkingBatch         *ParkingBatchProgress  `json:"parkingBatch,omitempty"`
 	StopSignBatch        *StopSignBatchProgress `json:"stopSignBatch,omitempty"`
 	AppliedSafetyEpoch   uint64                 `json:"appliedSafetyEpoch"`
 	InFlightSafetyStarts int                    `json:"inFlightSafetyStarts"`
@@ -365,7 +304,6 @@ type Store struct {
 	appliedSafetyEpoch     uint64
 	inFlightSafetyStarts   int
 	safetyStatusSequence   uint64
-	parkingBatch           *ParkingBatchProgress
 	stopSignBatch          *StopSignBatchProgress
 	runtimeUpdatedAt       time.Time
 	telemetry              *RuntimeTelemetry
@@ -416,10 +354,7 @@ func WithNowFunc(now func() time.Time) Option {
 func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 	commandType := normalizeCommandType(req.Type)
 	sceneName := strings.TrimSpace(req.SceneName)
-	seed := strings.TrimSpace(req.Seed)
-
-	if err := validateCommand(commandType, sceneName, req.AttemptCount, req.ParkingBatchID, req.StopSignBatchID,
-		req.PlanFingerprint, req.ParkingJobs, req.StopSignJobs); err != nil {
+	if err := validateCommand(commandType, sceneName, req.StopSignBatchID, req.PlanFingerprint, req.StopSignJobs, req.StopSignCatalogPosition); err != nil {
 		return Command{}, err
 	}
 
@@ -437,18 +372,15 @@ func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 	}
 
 	command := Command{
-		ID:              fmt.Sprintf("cmd-%d-%d", now.UTC().UnixNano(), s.commandSeq),
-		Type:            commandType,
-		SafetyEpoch:     s.safetyEpoch,
-		SceneName:       sceneName,
-		AttemptCount:    req.AttemptCount,
-		Seed:            seed,
-		ParkingBatchID:  strings.TrimSpace(req.ParkingBatchID),
-		PlanFingerprint: strings.TrimSpace(req.PlanFingerprint),
-		ParkingJobs:     cloneParkingBatchJobs(req.ParkingJobs),
-		StopSignBatchID: strings.TrimSpace(req.StopSignBatchID),
-		StopSignJobs:    cloneStopSignBatchJobs(req.StopSignJobs),
-		CreatedAt:       now.Format(time.RFC3339),
+		ID:                      fmt.Sprintf("cmd-%d-%d", now.UTC().UnixNano(), s.commandSeq),
+		Type:                    commandType,
+		SafetyEpoch:             s.safetyEpoch,
+		SceneName:               sceneName,
+		PlanFingerprint:         strings.TrimSpace(req.PlanFingerprint),
+		StopSignBatchID:         strings.TrimSpace(req.StopSignBatchID),
+		StopSignJobs:            cloneStopSignBatchJobs(req.StopSignJobs),
+		StopSignCatalogPosition: cloneWorldPosition(req.StopSignCatalogPosition),
+		CreatedAt:               now.Format(time.RFC3339),
 	}
 
 	if isEmergencyStopCommand(command.Type) {
@@ -535,7 +467,6 @@ func (s *Store) ResetConsumerSessionWithSafetyEpoch() ConsumerSessionReset {
 	s.appliedSafetyEpoch = 0
 	s.inFlightSafetyStarts = 0
 	s.safetyStatusSequence = 0
-	s.parkingBatch = nil
 	s.stopSignBatch = nil
 	s.runtimeUpdatedAt = s.nowFunc()
 
@@ -564,11 +495,6 @@ func (s *Store) UpdateStatus(update StatusUpdate) RuntimeState {
 	s.appliedSafetyEpoch = update.AppliedSafetyEpoch
 	s.inFlightSafetyStarts = update.InFlightSafetyStarts
 	s.safetyStatusSequence = update.SafetyStatusSequence
-	if update.ParkingBatch != nil {
-		s.parkingBatch = normalizedParkingBatchProgress(update.ParkingBatch)
-	} else if status == StatusIdle && s.parkingBatch != nil && s.parkingBatch.State == "running" {
-		s.parkingBatch = nil
-	}
 	if update.StopSignBatch != nil {
 		s.stopSignBatch = normalizedStopSignBatchProgress(update.StopSignBatch)
 	} else if status == StatusIdle && s.stopSignBatch != nil && s.stopSignBatch.State == "running" {
@@ -665,20 +591,6 @@ func (s *Store) UpdateTelemetry(update TelemetryUpdate) *RuntimeTelemetry {
 		RouteDistance:                 update.RouteDistance,
 		LeadVehicleDistance:           update.LeadVehicleDistance,
 		HasLeadVehicle:                update.HasLeadVehicle,
-		ParkingTargetConfigured:       update.ParkingTargetConfigured,
-		ParkingStartConfigured:        update.ParkingStartConfigured,
-		ParkingLongitudinalError:      update.ParkingLongitudinalError,
-		ParkingLateralError:           update.ParkingLateralError,
-		ParkingHeadingError:           update.ParkingHeadingError,
-		ParkingDistance:               update.ParkingDistance,
-		ParkingInsideBay:              update.ParkingInsideBay,
-		ParkingAligned:                update.ParkingAligned,
-		ParkingParked:                 update.ParkingParked,
-		ParkingAttemptIndex:           update.ParkingAttemptIndex,
-		ParkingAttemptCount:           update.ParkingAttemptCount,
-		ParkingPhase:                  normalizeParkingPhase(update.ParkingPhase),
-		ParkingTargetPose:             cloneParkingPose(update.ParkingTargetPose),
-		ParkingStartPose:              cloneParkingPose(update.ParkingStartPose),
 		StopSignTargetConfigured:      update.StopSignTargetConfigured,
 		StopSignPose:                  cloneStopSignPose(update.StopSignPose),
 		StopLinePose:                  cloneStopSignPose(update.StopLinePose),
@@ -820,7 +732,6 @@ func (s *Store) runtimeStateLocked() RuntimeState {
 		ActiveSceneName:      s.activeSceneName,
 		LastError:            s.lastError,
 		FiveMConnected:       !s.lastPollAt.IsZero() && s.nowFunc().Sub(s.lastPollAt) <= 10*time.Second,
-		ParkingBatch:         cloneParkingBatchProgress(s.parkingBatch),
 		StopSignBatch:        cloneStopSignBatchProgress(s.stopSignBatch),
 		AppliedSafetyEpoch:   s.appliedSafetyEpoch,
 		InFlightSafetyStarts: s.inFlightSafetyStarts,
@@ -957,35 +868,10 @@ func cloneRuntimeTelemetry(source RuntimeTelemetry) RuntimeTelemetry {
 	clone.WheelAngle = cloneFloatPtr(source.WheelAngle)
 	clone.WheelSteeringFullLock = cloneFloatPtr(source.WheelSteeringFullLock)
 	clone.OnGround = cloneBoolPtr(source.OnGround)
-	clone.ParkingTargetPose = cloneParkingPose(source.ParkingTargetPose)
-	clone.ParkingStartPose = cloneParkingPose(source.ParkingStartPose)
 	clone.StopSignPose = cloneStopSignPose(source.StopSignPose)
 	clone.StopLinePose = cloneStopSignPose(source.StopLinePose)
 	clone.StopSignEgoStopPose = cloneStopSignPose(source.StopSignEgoStopPose)
 	return clone
-}
-
-func normalizedParkingBatchProgress(source *ParkingBatchProgress) *ParkingBatchProgress {
-	if source == nil {
-		return nil
-	}
-	progress := *source
-	progress.BatchID = strings.TrimSpace(progress.BatchID)
-	progress.PlanFingerprint = strings.TrimSpace(progress.PlanFingerprint)
-	progress.State = strings.TrimSpace(progress.State)
-	progress.JobID = strings.TrimSpace(progress.JobID)
-	progress.JobCount = max(0, progress.JobCount)
-	progress.JobIndex = max(0, min(progress.JobIndex, progress.JobCount))
-	progress.CompletedJobs = max(0, min(progress.CompletedJobs, progress.JobCount))
-	return &progress
-}
-
-func cloneParkingBatchProgress(source *ParkingBatchProgress) *ParkingBatchProgress {
-	if source == nil {
-		return nil
-	}
-	clone := *source
-	return &clone
 }
 
 func normalizedStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBatchProgress {
@@ -1007,14 +893,6 @@ func normalizedStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBat
 }
 
 func cloneStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBatchProgress {
-	if source == nil {
-		return nil
-	}
-	clone := *source
-	return &clone
-}
-
-func cloneParkingPose(source *ParkingPose) *ParkingPose {
 	if source == nil {
 		return nil
 	}
@@ -1079,39 +957,15 @@ func (s *Store) commandIndexLocked(commandID string) int {
 func validateCommand(
 	commandType CommandType,
 	sceneName string,
-	attemptCount int,
-	parkingBatchID string,
 	stopSignBatchID string,
 	planFingerprint string,
-	parkingJobs []ParkingBatchJob,
 	stopSignJobs []StopSignBatchJob,
+	stopSignCatalogPosition *WorldPosition,
 ) error {
 	switch commandType {
 	case CommandStartScene:
 		if sceneName == "" {
 			return fmt.Errorf("%w: sceneName is required for %s", ErrInvalidCommand, commandType)
-		}
-	case CommandStartParkingRun:
-		if attemptCount < 1 || attemptCount > maximumParkingAttemptCount {
-			return fmt.Errorf("%w: attemptCount must be between 1 and %d for %s", ErrInvalidCommand, maximumParkingAttemptCount, commandType)
-		}
-	case CommandStartParkingBatch:
-		if strings.TrimSpace(parkingBatchID) == "" {
-			return fmt.Errorf("%w: parkingBatchId is required for %s", ErrInvalidCommand, commandType)
-		}
-		if !isSHA256Fingerprint(planFingerprint) {
-			return fmt.Errorf("%w: planFingerprint must be a sha256 fingerprint for %s", ErrInvalidCommand, commandType)
-		}
-		if len(parkingJobs) == 0 || len(parkingJobs) > 100 {
-			return fmt.Errorf("%w: parkingJobs must contain between 1 and 100 items for %s", ErrInvalidCommand, commandType)
-		}
-		for index, job := range parkingJobs {
-			if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.Seed) == "" {
-				return fmt.Errorf("%w: parkingJobs[%d] requires id and seed", ErrInvalidCommand, index)
-			}
-			if job.CollectionAmount < 1 || job.CollectionAmount > maximumParkingAttemptCount {
-				return fmt.Errorf("%w: parkingJobs[%d].collectionAmount must be between 1 and %d", ErrInvalidCommand, index, maximumParkingAttemptCount)
-			}
 		}
 	case CommandStartStopSignBatch:
 		if strings.TrimSpace(stopSignBatchID) == "" {
@@ -1138,12 +992,30 @@ func validateCommand(
 			}
 		}
 	case CommandStartEgo, CommandRunAllScenes, CommandEndScene, CommandEndAllScenes, CommandStopEgo,
-		CommandSetParkingTarget, CommandSetParkingStart, CommandClearParkingTarget, CommandPrepareParkingEvaluation,
 		CommandSetStopSignTarget, CommandClearStopSignTarget:
+	case CommandSetStopSignCatalogWaypoint:
+		if err := validateWorldPosition(stopSignCatalogPosition); err != nil {
+			return fmt.Errorf("%w: stopSignCatalogPosition %v", ErrInvalidCommand, err)
+		}
 	default:
 		return fmt.Errorf("%w: unsupported command type %q", ErrInvalidCommand, commandType)
 	}
 
+	return nil
+}
+
+func validateWorldPosition(position *WorldPosition) error {
+	if position == nil {
+		return errors.New("is required")
+	}
+	for label, value := range map[string]float64{"x": position.X, "y": position.Y, "z": position.Z} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return fmt.Errorf("%s must be finite", label)
+		}
+	}
+	if position.X < -10_000 || position.X > 10_000 || position.Y < -10_000 || position.Y > 10_000 || position.Z < -1_000 || position.Z > 3_000 {
+		return errors.New("is outside the supported GTA world bounds")
+	}
 	return nil
 }
 
@@ -1159,13 +1031,6 @@ func isSHA256Fingerprint(value string) bool {
 		}
 	}
 	return true
-}
-
-func cloneParkingBatchJobs(source []ParkingBatchJob) []ParkingBatchJob {
-	if len(source) == 0 {
-		return nil
-	}
-	return append([]ParkingBatchJob(nil), source...)
 }
 
 func cloneStopSignBatchJobs(source []StopSignBatchJob) []StopSignBatchJob {
@@ -1187,8 +1052,16 @@ func cloneCommand(source *Command) *Command {
 		return nil
 	}
 	clone := *source
-	clone.ParkingJobs = cloneParkingBatchJobs(source.ParkingJobs)
 	clone.StopSignJobs = cloneStopSignBatchJobs(source.StopSignJobs)
+	clone.StopSignCatalogPosition = cloneWorldPosition(source.StopSignCatalogPosition)
+	return &clone
+}
+
+func cloneWorldPosition(source *WorldPosition) *WorldPosition {
+	if source == nil {
+		return nil
+	}
+	clone := *source
 	return &clone
 }
 
@@ -1211,8 +1084,7 @@ func isEmergencyStopCommand(commandType CommandType) bool {
 
 func requiresSafetyEpoch(commandType CommandType) bool {
 	switch commandType {
-	case CommandStartScene, CommandRunAllScenes, CommandStartEgo, CommandPrepareParkingEvaluation,
-		CommandStartParkingRun, CommandStartParkingBatch, CommandStartStopSignBatch:
+	case CommandStartScene, CommandRunAllScenes, CommandStartEgo, CommandStartStopSignBatch:
 		return true
 	default:
 		return false
@@ -1241,14 +1113,6 @@ func (s *Store) advanceSafetyEpochLocked() {
 
 func normalizeCommandType(commandType CommandType) CommandType {
 	return CommandType(strings.TrimSpace(string(commandType)))
-}
-
-func normalizeParkingPhase(phase string) string {
-	phase = strings.TrimSpace(phase)
-	if phase == "" {
-		return parkingPhaseIdle
-	}
-	return phase
 }
 
 func normalizeStopSignPhase(phase string) string {

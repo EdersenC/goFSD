@@ -23,7 +23,7 @@ from inference import (
     resolve_existing_path,
     select_device,
 )
-from models.planner import DrivingCNN
+from models.planner import StopSignTemporalPlanner
 from target_transforms import denormalize_target_tensor, target_transform_metadata
 from train import load_config as load_train_config
 
@@ -100,8 +100,8 @@ def _first_sample_rows(
     return rows
 
 
-def _fresh_model(config: Any, device: torch.device) -> DrivingCNN:
-    return DrivingCNN(
+def _fresh_model(config: Any, device: torch.device) -> StopSignTemporalPlanner:
+    return StopSignTemporalPlanner(
         frame_count=len(config.dataset.image_offsets),
         telemetry_feature_dim=len(config.dataset.telemetry_feature_names),
         telemetry_hidden_dim=config.model.telemetry_hidden_dim,
@@ -132,10 +132,10 @@ def _load_checkpoint_model(
     checkpoint_path: Path | None,
     config_path: Path,
     device: torch.device,
-    fallback_model: DrivingCNN,
+    fallback_model: StopSignTemporalPlanner,
     fallback_frame_count: int,
     strict_checkpoint: bool,
-) -> tuple[DrivingCNN, str | None, str | None]:
+) -> tuple[StopSignTemporalPlanner, str | None, str | None]:
     if checkpoint_path is None:
         return fallback_model, None, None
 

@@ -42,7 +42,7 @@ func TestStopSignBatchHandlerQueuesOneDeterministicCommand(t *testing.T) {
 		t.Fatalf("unexpected deterministic jobs: %+v", body.Command.StopSignJobs)
 	}
 	job := body.Command.StopSignJobs[1]
-	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.TargetSpeedMPS != 7.5 || job.DwellMS != 6000 || job.AttemptCount != 4 {
+	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.ExitPose.X != 92 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.ExitDistanceM != 8 || job.TargetSpeedMPS != 7.5 || job.DwellMS != 6000 || job.AttemptCount != 4 {
 		t.Fatalf("unexpected derived/varied job: %+v", job)
 	}
 	if job.Weather != "RAIN" || job.Time.Hour != 17 || job.Vehicle.Model != "sultan" || job.Vehicle.Color == nil || job.Vehicle.Color.B != 255 {

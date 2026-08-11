@@ -8,13 +8,7 @@ import {
     gtaHeadingFromVector,
     gtaRightVector,
     headingDeltaDegrees,
-} from "./parking/geometry";
-import {
-    ParkingExpertSupervision,
-    ParkingGoal,
-    ParkingOutcome,
-    ParkingTelemetry,
-} from "./parking/types";
+} from "./spatial";
 import {EgoControlTelemetry} from "./controlTelemetry";
 import {normalizeVehicleSteering, VehicleSteeringSample} from "./vehicleSteering";
 import {requireManagedEgoDisposed} from "./managed-ego-disposal";
@@ -224,10 +218,6 @@ type RecordingContext = {
     toDestination: [number, number, number]
     tripProfile: TripProfileSnapshot
     scenario?: ScenarioSampleContext
-    parking?: {
-        goal: ParkingGoal
-        outcome?: ParkingOutcome
-    }
     stopSign?: {
         goal: StopSignGoal
         outcome?: StopSignOutcome
@@ -327,27 +317,6 @@ export interface GeneralVehicleData extends TripSummaryTelemetry {
     scenarioSeed?: string
     scenarioGoal?: string
     scenarioFactors?: Record<string, unknown>
-    parkingTargetConfigured?: boolean
-    parkingStartConfigured?: boolean
-    parkingLongitudinalError?: number
-    parkingLateralError?: number
-    parkingHeadingError?: number
-    parkingDistance?: number
-    parkingInsideBay?: boolean
-    parkingAligned?: boolean
-    parkingParked?: boolean
-    parkingAttemptIndex?: number
-    parkingAttemptCount?: number
-    parkingPhase?: string
-}
-
-/** The complete per-frame payload allowed for parking training trips. */
-export interface ParkingVehicleData extends TripSummaryTelemetry {
-    time: number
-    currentSpeed: number
-    expertDesiredWheelSteerNormalized: number
-    expertDesiredSpeedMps: number
-    expertStopProbability: number
 }
 
 /** Per-frame supervision for stop-sign temporal clips. Geometry fields are labels only. */
@@ -372,44 +341,7 @@ export interface StopSignVehicleData extends TripSummaryTelemetry {
     expertGoProbability: number
 }
 
-export type VehicleData = GeneralVehicleData | ParkingVehicleData | StopSignVehicleData
-
-export function buildParkingVehicleData(
-    time: number,
-    currentSpeed: number,
-    supervision: ParkingExpertSupervision
-): ParkingVehicleData {
-    requireFiniteAtLeast(time, "time", 0);
-    requireFiniteAtLeast(currentSpeed, "currentSpeed", 0);
-    requireFiniteInRange(
-        supervision.desiredWheelSteerNormalized,
-        "desiredWheelSteerNormalized",
-        -1,
-        1
-    );
-    requireFiniteAtLeast(supervision.desiredSpeedMps, "desiredSpeedMps", 0);
-    requireFiniteInRange(supervision.stopProbability, "stopProbability", 0, 1);
-
-    return {
-        time,
-        currentSpeed,
-        expertDesiredWheelSteerNormalized: supervision.desiredWheelSteerNormalized,
-        expertDesiredSpeedMps: supervision.desiredSpeedMps,
-        expertStopProbability: supervision.stopProbability,
-    };
-}
-
-function requireFiniteAtLeast(value: number, name: string, minimum: number) {
-    if (!Number.isFinite(value) || value < minimum) {
-        throw new RangeError(`${name} must be finite and at least ${minimum}`);
-    }
-}
-
-function requireFiniteInRange(value: number, name: string, minimum: number, maximum: number) {
-    if (!Number.isFinite(value) || value < minimum || value > maximum) {
-        throw new RangeError(`${name} must be finite and within [${minimum}, ${maximum}]`);
-    }
-}
+export type VehicleData = GeneralVehicleData | StopSignVehicleData
 
 type RouteDirectionTelemetry = {
     routeDirectionCode: number
@@ -444,8 +376,6 @@ export interface WaypointCompleted {
     scenarioSeed?: string
     scenarioFactors?: Record<string, unknown>
     scenarioGoal?: string
-    parkingGoal?: ParkingGoal
-    parkingOutcome?: ParkingOutcome
     stopSignGoal?: StopSignGoal
     stopSignOutcome?: StopSignOutcome
 }
@@ -465,7 +395,6 @@ export class EgoService {
     private tripChunkIndex = 0;
     private tripDataPointIndex = 0;
     private activeTripContext: RecordingContext | null = null;
-    private parkingRouteTarget: Vector3 | null = null;
     private stopRequested = false;
     private stopReason = "";
     private cameraTickId: number | null = null;
@@ -501,7 +430,6 @@ export class EgoService {
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         this.activeTripContext = null;
-        this.parkingRouteTarget = null;
         this.stopManagedLoops();
         if (this.oldEgo) {
             this.cleanUp(this.oldEgo);
@@ -543,7 +471,6 @@ export class EgoService {
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         this.activeTripContext = null;
-        this.parkingRouteTarget = null;
         this.stopManagedLoops();
         if (this.oldEgo) {
             this.cleanUp(this.oldEgo);
@@ -611,18 +538,6 @@ export class EgoService {
         console.log(`[ego-control] manual route context set target=(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
     }
 
-    public configureParkingRouteTarget(target: Vector3) {
-        if (!this.isFiniteVector3(target)) {
-            throw new Error("parking route target must contain finite coordinates");
-        }
-        this.parkingRouteTarget = [...target];
-        ClearGpsPlayerWaypoint();
-    }
-
-    public clearParkingRouteTarget() {
-        this.parkingRouteTarget = null;
-    }
-
     public beginScenarioSampleRecording(
         ego: Ego,
         context: {
@@ -657,53 +572,6 @@ export class EgoService {
     }
 
     public finishScenarioSampleRecording(ego: Ego, endTime = GetGameTimer()) {
-        this.emitTripChunk(ego, endTime, true);
-        this.activeTripContext = null;
-    }
-
-    public beginParkingAttemptRecording(
-        ego: Ego,
-        context: {
-            runId: string
-            sceneId: string
-            sceneVariant: string
-            tripIndex: number
-            syncTime: number
-            fromDestination: Vector3
-            toDestination: Vector3
-            goal: ParkingGoal
-        }
-    ) {
-        this.RunId = context.runId;
-        this.SceneName = `${context.sceneId}:${context.sceneVariant}`;
-        this.tripChunkIndex = 0;
-        this.tripDataPointIndex = 0;
-        ego.vehicle.VehicleData = [];
-        this.activeTripContext = {
-            recordingType: "trip",
-            sceneId: context.sceneId,
-            sceneVariant: context.sceneVariant,
-            tripIndex: context.tripIndex,
-            syncTime: context.syncTime,
-            chunkStartTime: context.syncTime,
-            fromDestination: context.fromDestination,
-            toDestination: context.toDestination,
-            tripProfile: this.buildParkingTripProfile(ego, context.goal),
-            parking: {
-                goal: context.goal,
-            },
-        };
-    }
-
-    public finishParkingAttemptRecording(
-        ego: Ego,
-        outcome: ParkingOutcome,
-        endTime = GetGameTimer()
-    ) {
-        if (!this.activeTripContext?.parking) {
-            throw new Error("parking recording finalization requires an active parking context");
-        }
-        this.activeTripContext.parking.outcome = outcome;
         this.emitTripChunk(ego, endTime, true);
         this.activeTripContext = null;
     }
@@ -782,7 +650,6 @@ export class EgoService {
         }
         this.oldEgo = null;
         this.activeTripContext = null;
-        this.parkingRouteTarget = null;
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         this.makePlayerUnaware(PlayerPedId(), false);
@@ -821,11 +688,10 @@ export class EgoService {
         FreezeEntityPosition(vehicle, true);
     }
 
-    /** Ends managed capture/control while preserving the current car for manual parking setup. */
+    /** Ends managed capture/control while preserving the current car for manual stop-sign setup. */
     public releaseCurrentEgoForManualControl(): boolean {
         this.resetEgoControlRuntime();
         this.activeTripContext = null;
-        this.parkingRouteTarget = null;
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
         this.stopRequested = false;
@@ -1245,8 +1111,6 @@ export class EgoService {
             scenarioSeed: this.activeTripContext.scenario?.seed,
             scenarioFactors: this.activeTripContext.scenario?.factors,
             scenarioGoal: this.activeTripContext.scenario?.goal,
-            parkingGoal: this.activeTripContext.parking?.goal,
-            parkingOutcome: this.activeTripContext.parking?.outcome,
             stopSignGoal: this.activeTripContext.stopSign?.goal,
             stopSignOutcome: this.activeTripContext.stopSign?.outcome,
         };
@@ -1315,23 +1179,6 @@ export class EgoService {
             vehicleModel,
             vehicleColor: VehicleColor.Random,
             vehicleColorName: "Random"
-        };
-    }
-
-    private buildParkingTripProfile(ego: Ego, goal: ParkingGoal): TripProfileSnapshot {
-        return {
-            seed: goal.seed,
-            weatherType: WeatherType.EXTRA_SUNNY,
-            time: {
-                hour: 12,
-                minute: 30,
-                second: 0,
-                persistent: true,
-            },
-            timeBucket: "parking_midday",
-            vehicleModel: String(ego.vehicle.model),
-            vehicleColor: ego.vehicle.color,
-            vehicleColorName: VehicleColor[ego.vehicle.color] ?? String(ego.vehicle.color),
         };
     }
 
@@ -1408,25 +1255,10 @@ export class EgoService {
 
 
 
-    public collectEgoData(
-        ego: Ego,
-        parkingTelemetry?: ParkingTelemetry,
-        parkingExpertSupervision?: ParkingExpertSupervision
-    ) {
+    public collectEgoData(ego: Ego) {
         const id = ego.vehicle.id;
         const currentSpeed = GetEntitySpeed(ego.vehicle.id);
         const time = GetGameTimer();
-
-        if (this.activeTripContext?.parking) {
-            if (!parkingExpertSupervision) {
-                throw new Error("active parking recording requires explicit expert supervision");
-            }
-            this.appendVehicleData(
-                ego,
-                buildParkingVehicleData(time, currentSpeed, parkingExpertSupervision)
-            );
-            return;
-        }
 
         const isStopped :boolean | number = IsVehicleStopped(id)
         const acceleration = GetVehicleCurrentAcceleration(id);
@@ -1526,18 +1358,6 @@ export class EgoService {
             scenarioSeed: this.activeTripContext?.scenario?.seed,
             scenarioGoal: this.activeTripContext?.scenario?.goal,
             scenarioFactors: this.activeTripContext?.scenario?.factors,
-            parkingTargetConfigured: parkingTelemetry?.parkingTargetConfigured,
-            parkingStartConfigured: parkingTelemetry?.parkingStartConfigured,
-            parkingLongitudinalError: parkingTelemetry?.parkingLongitudinalError,
-            parkingLateralError: parkingTelemetry?.parkingLateralError,
-            parkingHeadingError: parkingTelemetry?.parkingHeadingError,
-            parkingDistance: parkingTelemetry?.parkingDistance,
-            parkingInsideBay: parkingTelemetry?.parkingInsideBay,
-            parkingAligned: parkingTelemetry?.parkingAligned,
-            parkingParked: parkingTelemetry?.parkingParked,
-            parkingAttemptIndex: parkingTelemetry?.parkingAttemptIndex,
-            parkingAttemptCount: parkingTelemetry?.parkingAttemptCount,
-            parkingPhase: parkingTelemetry?.parkingPhase,
         };
 
         this.appendVehicleData(ego, data);
@@ -1702,12 +1522,6 @@ export class EgoService {
     }
 
     private getRouteTarget(gpsRouteFound: boolean, gps: Vector3): Vector3 | null {
-        if (this.activeTripContext?.parking && this.isFiniteVector3(this.activeTripContext.toDestination)) {
-            return this.activeTripContext.toDestination;
-        }
-        if (this.parkingRouteTarget && this.isFiniteVector3(this.parkingRouteTarget)) {
-            return this.parkingRouteTarget;
-        }
         if (gpsRouteFound && this.isFiniteVector3(gps)) {
             return gps;
         }

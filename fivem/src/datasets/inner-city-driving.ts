@@ -5,7 +5,7 @@ import {routePresets} from "./routes";
 
 const innerCityDrivingWaypoints = [
     routePresets.legionSquare,
-    routePresets.portolaDriveParking,
+    routePresets.portolaDrive,
     routePresets.missionRowPoliceStation,
     routePresets.richardsMajesticStudio,
     routePresets.textileCityMarket,
@@ -20,12 +20,12 @@ const innerCityDrivingWaypoints = [
     routePresets.strawberryLTDGasoline,
     routePresets.vespucciCanals,
     routePresets.orientalTheater,
-    routePresets.delPerroParkingGarage,
+    routePresets.delPerroGarage,
     routePresets.littleSeoulArcadiusApproach,
     routePresets.kortzCenter,
     routePresets.delPerroPier,
-    routePresets.littleSeoulParking,
-    routePresets.rockfordHillParking
+    routePresets.littleSeoulSouth,
+    routePresets.rockfordHills
 ];
 
 type InnerCityDrivingSceneOptions = {

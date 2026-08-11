@@ -13,6 +13,7 @@ from config import (
     DEFAULT_AUX_TARGET_NAMES,
     DEFAULT_IMAGE_HEIGHT,
     DEFAULT_IMAGE_WIDTH,
+    STOP_SIGN_AUX_TARGET_NAMES,
     normalize_windows_drive_path,
     parse_dataset_window,
     resolve_optional_data_root,
@@ -26,7 +27,7 @@ from control_contract import (
     validate_checkpoint_control_contract,
 )
 from dataset import FsdDataset
-from models.planner import DrivingCNN
+from models.planner import StopSignTemporalPlanner
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
     state_input_definition,
@@ -350,6 +351,11 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
         validate_stop_sign_control_target_transforms(
             resolve_checkpoint_target_transform_registry(checkpoint)
         )
+        if checkpoint.get("telemetry_feature_names") != ["current_speed"]:
+            raise ValueError(
+                "stop-sign checkpoint telemetry_feature_names must be exactly ['current_speed']"
+            )
+        state_input_config_from_metadata(checkpoint.get("state_inputs"))
     except ValueError as exc:
         raise ValueError(f"{exc} checkpoint={checkpoint_path}") from exc
     return checkpoint
@@ -407,39 +413,18 @@ def resolve_checkpoint_horizon_decoder(checkpoint: dict[str, Any]) -> dict[str, 
     }
 
 
-def _decoder_output_bias(state_dict: Mapping[str, Any], prefix: str) -> torch.Tensor | None:
-    candidates: list[tuple[int, torch.Tensor]] = []
-    for key, value in state_dict.items():
-        if not key.startswith(prefix) or not key.endswith(".bias") or not isinstance(value, torch.Tensor):
-            continue
-        parts = key.split(".")
-        if len(parts) == 3 and parts[1].isdigit():
-            candidates.append((int(parts[1]), value))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
-
-
 def resolve_checkpoint_aux_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
+    del future_steps
     names = checkpoint.get("aux_target_names")
-    if isinstance(names, list) and names:
-        normalized = [str(name).strip() for name in names if str(name).strip()]
-        if normalized:
-            return normalized
-
-    if future_steps <= 0:
-        return list(DEFAULT_AUX_TARGET_NAMES)
-
-    state_dict = checkpoint.get("model_state_dict", {})
-    aux_decoder_bias = _decoder_output_bias(state_dict, "aux_decoder.")
-    if isinstance(aux_decoder_bias, torch.Tensor) and aux_decoder_bias.ndim == 1 and aux_decoder_bias.numel() > 0:
-        aux_dim = int(aux_decoder_bias.numel())
-        if aux_dim == 4:
-            return ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"]
-        if aux_dim == 3:
-            return ["future_speed", "future_yaw_delta", "future_yaw_rate"]
-        return [f"future_aux_{index}" for index in range(aux_dim)]
-    return list(DEFAULT_AUX_TARGET_NAMES)
+    if not isinstance(names, list):
+        raise ValueError("stop-sign checkpoint must include aux_target_names")
+    normalized = tuple(str(name).strip() for name in names if str(name).strip())
+    if normalized != STOP_SIGN_AUX_TARGET_NAMES:
+        raise ValueError(
+            "checkpoint aux_target_names must exactly match the stop-sign diagnostic contract: "
+            f"expected={list(STOP_SIGN_AUX_TARGET_NAMES)} actual={list(normalized)}"
+        )
+    return list(normalized)
 
 
 def resolve_checkpoint_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -464,7 +449,7 @@ def resolve_checkpoint_target_transform_registry(checkpoint: dict[str, Any]) -> 
     return transforms
 
 
-def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
+def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> StopSignTemporalPlanner:
     validate_checkpoint_control_contract(checkpoint)
     timeline = resolve_checkpoint_timeline(checkpoint)
     if frame_count != len(timeline.image_offsets):
@@ -475,14 +460,11 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
     planner_format = str(checkpoint.get("planner_format", "")).strip()
     width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
     if planner_format == PLANNER_FORMAT:
-        telemetry_feature_names = checkpoint.get("telemetry_feature_names") or [
-            "current_speed",
-            "yaw_sin",
-            "yaw_cos",
-            "yaw_rate",
-            "steering",
-            "acceleration",
-        ]
+        telemetry_feature_names = checkpoint.get("telemetry_feature_names")
+        if telemetry_feature_names != ["current_speed"]:
+            raise ValueError(
+                "stop-sign checkpoint telemetry_feature_names must be exactly ['current_speed']"
+            )
         control_target_names = resolve_checkpoint_control_target_names(
             checkpoint,
             future_steps=len(timeline.future_offsets),
@@ -499,7 +481,7 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
         dropout = resolve_checkpoint_dropout(checkpoint)
         visual_temporal = resolve_checkpoint_visual_temporal(checkpoint)
         horizon_decoder = resolve_checkpoint_horizon_decoder(checkpoint)
-        model = DrivingCNN(
+        model = StopSignTemporalPlanner(
             frame_count=frame_count,
             telemetry_feature_dim=len(telemetry_feature_names),
             telemetry_hidden_dim=telemetry_hidden_dim,
@@ -573,7 +555,7 @@ def checkpoint_sample_stride(checkpoint: dict[str, Any]) -> int:
 
 
 def run_sample_inference(
-    model: DrivingCNN,
+    model: StopSignTemporalPlanner,
     device: torch.device,
     *,
     data_root: str,

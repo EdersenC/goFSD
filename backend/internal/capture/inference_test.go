@@ -17,7 +17,7 @@ import (
 
 	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
-	"awesomeProject/internal/parkingcontrol"
+	"awesomeProject/internal/stopsigncontrol"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -37,7 +37,7 @@ func inferenceJSONResponse(statusCode int, payload any) *http.Response {
 
 type recordingInferenceActuator struct {
 	commands      []actuator.CommandRequest
-	plans         []parkingcontrol.Plan
+	plans         []stopsigncontrol.Plan
 	err           error
 	state         actuator.State
 	nextCommandID int64
@@ -51,14 +51,14 @@ type statefulInferenceActuator struct {
 	state actuator.State
 }
 
-const testParkingModelHash int64 = 424242
+const testStopSignModelHash int64 = 424242
 
 func (a *statefulInferenceActuator) State() actuator.State {
 	state := a.recordingInferenceActuator.State()
 	state.Supported = a.state.Supported
 	state.Ready = a.state.Ready
 	state.Platform = a.state.Platform
-	state.ParkingController = a.state.ParkingController
+	state.StopSignController = a.state.StopSignController
 	if a.state.LastError != "" {
 		state.LastError = a.state.LastError
 	}
@@ -94,17 +94,17 @@ func (a *recordingInferenceActuator) Submit(req actuator.CommandRequest) (actuat
 		appliedAt = time.Unix(1, 0).UTC()
 	}
 	enabled := req.Enabled == nil || *req.Enabled
-	if req.Owner == actuator.OwnerParkingInference && enabled {
-		a.state.ParkingController.Owner = actuator.OwnerParkingInference
-		a.state.ParkingController.Stopping = false
+	if req.Owner == actuator.OwnerStopSignInference && enabled {
+		a.state.StopSignController.Owner = actuator.OwnerStopSignInference
+		a.state.StopSignController.Stopping = false
 	}
 	if !enabled {
-		a.state.ParkingController.Owner = ""
-		a.state.ParkingController.Stopping = false
+		a.state.StopSignController.Owner = ""
+		a.state.StopSignController.Stopping = false
 	}
 	a.state.Applied.CommandID = a.nextCommandID
 	a.state.Applied.Enabled = enabled
-	a.state.Applied.Handbrake = req.Handbrake || req.Owner == actuator.OwnerParkingInference && enabled
+	a.state.Applied.Handbrake = req.Handbrake || req.Owner == actuator.OwnerStopSignInference && enabled
 	a.state.Applied.Steer = req.Steer
 	a.state.Applied.Throttle = req.Throttle
 	a.state.Applied.Brake = req.BrakePressureAvg
@@ -113,18 +113,18 @@ func (a *recordingInferenceActuator) Submit(req actuator.CommandRequest) (actuat
 	return a.state, nil
 }
 
-func (a *recordingInferenceActuator) RequestParkingSafetyStop() (actuator.State, error) {
+func (a *recordingInferenceActuator) RequestStopSignSafetyStop() (actuator.State, error) {
 	enabled := true
 	state, err := a.Submit(actuator.CommandRequest{
 		Enabled:   &enabled,
 		InputMode: actuator.InputModeNormalized,
-		Owner:     actuator.OwnerParkingInference,
+		Owner:     actuator.OwnerStopSignInference,
 	})
 	if err != nil {
 		return state, err
 	}
-	a.state.ParkingController.Owner = actuator.OwnerParkingInference
-	a.state.ParkingController.Stopping = true
+	a.state.StopSignController.Owner = actuator.OwnerStopSignInference
+	a.state.StopSignController.Stopping = true
 	return a.state, nil
 }
 
@@ -132,27 +132,27 @@ func (a *recordingInferenceActuator) State() actuator.State {
 	return a.state
 }
 
-func (a *recordingInferenceActuator) SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (actuator.State, error) {
+func (a *recordingInferenceActuator) SubmitStopSignMotionPlan(plan stopsigncontrol.Plan) (actuator.State, error) {
 	a.plans = append(a.plans, plan)
 	if a.err != nil {
 		return a.state, a.err
 	}
-	a.state.ParkingController.LastPlanID++
+	a.state.StopSignController.LastPlanID++
 	return a.state, nil
 }
 
-func assertParkingSafetyStopRequested(t *testing.T, actuatorSink *recordingInferenceActuator) {
+func assertStopSignSafetyStopRequested(t *testing.T, actuatorSink *recordingInferenceActuator) {
 	t.Helper()
 	if len(actuatorSink.commands) != 1 {
-		t.Fatalf("expected exactly one actuator-owned parking safety stop, got=%+v", actuatorSink.commands)
+		t.Fatalf("expected exactly one actuator-owned stopSign safety stop, got=%+v", actuatorSink.commands)
 	}
 	command := actuatorSink.commands[0]
-	if command.Enabled == nil || !*command.Enabled || command.Owner != actuator.OwnerParkingInference ||
+	if command.Enabled == nil || !*command.Enabled || command.Owner != actuator.OwnerStopSignInference ||
 		command.Steer != 0 || command.Throttle != 0 || command.BrakePressureAvg != 0 || command.Handbrake {
 		t.Fatalf("expected a neutral enabled ownership command with no direct handbrake, got=%+v", command)
 	}
-	if !actuatorSink.state.ParkingController.Stopping {
-		t.Fatalf("expected the actuator-owned speed-aware stop state, got=%+v", actuatorSink.state.ParkingController)
+	if !actuatorSink.state.StopSignController.Stopping {
+		t.Fatalf("expected the actuator-owned speed-aware stop state, got=%+v", actuatorSink.state.StopSignController)
 	}
 }
 
@@ -160,14 +160,14 @@ func floatPtr(value float64) *float64 {
 	return &value
 }
 
-func validParkingTelemetryUpdate(now time.Time, longitudinal float64) control.TelemetryUpdate {
+func validStopSignTelemetryUpdate(now time.Time, longitudinal float64) control.TelemetryUpdate {
 	zero := 0.0
 	onGround := true
 	egoStop := &control.StopSignPose{X: 0, Y: 0, Z: 0, Heading: 0}
 	return control.TelemetryUpdate{
 		VehicleExists:              true,
 		IsInVehicle:                true,
-		VehicleModelHash:           testParkingModelHash,
+		VehicleModelHash:           testStopSignModelHash,
 		PositionX:                  &zero,
 		PositionY:                  floatPtr(longitudinal),
 		PositionZ:                  &zero,
@@ -177,10 +177,6 @@ func validParkingTelemetryUpdate(now time.Time, longitudinal float64) control.Te
 		PitchDeg:                   &zero,
 		RollDeg:                    &zero,
 		OnGround:                   &onGround,
-		ParkingTargetConfigured:    true,
-		ParkingStartConfigured:     true,
-		ParkingLongitudinalError:   longitudinal,
-		ParkingPhase:               "ready",
 		StopSignTargetConfigured:   true,
 		StopSignEgoStopPose:        egoStop,
 		StopSignLongitudinalErrorM: longitudinal,
@@ -189,20 +185,20 @@ func validParkingTelemetryUpdate(now time.Time, longitudinal float64) control.Te
 	}
 }
 
-func bindInferenceToCurrentParkingTarget(t *testing.T, inferencer *Inferencer, store *control.Store) {
+func bindInferenceToCurrentStopSignTarget(t *testing.T, inferencer *Inferencer, store *control.Store) {
 	t.Helper()
 	telemetry, _ := store.LatestTelemetrySnapshot()
 	if telemetry == nil {
-		t.Fatal("expected parking telemetry")
+		t.Fatal("expected stopSign telemetry")
 	}
-	target, err := parkingTargetFromTelemetry(*telemetry)
+	target, err := stopSignTargetFromTelemetry(*telemetry)
 	if err != nil {
-		t.Fatalf("derive parking target: %v", err)
+		t.Fatalf("derive stopSign target: %v", err)
 	}
-	inferencer.parkingTarget = &target
+	inferencer.stopSignTarget = &target
 }
 
-func validParkingRuntimeTelemetry() control.RuntimeTelemetry {
+func validStopSignRuntimeTelemetry() control.RuntimeTelemetry {
 	zero := 0.0
 	onGround := true
 	return control.RuntimeTelemetry{
@@ -212,27 +208,26 @@ func validParkingRuntimeTelemetry() control.RuntimeTelemetry {
 		PitchDeg:      &zero,
 		RollDeg:       &zero,
 		OnGround:      &onGround,
-		ParkingPhase:  "ready",
 		StopSignPhase: control.StopSignPhaseAccelerate,
 	}
 }
 
-func validParkingModelStatus(cfg InferenceConfig) parkingModelStatus {
-	inputs := make(map[string]parkingModelInputSpec, len(requiredParkingStateInputs))
-	for _, name := range requiredParkingStateInputs {
-		inputs[name] = parkingModelInputSpec{Enabled: true}
+func validStopSignModelStatus(cfg InferenceConfig) stopSignModelStatus {
+	inputs := make(map[string]stopSignModelInputSpec, len(requiredStopSignStateInputs))
+	for _, name := range requiredStopSignStateInputs {
+		inputs[name] = stopSignModelInputSpec{Enabled: true}
 	}
-	return parkingModelStatus{
+	return stopSignModelStatus{
 		Loaded:                    true,
-		Checkpoint:                "C:/models/parking/epoch-001.pt",
+		Checkpoint:                "C:/models/stopSign/epoch-001.pt",
 		PlannerFormat:             cfg.PlannerFormat,
-		PlannerFormatVersion:      requiredParkingPlannerFormatVersion,
-		ControlContract:           validParkingControlContract(),
+		PlannerFormatVersion:      requiredStopSignPlannerFormatVersion,
+		ControlContract:           validStopSignControlContract(),
 		ControlHorizonDtMs:        append([]int(nil), cfg.ControlHorizonDtMs...),
 		TelemetrySampleIntervalMs: int(cfg.TelemetrySampleInterval.Milliseconds()),
-		Direction:                 parkingcontrol.ParkingDirectionForward,
-		ImageSize:                 parkingModelImageSize{Width: cfg.FrameWidth, Height: cfg.FrameHeight},
-		FrameWindow: parkingModelFrameWindow{
+		Direction:                 stopsigncontrol.StopSignDirectionForward,
+		ImageSize:                 stopSignModelImageSize{Width: cfg.FrameWidth, Height: cfg.FrameHeight},
+		FrameWindow: stopSignModelFrameWindow{
 			Size:          cfg.WindowSize,
 			FrameStride:   cfg.FrameStride,
 			InputChannels: cfg.WindowSize * 3,
@@ -247,24 +242,24 @@ func validParkingModelStatus(cfg InferenceConfig) parkingModelStatus {
 	}
 }
 
-func validParkingControlContract() parkingControlContract {
-	return parkingControlContract{
-		Name:      parkingcontrol.ParkingSetpointContractV1,
+func validStopSignControlContract() stopSignControlContract {
+	return stopSignControlContract{
+		Name:      stopsigncontrol.StopSignMotionPlanContractV1,
 		Version:   1,
-		Direction: parkingcontrol.ParkingDirectionForward,
-		Targets:   append([]string(nil), requiredParkingControlHeads...),
+		Direction: stopsigncontrol.StopSignDirectionForward,
+		Targets:   append([]string(nil), requiredStopSignControlHeads...),
 		OutputActivations: map[string]string{
 			"future_speed_mps": "sigmoid",
 			"stop_intent":      "sigmoid",
 		},
 		OutputRanges: map[string][]float64{
-			"future_speed_mps": {0, parkingcontrol.StopSignMotionPlanMaxSpeedMPS},
+			"future_speed_mps": {0, stopsigncontrol.StopSignMotionPlanMaxSpeedMPS},
 			"stop_intent":      {0, 1},
 		},
 	}
 }
 
-func validParkingPredictResponse(cfg InferenceConfig, checkpoint string, sampledAtS float64) pythonPredictResponse {
+func validStopSignPredictResponse(cfg InferenceConfig, checkpoint string, sampledAtS float64) pythonPredictResponse {
 	controls := make([][]float64, cfg.FutureSteps)
 	for index := range controls {
 		controls[index] = []float64{1.0, 0.05}
@@ -273,35 +268,35 @@ func validParkingPredictResponse(cfg InferenceConfig, checkpoint string, sampled
 		Checkpoint:                checkpoint,
 		Device:                    "cuda",
 		PlannerFormat:             cfg.PlannerFormat,
-		PlannerFormatVersion:      requiredParkingPlannerFormatVersion,
-		ControlContract:           validParkingControlContract(),
+		PlannerFormatVersion:      requiredStopSignPlannerFormatVersion,
+		ControlContract:           validStopSignControlContract(),
 		ControlHorizonDtMs:        append([]int(nil), cfg.ControlHorizonDtMs...),
 		TelemetrySampleIntervalMs: int(cfg.TelemetrySampleInterval.Milliseconds()),
 		SampledAtS:                sampledAtS,
-		Direction:                 parkingcontrol.ParkingDirectionForward,
+		Direction:                 stopsigncontrol.StopSignDirectionForward,
 		ImageOffsets:              append([]int(nil), cfg.ImageOffsets...),
 		TelemetryOffsets:          append([]int(nil), cfg.TelemetryOffsets...),
 		FutureOffsets:             append([]int(nil), cfg.FutureOffsets...),
 		TelemetryFeatureNames:     append([]string(nil), cfg.TelemetryFeatureNames...),
 		ControlTargetNames:        append([]string(nil), cfg.ControlOutputNames...),
 		AuxTargetNames:            append([]string(nil), cfg.AuxOutputNames...),
-		StateInputs:               validParkingModelStatus(cfg).StateInputs,
+		StateInputs:               validStopSignModelStatus(cfg).StateInputs,
 		PredControls:              [][][]float64{controls},
 	}
 }
 
-func readyParkingActuatorState(cfg InferenceConfig) actuator.State {
+func readyStopSignActuatorState(cfg InferenceConfig) actuator.State {
 	return actuator.State{
 		Supported: true,
 		Ready:     true,
 		Platform:  "windows",
-		ParkingController: actuator.ParkingControllerState{
+		StopSignController: actuator.StopSignControllerState{
 			Ready:               true,
 			Contract:            cfg.ControlContract,
 			ExpectedHorizonDtMs: append([]int(nil), cfg.ControlHorizonDtMs...),
-			Calibration: actuator.ParkingCalibration{
+			Calibration: actuator.StopSignCalibration{
 				Verified:         true,
-				VehicleModelHash: testParkingModelHash,
+				VehicleModelHash: testStopSignModelHash,
 			},
 		},
 	}
@@ -555,12 +550,12 @@ func TestCompleteInferenceFrameWithoutTimingMetadataTripsSafetyStop(t *testing.T
 	if status.State != "error" || !strings.Contains(status.LastError, "timing metadata ended before frame 0") {
 		t.Fatalf("expected missing timing metadata to be terminal, got=%+v", status)
 	}
-	if len(actuatorSink.commands) != 1 || !actuatorSink.state.ParkingController.Stopping {
-		t.Fatalf("expected missing timing metadata to issue one parking safety stop, commands=%+v state=%+v", actuatorSink.commands, actuatorSink.state)
+	if len(actuatorSink.commands) != 1 || !actuatorSink.state.StopSignController.Stopping {
+		t.Fatalf("expected missing timing metadata to issue one stopSign safety stop, commands=%+v state=%+v", actuatorSink.commands, actuatorSink.state)
 	}
 }
 
-func TestInferenceStartRejectsUnsafeParkingStateBeforeCaptureSetup(t *testing.T) {
+func TestInferenceStartRejectsUnsafeStopSignStateBeforeCaptureSetup(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
 	store.UpdateTelemetry(control.TelemetryUpdate{
@@ -579,25 +574,25 @@ func TestInferenceStartRejectsUnsafeParkingStateBeforeCaptureSetup(t *testing.T)
 	}
 
 	_, err := inferencer.Start(t.Context(), InferenceStartRequest{})
-	if err == nil || !errors.Is(err, ErrInferenceStartFailed) || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), "stop-sign target is not configured") {
+	if err == nil || !errors.Is(err, ErrInferenceStartFailed) || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), "stop-sign target is not configured") {
 		t.Fatalf("expected useful stop-sign precondition error, got=%v", err)
 	}
 	if discoveryCalled {
-		t.Fatal("expected parking preconditions to fail before capture source discovery")
+		t.Fatal("expected stopSign preconditions to fail before capture source discovery")
 	}
 }
 
 func TestStopSignInferenceRequiresEgoStopPose(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	update := validParkingTelemetryUpdate(now, -12)
+	update := validStopSignTelemetryUpdate(now, -12)
 	update.StopSignEgoStopPose = nil
 	store.UpdateTelemetry(update)
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store)
 	inferencer.nowFunc = func() time.Time { return now }
 
-	err := inferencer.validateParkingInferenceStart()
-	if err == nil || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), "stop-sign target is not configured") {
+	err := inferencer.validateStopSignInferenceStart()
+	if err == nil || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), "stop-sign target is not configured") {
 		t.Fatalf("expected missing ego stop pose precondition, got=%v", err)
 	}
 }
@@ -629,7 +624,7 @@ func TestInferenceLifecycleRejectsModelChangesWhileRunning(t *testing.T) {
 
 func TestInferenceStatusPreservesLoadedModelAcrossRefreshes(t *testing.T) {
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil)
-	inferencer.loadedCheckpoint = `S:\models\parking\epoch-012.pt`
+	inferencer.loadedCheckpoint = `S:\models\stopSign\epoch-012.pt`
 	inferencer.loadedModelDevice = "cuda"
 
 	status := inferencer.Status()
@@ -641,11 +636,11 @@ func TestInferenceStatusPreservesLoadedModelAcrossRefreshes(t *testing.T) {
 func TestInferenceStatusReportsAuthoritativeCalibrationPreflight(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 	cfg := DefaultInferenceConfig()
-	unverified := readyParkingActuatorState(cfg)
-	unverified.ParkingController.Ready = false
-	unverified.ParkingController.Calibration.Verified = false
+	unverified := readyStopSignActuatorState(cfg)
+	unverified.StopSignController.Ready = false
+	unverified.StopSignController.Calibration.Verified = false
 	actuatorSink := &statefulInferenceActuator{state: unverified}
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return now }
@@ -658,8 +653,8 @@ func TestInferenceStatusReportsAuthoritativeCalibrationPreflight(t *testing.T) {
 		t.Fatalf("expected actionable calibration blocker, got=%q", blocked.SafetyBlocker)
 	}
 
-	verified := readyParkingActuatorState(cfg)
-	verified.ParkingController.Calibration.ProfileID = "test-vehicle-v1"
+	verified := readyStopSignActuatorState(cfg)
+	verified.StopSignController.Calibration.ProfileID = "test-vehicle-v1"
 	actuatorSink.state = verified
 	ready := inferencer.Status()
 	if !ready.ActuatorReady || !ready.ControllerReady || !ready.CalibrationVerified || !ready.SafetyReady {
@@ -670,10 +665,10 @@ func TestInferenceStatusReportsAuthoritativeCalibrationPreflight(t *testing.T) {
 	}
 }
 
-func TestLoadModelVerifiesParkingCompatibilityBeforeClaimingReady(t *testing.T) {
+func TestLoadModelVerifiesStopSignCompatibilityBeforeClaimingReady(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = "http://planner.local"
-	modelStatus := validParkingModelStatus(cfg)
+	modelStatus := validStopSignModelStatus(cfg)
 	modelStatus.Device = "cuda:0"
 	requests := make([]string, 0, 2)
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil)
@@ -712,7 +707,7 @@ func TestLoadModelVerifiesParkingCompatibilityBeforeClaimingReady(t *testing.T) 
 func TestLoadModelClearsStaleReadyStateWhenCompatibilityFails(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = "http://planner.local"
-	incompatible := validParkingModelStatus(cfg)
+	incompatible := validStopSignModelStatus(cfg)
 	incompatible.Direction = "reverse"
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil)
 	inferencer.loadedCheckpoint = "C:/models/old.pt"
@@ -729,7 +724,7 @@ func TestLoadModelClearsStaleReadyStateWhenCompatibilityFails(t *testing.T) {
 	})}
 
 	_, err := inferencer.LoadModel(t.Context(), InferenceModelLoadRequest{Checkpoint: incompatible.Checkpoint})
-	if err == nil || !errors.Is(err, ErrParkingModelIncompatible) {
+	if err == nil || !errors.Is(err, ErrStopSignModelIncompatible) {
 		t.Fatalf("expected incompatible checkpoint rejection, got=%v", err)
 	}
 	status := inferencer.Status()
@@ -763,14 +758,14 @@ func TestInferenceStartRequiresReadyActuatorBeforeSourceDiscovery(t *testing.T) 
 		},
 		{
 			name:  "ready",
-			state: readyParkingActuatorState(cfg),
+			state: readyStopSignActuatorState(cfg),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-			store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+			store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 			actuatorSink := &statefulInferenceActuator{state: tc.state}
 			inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
 			inferencer.nowFunc = func() time.Time { return now }
@@ -803,10 +798,10 @@ func TestInferenceStartCancellationAfterArmingDoesNotSpawnCapture(t *testing.T) 
 	cfg := DefaultInferenceConfig()
 	cfg.AutoLoad = false
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	actuatorSink := &recordingInferenceActuator{state: readyParkingActuatorState(cfg)}
+	actuatorSink := &recordingInferenceActuator{state: readyStopSignActuatorState(cfg)}
 	submissions := 0
 	actuatorSink.onSubmit = func(actuator.CommandRequest) {
 		submissions++
@@ -823,7 +818,7 @@ func TestInferenceStartCancellationAfterArmingDoesNotSpawnCapture(t *testing.T) 
 		return true, nil
 	}
 	inferencer.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return inferenceJSONResponse(http.StatusOK, validParkingModelStatus(cfg)), nil
+		return inferenceJSONResponse(http.StatusOK, validStopSignModelStatus(cfg)), nil
 	})}
 	inferencer.newCommand = func(context.Context, string, ...string) *exec.Cmd {
 		return exec.Command("definitely-missing-inference-test-command")
@@ -836,8 +831,8 @@ func TestInferenceStartCancellationAfterArmingDoesNotSpawnCapture(t *testing.T) 
 	if len(actuatorSink.commands) != 2 {
 		t.Fatalf("expected one arm followed by one restored safety hold, got=%+v", actuatorSink.commands)
 	}
-	if !actuatorSink.state.ParkingController.Stopping {
-		t.Fatalf("expected canceled start to restore the parking safety hold, got=%+v", actuatorSink.state.ParkingController)
+	if !actuatorSink.state.StopSignController.Stopping {
+		t.Fatalf("expected canceled start to restore the stopSign safety hold, got=%+v", actuatorSink.state.StopSignController)
 	}
 	if inferencer.active != nil {
 		t.Fatal("canceled inference start must not install an active capture session")
@@ -847,10 +842,10 @@ func TestInferenceStartCancellationAfterArmingDoesNotSpawnCapture(t *testing.T) 
 	}
 }
 
-func TestParkingInferenceRejectsActuatorWithDifferentSetpointTiming(t *testing.T) {
+func TestStopSignInferenceRejectsActuatorWithDifferentSetpointTiming(t *testing.T) {
 	cfg := DefaultInferenceConfig()
-	state := readyParkingActuatorState(cfg)
-	state.ParkingController.ExpectedHorizonDtMs = []int{50, 100, 150, 200, 250, 350}
+	state := readyStopSignActuatorState(cfg)
+	state.StopSignController.ExpectedHorizonDtMs = []int{50, 100, 150, 200, 250, 350}
 	actuatorSink := &statefulInferenceActuator{state: state}
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil, actuatorSink)
 	if err := inferencer.validateInferenceActuatorReady(); err == nil || !errors.Is(err, ErrInferenceActuatorUnavailable) || !strings.Contains(err.Error(), "actuator control horizon timing") {
@@ -858,14 +853,14 @@ func TestParkingInferenceRejectsActuatorWithDifferentSetpointTiming(t *testing.T
 	}
 }
 
-func TestParkingInferenceRejectsVehicleDifferentFromCalibrationProfile(t *testing.T) {
+func TestStopSignInferenceRejectsVehicleDifferentFromCalibrationProfile(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	cfg := DefaultInferenceConfig()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	telemetry := validParkingTelemetryUpdate(now, -12)
-	telemetry.VehicleModelHash = testParkingModelHash + 1
+	telemetry := validStopSignTelemetryUpdate(now, -12)
+	telemetry.VehicleModelHash = testStopSignModelHash + 1
 	store.UpdateTelemetry(telemetry)
-	actuatorSink := &statefulInferenceActuator{state: readyParkingActuatorState(cfg)}
+	actuatorSink := &statefulInferenceActuator{state: readyStopSignActuatorState(cfg)}
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
 
 	err := inferencer.validateInferenceActuatorReady()
@@ -874,27 +869,27 @@ func TestParkingInferenceRejectsVehicleDifferentFromCalibrationProfile(t *testin
 	}
 }
 
-func TestParkingInferenceRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T) {
+func TestStopSignInferenceRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base.Add(defaultTelemetryStaleAfter + time.Millisecond)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(base, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(base, -12))
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store)
 	inferencer.nowFunc = func() time.Time { return now }
 
-	err := inferencer.validateParkingInferenceStart()
+	err := inferencer.validateStopSignInferenceStart()
 	if err == nil || !strings.Contains(err.Error(), "source telemetry is stale") {
 		t.Fatalf("expected stale source timestamp to fail despite a fresh backend receipt, got=%v", err)
 	}
 }
 
-func TestParkingInferenceArmRequiresAppliedNeutralCommand(t *testing.T) {
+func TestStopSignInferenceArmRequiresAppliedNeutralCommand(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{skipApply: true}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 	inferencer.actuatorConfirmTimeout = 5 * time.Millisecond
 	inferencer.actuatorConfirmInterval = time.Millisecond
 
-	err := inferencer.armActuatorForParkingInference()
+	err := inferencer.armActuatorForStopSignInference()
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected unapplied neutral arm to fail closed, got=%v", err)
 	}
@@ -907,7 +902,7 @@ func TestParkingInferenceArmRequiresAppliedNeutralCommand(t *testing.T) {
 	}
 }
 
-func TestValidateParkingStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T) {
+func TestValidateStopSignStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T) {
 	tests := []struct {
 		name      string
 		telemetry control.RuntimeTelemetry
@@ -916,30 +911,30 @@ func TestValidateParkingStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T
 		{
 			name: "nearest curriculum boundary",
 			telemetry: control.RuntimeTelemetry{
-				StopSignLongitudinalErrorM: parkingStartLongitudinalMaxM,
-				StopSignLateralErrorM:      parkingStartLateralLimitM,
-				StopSignHeadingErrorDeg:    parkingStartHeadingLimitDeg,
+				StopSignLongitudinalErrorM: stopSignStartLongitudinalMaxM,
+				StopSignLateralErrorM:      stopSignStartLateralLimitM,
+				StopSignHeadingErrorDeg:    stopSignStartHeadingLimitDeg,
 			},
 		},
 		{
 			name: "furthest curriculum boundary",
 			telemetry: control.RuntimeTelemetry{
-				StopSignLongitudinalErrorM: parkingStartLongitudinalMinM,
-				StopSignLateralErrorM:      -parkingStartLateralLimitM,
-				StopSignHeadingErrorDeg:    -parkingStartHeadingLimitDeg,
+				StopSignLongitudinalErrorM: stopSignStartLongitudinalMinM,
+				StopSignLateralErrorM:      -stopSignStartLateralLimitM,
+				StopSignHeadingErrorDeg:    -stopSignStartHeadingLimitDeg,
 			},
 		},
 		{
 			name: "too close",
 			telemetry: control.RuntimeTelemetry{
-				StopSignLongitudinalErrorM: parkingStartLongitudinalMaxM + 0.01,
+				StopSignLongitudinalErrorM: stopSignStartLongitudinalMaxM + 0.01,
 			},
 			wantError: "longitudinal offset",
 		},
 		{
 			name: "too far",
 			telemetry: control.RuntimeTelemetry{
-				StopSignLongitudinalErrorM: parkingStartLongitudinalMinM - 0.01,
+				StopSignLongitudinalErrorM: stopSignStartLongitudinalMinM - 0.01,
 			},
 			wantError: "longitudinal offset",
 		},
@@ -947,7 +942,7 @@ func TestValidateParkingStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T
 			name: "outside lateral envelope",
 			telemetry: control.RuntimeTelemetry{
 				StopSignLongitudinalErrorM: -12,
-				StopSignLateralErrorM:      parkingStartLateralLimitM + 0.01,
+				StopSignLateralErrorM:      stopSignStartLateralLimitM + 0.01,
 			},
 			wantError: "lateral offset",
 		},
@@ -955,7 +950,7 @@ func TestValidateParkingStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T
 			name: "outside heading envelope",
 			telemetry: control.RuntimeTelemetry{
 				StopSignLongitudinalErrorM: -12,
-				StopSignHeadingErrorDeg:    parkingStartHeadingLimitDeg + 0.01,
+				StopSignHeadingErrorDeg:    stopSignStartHeadingLimitDeg + 0.01,
 			},
 			wantError: "heading error",
 		},
@@ -963,68 +958,68 @@ func TestValidateParkingStartEnvelopeMatchesForwardCurriculumBounds(t *testing.T
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateParkingStartEnvelope(tc.telemetry)
+			err := validateStopSignStartEnvelope(tc.telemetry)
 			if tc.wantError == "" {
 				if err != nil {
 					t.Fatalf("expected valid curriculum pose, got=%v", err)
 				}
 				return
 			}
-			if err == nil || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), tc.wantError) {
+			if err == nil || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("expected %q precondition error, got=%v", tc.wantError, err)
 			}
 		})
 	}
 }
 
-func TestValidateParkingInferenceStartRequiresFreshValidEgoTelemetry(t *testing.T) {
+func TestValidateStopSignInferenceStartRequiresFreshValidEgoTelemetry(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	invalidStore := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	invalidUpdate := validParkingTelemetryUpdate(now, -12)
+	invalidUpdate := validStopSignTelemetryUpdate(now, -12)
 	invalidUpdate.VehicleExists = false
 	invalidUpdate.IsInVehicle = false
 	invalidStore.UpdateTelemetry(invalidUpdate)
 	invalidInferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), invalidStore)
 	invalidInferencer.nowFunc = func() time.Time { return now }
-	if err := invalidInferencer.validateParkingInferenceStart(); err == nil || !strings.Contains(err.Error(), "vehicle does not exist") {
+	if err := invalidInferencer.validateStopSignInferenceStart(); err == nil || !strings.Contains(err.Error(), "vehicle does not exist") {
 		t.Fatalf("expected invalid ego telemetry error, got=%v", err)
 	}
 
 	validStore := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	validStore.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	validStore.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 	staleInferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), validStore)
 	staleInferencer.nowFunc = func() time.Time { return now.Add(defaultTelemetryStaleAfter + time.Millisecond) }
-	if err := staleInferencer.validateParkingInferenceStart(); err == nil || !strings.Contains(err.Error(), "telemetry is stale") {
+	if err := staleInferencer.validateStopSignInferenceStart(); err == nil || !strings.Contains(err.Error(), "telemetry is stale") {
 		t.Fatalf("expected stale ego telemetry error, got=%v", err)
 	}
 }
 
-func TestParkingTargetLossDisablesActuatorWithoutFallbackDecay(t *testing.T) {
+func TestStopSignTargetLossDisablesActuatorWithoutFallbackDecay(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return now }
-	bindInferenceToCurrentParkingTarget(t, inferencer, store)
+	bindInferenceToCurrentStopSignTarget(t, inferencer, store)
 
 	now = now.Add(50 * time.Millisecond)
-	lostTarget := validParkingTelemetryUpdate(now, -12)
+	lostTarget := validStopSignTelemetryUpdate(now, -12)
 	lostTarget.StopSignTargetConfigured = false
 	lostTarget.StopSignEgoStopPose = nil
 	store.UpdateTelemetry(lostTarget)
-	cause := inferencer.validateActiveParkingInference()
-	if cause == nil || !errors.Is(cause, ErrParkingInferencePrecondition) {
+	cause := inferencer.validateActiveStopSignInference()
+	if cause == nil || !errors.Is(cause, ErrStopSignInferencePrecondition) {
 		t.Fatalf("expected target-loss safety error, got=%v", cause)
 	}
 
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 17}, cause)
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 
 	now = now.Add(50 * time.Millisecond)
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
-	latched := inferencer.validateActiveParkingInference()
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
+	latched := inferencer.validateActiveStopSignInference()
 	if latched == nil || !strings.Contains(latched.Error(), "interlock is latched") {
 		t.Fatalf("expected restored target to remain latched until restart, got=%v", latched)
 	}
@@ -1040,29 +1035,29 @@ func TestPredictionErrorHardDisablesInsteadOfDecayingControls(t *testing.T) {
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
 
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 23}, errors.New("planner request timed out"))
-	assertParkingSafetyStopRequested(t, actuatorSink)
-	if !inferencer.parkingSafetyTripped {
-		t.Fatal("expected generic prediction error to latch the parking safety interlock")
+	assertStopSignSafetyStopRequested(t, actuatorSink)
+	if !inferencer.stopSignSafetyTripped {
+		t.Fatal("expected generic prediction error to latch the stopSign safety interlock")
 	}
 }
 
-func TestParkingSuccessNeutralizesDriveAndSurfacesSucceededState(t *testing.T) {
+func TestStopSignSuccessNeutralizesDriveAndSurfacesSucceededState(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(3000).UTC() }
 
-	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 24}, ErrParkingInferenceComplete)
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 24}, ErrStopSignInferenceComplete)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 	status := inferencer.Status()
-	if status.State != "succeeded" || status.LastError != "" || !inferencer.parkingCompleted {
-		t.Fatalf("expected a latched succeeded state, got status=%+v completed=%v", status, inferencer.parkingCompleted)
+	if status.State != "succeeded" || status.LastError != "" || !inferencer.stopSignCompleted {
+		t.Fatalf("expected a latched succeeded state, got status=%+v completed=%v", status, inferencer.stopSignCompleted)
 	}
-	if err := inferencer.validateActiveParkingInference(); !errors.Is(err, ErrParkingInferenceComplete) {
+	if err := inferencer.validateActiveStopSignInference(); !errors.Is(err, ErrStopSignInferenceComplete) {
 		t.Fatalf("expected completed session to remain terminal until restart, got=%v", err)
 	}
 }
 
-func TestParkingTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T) {
+func TestStopSignTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(4000).UTC() }
@@ -1071,7 +1066,7 @@ func TestParkingTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T)
 	inferencer.active = session
 	inferencer.status.State = "running"
 	inferencer.status.Active = true
-	cause := errors.New("parking target disappeared")
+	cause := errors.New("stopSign target disappeared")
 
 	inferencer.handleSessionPredictionFailure(session, predictionWindow{sequenceNumber: 25}, cause)
 	select {
@@ -1083,7 +1078,7 @@ func TestParkingTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T)
 	if status.State != "error" || status.LastError != cause.Error() || status.StoppedAt != "" || !status.Active {
 		t.Fatalf("expected terminal reason with cleanup still active, got=%+v", status)
 	}
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 
 	inferencer.handleSessionPredictionFailure(session, predictionWindow{sequenceNumber: 26}, errors.New("duplicate failure"))
 	if len(actuatorSink.commands) != 1 || inferencer.Status().LastError != cause.Error() {
@@ -1091,7 +1086,7 @@ func TestParkingTerminalTransitionHoldsOnceAndCancelsActiveSession(t *testing.T)
 	}
 }
 
-func TestParkingSuccessDoesNotMaskSafetyHoldFailureAfterCleanup(t *testing.T) {
+func TestStopSignSuccessDoesNotMaskSafetyHoldFailureAfterCleanup(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{err: errors.New("controller disconnected")}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 	loopCtx, cancel := context.WithCancel(context.Background())
@@ -1100,7 +1095,7 @@ func TestParkingSuccessDoesNotMaskSafetyHoldFailureAfterCleanup(t *testing.T) {
 	inferencer.status.State = "running"
 	inferencer.status.Active = true
 
-	inferencer.handleSessionPredictionFailure(session, predictionWindow{sequenceNumber: 27}, ErrParkingInferenceComplete)
+	inferencer.handleSessionPredictionFailure(session, predictionWindow{sequenceNumber: 27}, ErrStopSignInferenceComplete)
 	select {
 	case <-loopCtx.Done():
 	default:
@@ -1113,7 +1108,7 @@ func TestParkingSuccessDoesNotMaskSafetyHoldFailureAfterCleanup(t *testing.T) {
 	}
 }
 
-func TestParkingSuccessFailsWhenAppliedHoldCannotBeConfirmed(t *testing.T) {
+func TestStopSignSuccessFailsWhenAppliedHoldCannotBeConfirmed(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{
 		skipApply:     true,
 		nextCommandID: 9,
@@ -1129,9 +1124,9 @@ func TestParkingSuccessFailsWhenAppliedHoldCannotBeConfirmed(t *testing.T) {
 	inferencer.actuatorConfirmTimeout = 5 * time.Millisecond
 	inferencer.actuatorConfirmInterval = time.Millisecond
 
-	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 28}, ErrParkingInferenceComplete)
+	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 28}, ErrStopSignInferenceComplete)
 	status := inferencer.Status()
-	if status.State != "error" || !strings.Contains(status.LastError, "timed out") || !inferencer.parkingHoldFailed {
+	if status.State != "error" || !strings.Contains(status.LastError, "timed out") || !inferencer.stopSignHoldFailed {
 		t.Fatalf("expected an old matching applied state to fail exact-command confirmation, got=%+v", status)
 	}
 	if len(actuatorSink.commands) != 1 {
@@ -1139,11 +1134,11 @@ func TestParkingSuccessFailsWhenAppliedHoldCannotBeConfirmed(t *testing.T) {
 	}
 }
 
-func TestParkingSuccessFailsWhenControllerApplyFailsAsynchronously(t *testing.T) {
+func TestStopSignSuccessFailsWhenControllerApplyFailsAsynchronously(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{applyFault: "virtual controller write failed"}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
 
-	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 29}, ErrParkingInferenceComplete)
+	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 29}, ErrStopSignInferenceComplete)
 	status := inferencer.Status()
 	if status.State != "error" || !strings.Contains(status.LastError, "controller apply failed") || !strings.Contains(status.LastError, actuatorSink.applyFault) {
 		t.Fatalf("expected asynchronous controller failure to override success, got=%+v", status)
@@ -1183,7 +1178,7 @@ func TestLiveFrameStreamTerminationAlwaysLatchesOneErrorHold(t *testing.T) {
 			if status.State != "error" || status.Active || !strings.Contains(status.LastError, "frame stream ended unexpectedly") {
 				t.Fatalf("expected live frame stream termination to remain a terminal error, got=%+v", status)
 			}
-			assertParkingSafetyStopRequested(t, actuatorSink)
+			assertStopSignSafetyStopRequested(t, actuatorSink)
 		})
 	}
 }
@@ -1230,10 +1225,10 @@ func TestUnexpectedInferenceProcessExitAlwaysLatchesOneErrorHold(t *testing.T) {
 	}
 }
 
-func TestParkingEvaluationDeadlineUsesTerminalSafetyStop(t *testing.T) {
+func TestStopSignEvaluationDeadlineUsesTerminalSafetyStop(t *testing.T) {
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), nil, actuatorSink)
-	inferencer.parkingEvaluationLimit = 10 * time.Millisecond
+	inferencer.stopSignEvaluationLimit = 10 * time.Millisecond
 	loopCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	session := &inferenceSession{cancel: cancel}
@@ -1241,17 +1236,17 @@ func TestParkingEvaluationDeadlineUsesTerminalSafetyStop(t *testing.T) {
 	inferencer.status.State = "running"
 	inferencer.status.Active = true
 
-	go inferencer.monitorParkingEvaluationDeadline(loopCtx, session)
+	go inferencer.monitorStopSignEvaluationDeadline(loopCtx, session)
 	select {
 	case <-loopCtx.Done():
 	case <-time.After(time.Second):
-		t.Fatal("parking evaluation deadline did not cancel inference")
+		t.Fatal("stopSign evaluation deadline did not cancel inference")
 	}
 	status := inferencer.Status()
-	if status.State != "error" || !strings.Contains(status.LastError, ErrParkingInferenceDeadlineExceeded.Error()) || status.StoppedAt != "" {
+	if status.State != "error" || !strings.Contains(status.LastError, ErrStopSignInferenceDeadlineExceeded.Error()) || status.StoppedAt != "" {
 		t.Fatalf("expected deadline reason while process cleanup remains active, got=%+v", status)
 	}
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 }
 
 func TestInferenceStopLatchesSafetyHoldBeforeCancel(t *testing.T) {
@@ -1272,7 +1267,7 @@ func TestInferenceStopLatchesSafetyHoldBeforeCancel(t *testing.T) {
 	default:
 		t.Fatal("expected Stop to cancel capture after applying the hold")
 	}
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 }
 
 func TestStopSignOperatingStateAcceptsBehaviorPhasesAndRejectsHazards(t *testing.T) {
@@ -1319,21 +1314,21 @@ func TestStopSignOperatingStateAcceptsBehaviorPhasesAndRejectsHazards(t *testing
 		{
 			name: "pitch",
 			mutate: func(telemetry *control.RuntimeTelemetry) {
-				telemetry.PitchDeg = floatPtr(parkingMaximumTiltDeg + 0.1)
+				telemetry.PitchDeg = floatPtr(stopSignMaximumTiltDeg + 0.1)
 			},
 			wantError: "tilt limit",
 		},
 		{
 			name: "roll",
 			mutate: func(telemetry *control.RuntimeTelemetry) {
-				telemetry.RollDeg = floatPtr(-parkingMaximumTiltDeg - 0.1)
+				telemetry.RollDeg = floatPtr(-stopSignMaximumTiltDeg - 0.1)
 			},
 			wantError: "tilt limit",
 		},
 		{
 			name: "reverse motion",
 			mutate: func(telemetry *control.RuntimeTelemetry) {
-				telemetry.VelocityY = floatPtr(parkingReverseSpeedLimitMPS - 0.01)
+				telemetry.VelocityY = floatPtr(stopSignReverseSpeedLimitMPS - 0.01)
 			},
 			wantError: "reverse motion detected",
 		},
@@ -1341,18 +1336,18 @@ func TestStopSignOperatingStateAcceptsBehaviorPhasesAndRejectsHazards(t *testing
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			telemetry := validParkingRuntimeTelemetry()
+			telemetry := validStopSignRuntimeTelemetry()
 			if tc.mutate != nil {
 				tc.mutate(&telemetry)
 			}
-			err := validateParkingOperatingState(telemetry)
+			err := validateStopSignOperatingState(telemetry)
 			if tc.wantError == "" {
 				if err != nil {
 					t.Fatalf("expected safe state, got=%v", err)
 				}
 				return
 			}
-			if err == nil || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), tc.wantError) {
+			if err == nil || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("expected %q safety error, got=%v", tc.wantError, err)
 			}
 		})
@@ -1360,70 +1355,70 @@ func TestStopSignOperatingStateAcceptsBehaviorPhasesAndRejectsHazards(t *testing
 }
 
 func TestStopSignOperatingStateRecognizesCompletedEvaluation(t *testing.T) {
-	telemetry := validParkingRuntimeTelemetry()
+	telemetry := validStopSignRuntimeTelemetry()
 	telemetry.StopSignPhase = "complete"
-	if err := validateParkingOperatingState(telemetry); !errors.Is(err, ErrParkingInferenceComplete) {
+	if err := validateStopSignOperatingState(telemetry); !errors.Is(err, ErrStopSignInferenceComplete) {
 		t.Fatalf("expected succeeded evaluation terminal, got=%v", err)
 	}
 }
 
-func TestActiveParkingInferenceBindsTargetIdentity(t *testing.T) {
+func TestActiveStopSignInferenceBindsTargetIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), store, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return now }
-	bindInferenceToCurrentParkingTarget(t, inferencer, store)
+	bindInferenceToCurrentStopSignTarget(t, inferencer, store)
 
 	now = now.Add(50 * time.Millisecond)
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -10))
-	if err := inferencer.validateActiveParkingInference(); err != nil {
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -10))
+	if err := inferencer.validateActiveStopSignInference(); err != nil {
 		t.Fatalf("expected motion relative to the same target to remain valid, got=%v", err)
 	}
 
 	now = now.Add(50 * time.Millisecond)
-	replaced := validParkingTelemetryUpdate(now, -15)
+	replaced := validStopSignTelemetryUpdate(now, -15)
 	replaced.StopSignEgoStopPose = &control.StopSignPose{X: 0, Y: 1, Z: 0, Heading: 0}
 	store.UpdateTelemetry(replaced)
-	cause := inferencer.validateActiveParkingInference()
+	cause := inferencer.validateActiveStopSignInference()
 	if cause == nil || !strings.Contains(cause.Error(), "target changed") {
 		t.Fatalf("expected target replacement error, got=%v", cause)
 	}
 	inferencer.handlePredictionFailure(predictionWindow{sequenceNumber: 31}, cause)
-	if !inferencer.parkingSafetyTripped {
+	if !inferencer.stopSignSafetyTripped {
 		t.Fatalf("expected target replacement to latch-disable actuation, commands=%+v", actuatorSink.commands)
 	}
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 }
 
-func TestValidateParkingModelStatusRequiresVisionOnlyStateContract(t *testing.T) {
+func TestValidateStopSignModelStatusRequiresVisionOnlyStateContract(t *testing.T) {
 	cfg := DefaultInferenceConfig()
-	if err := validateParkingModelStatus(validParkingModelStatus(cfg), cfg); err != nil {
-		t.Fatalf("expected parking-compatible model status, got=%v", err)
+	if err := validateStopSignModelStatus(validStopSignModelStatus(cfg), cfg); err != nil {
+		t.Fatalf("expected stopSign-compatible model status, got=%v", err)
 	}
 
-	missingStopIntent := validParkingModelStatus(cfg)
+	missingStopIntent := validStopSignModelStatus(cfg)
 	missingStopIntent.ControlTargetNames = []string{"future_speed_mps"}
-	if err := validateParkingModelStatus(missingStopIntent, cfg); err == nil || !strings.Contains(err.Error(), "stop_intent") {
+	if err := validateStopSignModelStatus(missingStopIntent, cfg); err == nil || !strings.Contains(err.Error(), "stop_intent") {
 		t.Fatalf("expected missing stop-intent head rejection, got=%v", err)
 	}
 
-	unloaded := validParkingModelStatus(cfg)
+	unloaded := validStopSignModelStatus(cfg)
 	unloaded.Loaded = false
-	if err := validateParkingModelStatus(unloaded, cfg); err == nil || !errors.Is(err, ErrParkingModelIncompatible) {
+	if err := validateStopSignModelStatus(unloaded, cfg); err == nil || !errors.Is(err, ErrStopSignModelIncompatible) {
 		t.Fatalf("expected unloaded model rejection, got=%v", err)
 	}
 
-	reorderedFeatures := validParkingModelStatus(cfg)
+	reorderedFeatures := validStopSignModelStatus(cfg)
 	reorderedFeatures.TelemetryFeatures = []string{"yaw_sin"}
-	if err := validateParkingModelStatus(reorderedFeatures, cfg); err == nil || !strings.Contains(err.Error(), "telemetry features") {
+	if err := validateStopSignModelStatus(reorderedFeatures, cfg); err == nil || !strings.Contains(err.Error(), "telemetry features") {
 		t.Fatalf("expected reordered telemetry contract rejection, got=%v", err)
 	}
 
-	unexpectedInput := validParkingModelStatus(cfg)
-	unexpectedInput.StateInputs["route_forward_delta"] = parkingModelInputSpec{Enabled: true}
-	if err := validateParkingModelStatus(unexpectedInput, cfg); err == nil || !strings.Contains(err.Error(), "unexpected state input") {
+	unexpectedInput := validStopSignModelStatus(cfg)
+	unexpectedInput.StateInputs["route_forward_delta"] = stopSignModelInputSpec{Enabled: true}
+	if err := validateStopSignModelStatus(unexpectedInput, cfg); err == nil || !strings.Contains(err.Error(), "unexpected state input") {
 		t.Fatalf("expected extra enabled state input rejection, got=%v", err)
 	}
 }
@@ -1431,51 +1426,51 @@ func TestValidateParkingModelStatusRequiresVisionOnlyStateContract(t *testing.T)
 func TestPredictionModelMustRemainBoundToSessionCheckpoint(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), nil)
-	inferencer.parkingCheckpoint = "C:/models/parking/epoch-001.pt"
-	compatible := validParkingPredictResponse(cfg, inferencer.parkingCheckpoint, 1)
-	if err := inferencer.validateParkingPredictionModel(compatible); err != nil {
+	inferencer.stopSignCheckpoint = "C:/models/stopSign/epoch-001.pt"
+	compatible := validStopSignPredictResponse(cfg, inferencer.stopSignCheckpoint, 1)
+	if err := inferencer.validateStopSignPredictionModel(compatible); err != nil {
 		t.Fatalf("expected bound prediction model, got=%v", err)
 	}
 
 	hotSwapped := compatible
 	hotSwapped.Checkpoint = "C:/models/legacy-driving/epoch-099.pt"
-	if err := inferencer.validateParkingPredictionModel(hotSwapped); err == nil || !errors.Is(err, ErrParkingModelIncompatible) {
+	if err := inferencer.validateStopSignPredictionModel(hotSwapped); err == nil || !errors.Is(err, ErrStopSignModelIncompatible) {
 		t.Fatalf("expected hot-swapped prediction checkpoint rejection, got=%v", err)
 	}
 
 	legacyContract := compatible
 	legacyContract.ControlContract.Name = "direct_controller_v0"
-	if err := inferencer.validateParkingPredictionModel(legacyContract); err == nil || !strings.Contains(err.Error(), parkingcontrol.ParkingSetpointContractV1) {
+	if err := inferencer.validateStopSignPredictionModel(legacyContract); err == nil || !strings.Contains(err.Error(), stopsigncontrol.StopSignMotionPlanContractV1) {
 		t.Fatalf("expected legacy control contract rejection, got=%v", err)
 	}
 
 	legacyPlannerVersion := compatible
 	legacyPlannerVersion.PlannerFormatVersion = 2
-	if err := inferencer.validateParkingPredictionModel(legacyPlannerVersion); err == nil || !strings.Contains(err.Error(), "planner format version") {
+	if err := inferencer.validateStopSignPredictionModel(legacyPlannerVersion); err == nil || !strings.Contains(err.Error(), "planner format version") {
 		t.Fatalf("expected legacy planner version rejection, got=%v", err)
 	}
 
 	wrongDirection := compatible
 	wrongDirection.Direction = "reverse"
-	if err := inferencer.validateParkingPredictionModel(wrongDirection); err == nil || !strings.Contains(err.Error(), "direction") {
+	if err := inferencer.validateStopSignPredictionModel(wrongDirection); err == nil || !strings.Contains(err.Error(), "direction") {
 		t.Fatalf("expected reverse direction rejection, got=%v", err)
 	}
 
 	wrongContractDirection := compatible
 	wrongContractDirection.ControlContract.Direction = "reverse"
-	if err := inferencer.validateParkingPredictionModel(wrongContractDirection); err == nil || !strings.Contains(err.Error(), "control contract direction") {
+	if err := inferencer.validateStopSignPredictionModel(wrongContractDirection); err == nil || !strings.Contains(err.Error(), "control contract direction") {
 		t.Fatalf("expected nested reverse contract direction rejection, got=%v", err)
 	}
 
 	wrongTiming := compatible
 	wrongTiming.ControlHorizonDtMs = []int{50, 100, 150, 200, 250, 301}
-	if err := inferencer.validateParkingPredictionModel(wrongTiming); err == nil || !strings.Contains(err.Error(), "control horizon timing") {
+	if err := inferencer.validateStopSignPredictionModel(wrongTiming); err == nil || !strings.Contains(err.Error(), "control horizon timing") {
 		t.Fatalf("expected noncanonical setpoint timing rejection, got=%v", err)
 	}
 
 	wrongSampleInterval := compatible
 	wrongSampleInterval.TelemetrySampleIntervalMs = 51
-	if err := inferencer.validateParkingPredictionModel(wrongSampleInterval); err == nil || !strings.Contains(err.Error(), "telemetry sample interval") {
+	if err := inferencer.validateStopSignPredictionModel(wrongSampleInterval); err == nil || !strings.Contains(err.Error(), "telemetry sample interval") {
 		t.Fatalf("expected mismatched telemetry cadence rejection, got=%v", err)
 	}
 }
@@ -1559,7 +1554,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	nowValue = time.UnixMilli(1016).UTC()
 	store.UpdateTelemetry(control.TelemetryUpdate{CurrentSpeed: 4.5, CurrentYaw: 11.0, YawRate: 0.2, Steering: 0.2, Acceleration: 0.3, TimestampMs: 1016})
 	nowValue = time.UnixMilli(1066).UTC()
-	current := validParkingTelemetryUpdate(nowValue, -1.2)
+	current := validStopSignTelemetryUpdate(nowValue, -1.2)
 	current.CurrentSpeed = 5.0
 	current.CurrentYaw = 12.0
 	current.YawRate = 0.3
@@ -1573,18 +1568,17 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	current.RouteDistance = 7.25
 	current.LeadVehicleDistance = 12.0
 	current.HasLeadVehicle = true
-	current.ParkingLateralError = 0.4
-	current.ParkingHeadingError = -6.5
-	current.ParkingDistance = 1.3
-	current.ParkingInsideBay = true
-	current.ParkingAttemptIndex = 2
-	current.ParkingAttemptCount = 8
+	current.StopSignLateralErrorM = 0.4
+	current.StopSignHeadingErrorDeg = -6.5
+	current.StopSignDistanceM = 1.3
+	current.StopSignAttemptIndex = 2
+	current.StopSignAttemptCount = 8
 	store.UpdateTelemetry(current)
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store)
 	now := time.UnixMilli(1066).UTC()
 	inferencer.nowFunc = func() time.Time { return now }
-	bindInferenceToCurrentParkingTarget(t, inferencer, store)
-	inferencer.parkingCheckpoint = "C:/models/run-1/epoch-006.pt"
+	bindInferenceToCurrentStopSignTarget(t, inferencer, store)
+	inferencer.stopSignCheckpoint = "C:/models/run-1/epoch-006.pt"
 	inferencer.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			var payload map[string]any
@@ -1594,8 +1588,8 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 			if got := payload["planner_format"]; got != cfg.PlannerFormat {
 				t.Fatalf("unexpected planner contract: got=%#v want=%q", got, cfg.PlannerFormat)
 			}
-			if got := payload["control_contract"]; got != parkingcontrol.ParkingSetpointContractV1 {
-				t.Fatalf("unexpected control contract: got=%#v want=%q", got, parkingcontrol.ParkingSetpointContractV1)
+			if got := payload["control_contract"]; got != stopsigncontrol.StopSignMotionPlanContractV1 {
+				t.Fatalf("unexpected control contract: got=%#v want=%q", got, stopsigncontrol.StopSignMotionPlanContractV1)
 			}
 			sampledAtS, ok := payload["sampled_at_s"].(float64)
 			if !ok || math.Abs(sampledAtS-1.066) > 1e-9 {
@@ -1606,10 +1600,10 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 				"routeForwardDelta",
 				"routeHeadingError",
 				"routeDistance",
-				"parkingLongitudinalError",
-				"parkingLateralError",
-				"parkingHeadingError",
-				"parkingDistance",
+				"stopSignLongitudinalError",
+				"stopSignLateralError",
+				"stopSignHeadingError",
+				"stopSignDistance",
 			} {
 				if _, ok := payload[forbidden]; ok {
 					t.Fatalf("inference payload must not expose scalar state input %q: %+v", forbidden, payload)
@@ -1619,7 +1613,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 			if !ok || len(telemetry) != 1 {
 				t.Fatalf("expected telemetry batch, got=%T %+v", payload["telemetry"], payload["telemetry"])
 			}
-			response := validParkingPredictResponse(cfg, "C:/models/run-1/epoch-006.pt", sampledAtS)
+			response := validStopSignPredictResponse(cfg, "C:/models/run-1/epoch-006.pt", sampledAtS)
 			response.PredControls = [][][]float64{{
 				{1.40, 0.05},
 				{1.20, 0.05},
@@ -1668,14 +1662,14 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	if len(prediction.RawPredControls) != 6 || len(prediction.RawPredAux) != 6 {
 		t.Fatalf("unexpected raw planner outputs: %+v", prediction)
 	}
-	if prediction.ControlContract.Name != parkingcontrol.ParkingSetpointContractV1 || prediction.ControlContract.Version != 1 {
+	if prediction.ControlContract.Name != stopsigncontrol.StopSignMotionPlanContractV1 || prediction.ControlContract.Version != 1 {
 		t.Fatalf("unexpected prediction control contract: %+v", prediction.ControlContract)
 	}
 	if prediction.SetpointPlan == nil {
-		t.Fatal("expected physical parking setpoint plan")
+		t.Fatal("expected physical stopSign setpoint plan")
 	}
 	plan := prediction.SetpointPlan
-	if plan.Contract != parkingcontrol.ParkingSetpointContractV1 || plan.Direction != parkingcontrol.ParkingDirectionForward {
+	if plan.Contract != stopsigncontrol.StopSignMotionPlanContractV1 || plan.Direction != stopsigncontrol.StopSignDirectionForward {
 		t.Fatalf("unexpected setpoint plan identity: %+v", plan)
 	}
 	if math.Abs(plan.SampledAtS-1.066) > 1e-9 || len(plan.Points) != 6 {
@@ -1692,7 +1686,7 @@ func TestRequestPredictionBuildsPhysicalSetpointPlan(t *testing.T) {
 	}
 }
 
-func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *testing.T) {
+func TestPredictionResponseIsDiscardedWhenStopSignHazardAppearsDuringRequest(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	cfg.ModelServerURL = "http://planner.local"
 	cfg.ImageOffsets = []int{0}
@@ -1703,12 +1697,12 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 	cfg.ControlHorizonDtMs = []int{50}
 	now := time.UnixMilli(1000).UTC()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	store.UpdateTelemetry(validParkingTelemetryUpdate(now, -12))
+	store.UpdateTelemetry(validStopSignTelemetryUpdate(now, -12))
 	actuatorSink := &recordingInferenceActuator{}
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store, actuatorSink)
 	inferencer.nowFunc = func() time.Time { return now }
-	bindInferenceToCurrentParkingTarget(t, inferencer, store)
-	inferencer.parkingCheckpoint = "C:/models/parking/epoch-001.pt"
+	bindInferenceToCurrentStopSignTarget(t, inferencer, store)
+	inferencer.stopSignCheckpoint = "C:/models/stopSign/epoch-001.pt"
 	loopCtx, cancel := context.WithCancel(context.Background())
 	session := &inferenceSession{cancel: cancel}
 	inferencer.active = session
@@ -1725,10 +1719,10 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 				t.Fatalf("expected sampled_at_s request field, got=%#v", payload["sampled_at_s"])
 			}
 			now = now.Add(10 * time.Millisecond)
-			hazard := validParkingTelemetryUpdate(now, -12)
+			hazard := validStopSignTelemetryUpdate(now, -12)
 			hazard.CollisionState = "vehicle"
 			store.UpdateTelemetry(hazard)
-			response := validParkingPredictResponse(cfg, inferencer.parkingCheckpoint, sampledAtS)
+			response := validStopSignPredictResponse(cfg, inferencer.stopSignCheckpoint, sampledAtS)
 			body, _ := json.Marshal(response)
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -1747,7 +1741,7 @@ func TestPredictionResponseIsDiscardedWhenParkingHazardAppearsDuringRequest(t *t
 		sequenceNumber: 41,
 	})
 
-	assertParkingSafetyStopRequested(t, actuatorSink)
+	assertStopSignSafetyStopRequested(t, actuatorSink)
 	if len(actuatorSink.plans) != 0 {
 		t.Fatalf("expected the stale setpoint plan to be discarded, got=%+v", actuatorSink.plans)
 	}
@@ -1762,7 +1756,7 @@ func TestBuildPlannerSelectionFailsWhenTelemetryIsUnavailable(t *testing.T) {
 	inferencer := NewInferencer(DefaultInferenceConfig(), actuator.DefaultConfig(), control.NewStore())
 	inferencer.nowFunc = func() time.Time { return time.Unix(1710000000, 0).UTC() }
 	_, err := inferencer.buildPlannerSelection(predictionWindow{capturedAt: time.Unix(1710000000, 0).UTC()})
-	if err == nil || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), "FiveM telemetry is unavailable") {
+	if err == nil || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), "FiveM telemetry is unavailable") {
 		t.Fatalf("expected telemetry unavailable error, got=%v", err)
 	}
 }
@@ -1774,11 +1768,11 @@ func TestBuildPlannerSelectionEnforcesFrameTelemetrySkewLimit(t *testing.T) {
 	cfg.MaxFrameTelemetrySkew = 75 * time.Millisecond
 	nowValue := time.UnixMilli(1000).UTC()
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return nowValue }))
-	update := validParkingTelemetryUpdate(nowValue, -12)
+	update := validStopSignTelemetryUpdate(nowValue, -12)
 	update.CurrentSpeed = 4.0
 	store.UpdateTelemetry(update)
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), store)
-	bindInferenceToCurrentParkingTarget(t, inferencer, store)
+	bindInferenceToCurrentStopSignTarget(t, inferencer, store)
 
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(1075).UTC() }
 	selection, err := inferencer.buildPlannerSelection(predictionWindow{
@@ -1801,7 +1795,7 @@ func TestBuildPlannerSelectionEnforcesFrameTelemetrySkewLimit(t *testing.T) {
 		capturedAt:     time.UnixMilli(1076).UTC(),
 		sequenceNumber: 4,
 	})
-	if err == nil || !errors.Is(err, ErrParkingInferencePrecondition) || !strings.Contains(err.Error(), "skew exceeded") {
+	if err == nil || !errors.Is(err, ErrStopSignInferencePrecondition) || !strings.Contains(err.Error(), "skew exceeded") {
 		t.Fatalf("expected skew beyond the configured maximum to fail closed, got=%v", err)
 	}
 }
@@ -1810,7 +1804,7 @@ func TestBuildPredictionRejectsLegacyImmediateOutputShape(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
-	response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.9)
+	response := validStopSignPredictResponse(cfg, "C:/models/stopSign/epoch-001.pt", 1.9)
 	response.PredControls = [][][]float64{{
 		{0.4, 0.1},
 	}}
@@ -1855,15 +1849,15 @@ func TestBuildPredictionRejectsOutOfRangePhysicalSetpoints(t *testing.T) {
 		value      float64
 		wantDetail string
 	}{
-		{name: "future speed", column: 0, value: parkingcontrol.StopSignMotionPlanMaxSpeedMPS + 0.01, wantDetail: "desired_speed_mps"},
+		{name: "future speed", column: 0, value: stopsigncontrol.StopSignMotionPlanMaxSpeedMPS + 0.01, wantDetail: "desired_speed_mps"},
 		{name: "stop intent", column: 1, value: -0.01, wantDetail: "stop_probability"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.9)
+			response := validStopSignPredictResponse(cfg, "C:/models/stopSign/epoch-001.pt", 1.9)
 			response.PredControls[0][2][tc.column] = tc.value
 			_, err := inferencer.buildPrediction(response, "http://planner.local", window, selection, nil)
-			if err == nil || !errors.Is(err, parkingcontrol.ErrInvalidPlan) || !strings.Contains(err.Error(), tc.wantDetail) {
+			if err == nil || !errors.Is(err, stopsigncontrol.ErrInvalidPlan) || !strings.Contains(err.Error(), tc.wantDetail) {
 				t.Fatalf("expected out-of-range %s rejection, got=%v", tc.wantDetail, err)
 			}
 		})
@@ -1874,7 +1868,7 @@ func TestBuildPredictionRequiresSampleTimestampEcho(t *testing.T) {
 	cfg := DefaultInferenceConfig()
 	inferencer := NewInferencer(cfg, actuator.DefaultConfig(), control.NewStore())
 	inferencer.nowFunc = func() time.Time { return time.UnixMilli(2000).UTC() }
-	response := validParkingPredictResponse(cfg, "C:/models/parking/epoch-001.pt", 1.901)
+	response := validStopSignPredictResponse(cfg, "C:/models/stopSign/epoch-001.pt", 1.901)
 
 	_, err := inferencer.buildPrediction(response, "http://planner.local", predictionWindow{
 		frameTimes: []time.Time{time.UnixMilli(1900).UTC()},

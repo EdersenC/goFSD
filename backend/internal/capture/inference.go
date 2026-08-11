@@ -26,7 +26,7 @@ import (
 
 	"awesomeProject/internal/actuator"
 	"awesomeProject/internal/control"
-	"awesomeProject/internal/parkingcontrol"
+	"awesomeProject/internal/stopsigncontrol"
 )
 
 const (
@@ -42,7 +42,7 @@ const (
 	defaultInferenceJPEGQuality    = 90
 	defaultDebugFrameDumpLimit     = 30
 	defaultTelemetryStaleAfter     = 500 * time.Millisecond
-	defaultParkingEvaluationLimit  = 45 * time.Second
+	defaultStopSignEvaluationLimit = 45 * time.Second
 	defaultActuatorConfirmTimeout  = 750 * time.Millisecond
 	defaultActuatorConfirmInterval = 10 * time.Millisecond
 	defaultFrameTimingTimeout      = 500 * time.Millisecond
@@ -83,7 +83,7 @@ type InferencePrediction struct {
 	ModelDevice                   string                    `json:"modelDevice,omitempty"`
 	PlannerFormat                 string                    `json:"plannerFormat,omitempty"`
 	PlannerFormatVersion          int                       `json:"plannerFormatVersion"`
-	ControlContract               parkingControlContract    `json:"controlContract"`
+	ControlContract               stopSignControlContract   `json:"controlContract"`
 	ControlHorizonDtMs            []int                     `json:"controlHorizonDtMs"`
 	TelemetrySampleIntervalMs     int                       `json:"telemetrySampleIntervalMs"`
 	CapturedAt                    string                    `json:"capturedAt"`
@@ -108,7 +108,7 @@ type InferencePrediction struct {
 	RawPredAux                    [][]float64               `json:"rawPredAux,omitempty"`
 	RawStateInputs                map[string]any            `json:"rawStateInputs,omitempty"`
 	NormalizedStateInputs         map[string]float64        `json:"normalizedStateInputs,omitempty"`
-	SetpointPlan                  *parkingcontrol.Plan      `json:"setpointPlan,omitempty"`
+	SetpointPlan                  *stopsigncontrol.Plan     `json:"setpointPlan,omitempty"`
 }
 
 type InferenceStatus struct {
@@ -202,12 +202,12 @@ type actuatorSubmitter interface {
 	Submit(req actuator.CommandRequest) (actuator.State, error)
 }
 
-type actuatorParkingPlanSubmitter interface {
-	SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (actuator.State, error)
+type actuatorStopSignPlanSubmitter interface {
+	SubmitStopSignMotionPlan(plan stopsigncontrol.Plan) (actuator.State, error)
 }
 
-type actuatorParkingSafetyStopper interface {
-	RequestParkingSafetyStop() (actuator.State, error)
+type actuatorStopSignSafetyStopper interface {
+	RequestStopSignSafetyStop() (actuator.State, error)
 }
 
 type actuatorStateProvider interface {
@@ -220,26 +220,26 @@ type actuatorApplyExpectation struct {
 }
 
 type pythonPredictResponse struct {
-	Checkpoint                string                           `json:"checkpoint"`
-	Device                    string                           `json:"device"`
-	PlannerFormat             string                           `json:"planner_format"`
-	PlannerFormatVersion      int                              `json:"planner_format_version"`
-	ControlContract           parkingControlContract           `json:"control_contract"`
-	ControlHorizonDtMs        []int                            `json:"control_horizon_dt_ms"`
-	TelemetrySampleIntervalMs int                              `json:"telemetry_sample_interval_ms"`
-	SampledAtS                float64                          `json:"sampled_at_s"`
-	Direction                 string                           `json:"direction"`
-	ImageOffsets              []int                            `json:"image_offsets"`
-	TelemetryOffsets          []int                            `json:"telemetry_offsets"`
-	TelemetryFeatureNames     []string                         `json:"telemetry_feature_names"`
-	ControlTargetNames        []string                         `json:"control_target_names"`
-	AuxTargetNames            []string                         `json:"aux_target_names"`
-	PredControls              [][][]float64                    `json:"pred_controls"`
-	PredAux                   [][][]float64                    `json:"pred_aux"`
-	FutureOffsets             []int                            `json:"future_offsets"`
-	StateInputs               map[string]parkingModelInputSpec `json:"state_inputs"`
-	RawStateInputs            map[string]any                   `json:"raw_state_inputs"`
-	NormalizedStateInputs     map[string]float64               `json:"normalized_state_inputs"`
+	Checkpoint                string                            `json:"checkpoint"`
+	Device                    string                            `json:"device"`
+	PlannerFormat             string                            `json:"planner_format"`
+	PlannerFormatVersion      int                               `json:"planner_format_version"`
+	ControlContract           stopSignControlContract           `json:"control_contract"`
+	ControlHorizonDtMs        []int                             `json:"control_horizon_dt_ms"`
+	TelemetrySampleIntervalMs int                               `json:"telemetry_sample_interval_ms"`
+	SampledAtS                float64                           `json:"sampled_at_s"`
+	Direction                 string                            `json:"direction"`
+	ImageOffsets              []int                             `json:"image_offsets"`
+	TelemetryOffsets          []int                             `json:"telemetry_offsets"`
+	TelemetryFeatureNames     []string                          `json:"telemetry_feature_names"`
+	ControlTargetNames        []string                          `json:"control_target_names"`
+	AuxTargetNames            []string                          `json:"aux_target_names"`
+	PredControls              [][][]float64                     `json:"pred_controls"`
+	PredAux                   [][][]float64                     `json:"pred_aux"`
+	FutureOffsets             []int                             `json:"future_offsets"`
+	StateInputs               map[string]stopSignModelInputSpec `json:"state_inputs"`
+	RawStateInputs            map[string]any                    `json:"raw_state_inputs"`
+	NormalizedStateInputs     map[string]float64                `json:"normalized_state_inputs"`
 }
 
 type pythonModelsResponse struct {
@@ -247,41 +247,41 @@ type pythonModelsResponse struct {
 }
 
 type Inferencer struct {
-	mu                          sync.Mutex
-	lifecycleMu                 sync.Mutex
-	actuationMu                 sync.Mutex
-	ffmpegBin                   string
-	discover                    SourceDiscovery
-	probe                       CapabilityProbe
-	newCommand                  inferenceCommandFactory
-	httpClient                  *http.Client
-	nowFunc                     func() time.Time
-	requestTimeout              time.Duration
-	config                      InferenceConfig
-	modelServerURL              string
-	autoLoad                    bool
-	loadedCheckpoint            string
-	loadedModelDevice           string
-	sourceID                    string
-	telemetry                   *control.Store
-	actuator                    actuatorSubmitter
-	telemetryStaleAfter         time.Duration
-	lastTelemetryWaitLog        time.Time
-	telemetryNormalizer         *telemetryNormalizer
-	normalizationErr            error
-	parkingTarget               *parkingInferenceTarget
-	parkingCheckpoint           string
-	parkingSafetyTripped        bool
-	parkingCompleted            bool
-	parkingManualStop           bool
-	parkingHoldFailed           bool
-	parkingHoldConfirmed        bool
-	parkingStartEnvelopePending bool
-	parkingEvaluationLimit      time.Duration
-	actuatorConfirmTimeout      time.Duration
-	actuatorConfirmInterval     time.Duration
-	status                      InferenceStatus
-	active                      *inferenceSession
+	mu                           sync.Mutex
+	lifecycleMu                  sync.Mutex
+	actuationMu                  sync.Mutex
+	ffmpegBin                    string
+	discover                     SourceDiscovery
+	probe                        CapabilityProbe
+	newCommand                   inferenceCommandFactory
+	httpClient                   *http.Client
+	nowFunc                      func() time.Time
+	requestTimeout               time.Duration
+	config                       InferenceConfig
+	modelServerURL               string
+	autoLoad                     bool
+	loadedCheckpoint             string
+	loadedModelDevice            string
+	sourceID                     string
+	telemetry                    *control.Store
+	actuator                     actuatorSubmitter
+	telemetryStaleAfter          time.Duration
+	lastTelemetryWaitLog         time.Time
+	telemetryNormalizer          *telemetryNormalizer
+	normalizationErr             error
+	stopSignTarget               *stopSignInferenceTarget
+	stopSignCheckpoint           string
+	stopSignSafetyTripped        bool
+	stopSignCompleted            bool
+	stopSignManualStop           bool
+	stopSignHoldFailed           bool
+	stopSignHoldConfirmed        bool
+	stopSignStartEnvelopePending bool
+	stopSignEvaluationLimit      time.Duration
+	actuatorConfirmTimeout       time.Duration
+	actuatorConfirmInterval      time.Duration
+	status                       InferenceStatus
+	active                       *inferenceSession
 }
 
 func NewInferencer(cfg InferenceConfig, _ actuator.Config, telemetry *control.Store, actuators ...actuatorSubmitter) *Inferencer {
@@ -309,7 +309,7 @@ func NewInferencer(cfg InferenceConfig, _ actuator.Config, telemetry *control.St
 		telemetry:               telemetry,
 		actuator:                actuatorSink,
 		telemetryStaleAfter:     defaultTelemetryStaleAfter,
-		parkingEvaluationLimit:  defaultParkingEvaluationLimit,
+		stopSignEvaluationLimit: defaultStopSignEvaluationLimit,
 		actuatorConfirmTimeout:  defaultActuatorConfirmTimeout,
 		actuatorConfirmInterval: defaultActuatorConfirmInterval,
 		status: InferenceStatus{
@@ -349,16 +349,16 @@ func (i *Inferencer) populateInferencePreflight(status *InferenceStatus) {
 	if provider, ok := i.actuator.(actuatorStateProvider); ok {
 		state := provider.State()
 		status.ActuatorReady = state.Supported && state.Ready
-		status.ControllerReady = state.ParkingController.Ready
-		status.CalibrationVerified = state.ParkingController.Calibration.Verified
-		status.CalibrationID = strings.TrimSpace(state.ParkingController.Calibration.ProfileID)
+		status.ControllerReady = state.StopSignController.Ready
+		status.CalibrationVerified = state.StopSignController.Calibration.Verified
+		status.CalibrationID = strings.TrimSpace(state.StopSignController.Calibration.ProfileID)
 	}
 
 	if status.Active {
 		status.SafetyBlocker = "a self-driving test is already active"
 		return
 	}
-	if err := i.validateParkingInferenceStart(); err != nil {
+	if err := i.validateStopSignInferenceStart(); err != nil {
 		status.SafetyBlocker = inferencePreflightMessage(err)
 		return
 	}
@@ -372,7 +372,7 @@ func (i *Inferencer) populateInferencePreflight(status *InferenceStatus) {
 func inferencePreflightMessage(err error) string {
 	message := strings.TrimSpace(err.Error())
 	for _, prefix := range []string{
-		ErrParkingInferencePrecondition.Error() + ":",
+		ErrStopSignInferencePrecondition.Error() + ":",
 		ErrInferenceActuatorUnavailable.Error() + ":",
 	} {
 		message = strings.TrimSpace(strings.TrimPrefix(message, prefix))
@@ -398,7 +398,7 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	if req.AutoLoad != nil {
 		autoLoad = *req.AutoLoad
 	}
-	parkingTarget, err := i.parkingInferenceStartTarget()
+	stopSignTarget, err := i.stopSignInferenceStartTarget()
 	if err != nil {
 		return InferenceStatus{}, fmt.Errorf("%w: %w", ErrInferenceStartFailed, err)
 	}
@@ -432,11 +432,11 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 			return InferenceStatus{}, fmt.Errorf("%w: %v", ErrInferenceStartFailed, err)
 		}
 	}
-	modelStatus, err := i.validateLoadedParkingModel(ctx, modelServerURL)
+	modelStatus, err := i.validateLoadedStopSignModel(ctx, modelServerURL)
 	if err != nil {
 		return InferenceStatus{}, fmt.Errorf("%w: %w", ErrInferenceStartFailed, err)
 	}
-	parkingTarget, err = i.parkingInferenceStartTarget()
+	stopSignTarget, err = i.stopSignInferenceStartTarget()
 	if err != nil {
 		return InferenceStatus{}, fmt.Errorf("%w: %w", ErrInferenceStartFailed, err)
 	}
@@ -496,13 +496,13 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	if err := inferenceStartRequestError(ctx); err != nil {
 		return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, false, err)
 	}
-	if err := i.armActuatorForParkingInference(); err != nil {
+	if err := i.armActuatorForStopSignInference(); err != nil {
 		cancel()
-		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
-			err = fmt.Errorf("%w; failed to establish the actuator-owned parking safety stop: %v", err, holdErr)
+		if holdErr := i.submitStopSignSafetyHold(0); holdErr != nil {
+			err = fmt.Errorf("%w; failed to establish the actuator-owned stopSign safety stop: %v", err, holdErr)
 		}
 		i.setInferenceError(err)
-		return InferenceStatus{}, fmt.Errorf("%w: failed to establish parking actuator ownership: %v", ErrInferenceStartFailed, err)
+		return InferenceStatus{}, fmt.Errorf("%w: failed to establish stopSign actuator ownership: %v", ErrInferenceStartFailed, err)
 	}
 	if err := inferenceStartRequestError(ctx); err != nil {
 		return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, true, err)
@@ -512,8 +512,8 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 			return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, true, requestErr)
 		}
 		cancel()
-		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
-			err = fmt.Errorf("%w; failed to restore the parking safety hold: %v", err, holdErr)
+		if holdErr := i.submitStopSignSafetyHold(0); holdErr != nil {
+			err = fmt.Errorf("%w; failed to restore the stopSign safety hold: %v", err, holdErr)
 		}
 		i.setInferenceError(err)
 		return InferenceStatus{}, fmt.Errorf("%w: %v", ErrInferenceStartFailed, err)
@@ -556,14 +556,14 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	i.mu.Lock()
 	i.active = session
 	i.status.Active = true
-	i.parkingTarget = &parkingTarget
-	i.parkingCheckpoint = strings.TrimSpace(modelStatus.Checkpoint)
-	i.parkingSafetyTripped = false
-	i.parkingCompleted = false
-	i.parkingManualStop = false
-	i.parkingHoldFailed = false
-	i.parkingHoldConfirmed = false
-	i.parkingStartEnvelopePending = true
+	i.stopSignTarget = &stopSignTarget
+	i.stopSignCheckpoint = strings.TrimSpace(modelStatus.Checkpoint)
+	i.stopSignSafetyTripped = false
+	i.stopSignCompleted = false
+	i.stopSignManualStop = false
+	i.stopSignHoldFailed = false
+	i.stopSignHoldConfirmed = false
+	i.stopSignStartEnvelopePending = true
 	i.status.State = "running"
 	i.status.SourceID = monitor.ID
 	i.status.ModelServerURL = modelServerURL
@@ -578,7 +578,7 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	go i.consumeInferenceStderr(session)
 	go i.runPredictionWorker(loopCtx, session, modelServerURL)
 	go i.consumeInferenceFrames(loopCtx, session)
-	go i.monitorParkingEvaluationDeadline(loopCtx, session)
+	go i.monitorStopSignEvaluationDeadline(loopCtx, session)
 	go i.waitForInference(session)
 
 	return status, nil
@@ -594,8 +594,8 @@ func inferenceStartRequestError(ctx context.Context) error {
 func (i *Inferencer) rollbackCanceledInferenceStart(previousStatus InferenceStatus, cancel context.CancelFunc, armed bool, cause error) error {
 	cancel()
 	if armed {
-		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
-			combined := fmt.Errorf("%w; failed to restore the parking safety hold: %v", cause, holdErr)
+		if holdErr := i.submitStopSignSafetyHold(0); holdErr != nil {
+			combined := fmt.Errorf("%w; failed to restore the stopSign safety hold: %v", cause, holdErr)
 			i.setInferenceError(combined)
 			return combined
 		}
@@ -689,10 +689,10 @@ func (i *Inferencer) LoadModel(ctx context.Context, req InferenceModelLoadReques
 		i.clearLoadedModel()
 		return nil, err
 	}
-	modelStatus, err := i.validateLoadedParkingModel(ctx, modelServerURL)
+	modelStatus, err := i.validateLoadedStopSignModel(ctx, modelServerURL)
 	if err != nil {
 		i.clearLoadedModel()
-		return nil, fmt.Errorf("loaded checkpoint failed the parking compatibility check: %w", err)
+		return nil, fmt.Errorf("loaded checkpoint failed the stopSign compatibility check: %w", err)
 	}
 
 	resolvedDevice := strings.TrimSpace(modelStatus.Device)
@@ -716,11 +716,11 @@ func (i *Inferencer) LoadModel(ctx context.Context, req InferenceModelLoadReques
 func (i *Inferencer) syncRemoteLoadedModel(ctx context.Context, modelServerURL string) {
 	syncCtx, cancel := context.WithTimeout(ctx, defaultModelStatusSyncTimeout)
 	defer cancel()
-	status, err := i.fetchParkingModelStatus(syncCtx, modelServerURL)
+	status, err := i.fetchStopSignModelStatus(syncCtx, modelServerURL)
 	if err != nil {
 		return
 	}
-	if err := validateParkingModelStatus(status, i.config); err != nil {
+	if err := validateStopSignModelStatus(status, i.config); err != nil {
 		i.clearLoadedModel()
 		return
 	}
@@ -767,10 +767,10 @@ func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
 		i.actuationMu.Unlock()
 		return i.Status(), nil
 	}
-	shouldHold := !i.parkingSafetyTripped
+	shouldHold := !i.stopSignSafetyTripped
 	if shouldHold {
-		i.parkingSafetyTripped = true
-		i.parkingManualStop = true
+		i.stopSignSafetyTripped = true
+		i.stopSignManualStop = true
 		i.status.State = "stopping"
 		i.status.StoppedAt = ""
 	}
@@ -778,12 +778,12 @@ func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
 
 	var holdErr error
 	if shouldHold {
-		holdErr = i.submitParkingSafetyHoldLocked(0)
+		holdErr = i.submitStopSignSafetyHoldLocked(0)
 		if holdErr != nil {
 			i.mu.Lock()
-			i.parkingHoldFailed = true
+			i.stopSignHoldFailed = true
 			i.status.State = "error"
-			i.status.LastError = fmt.Sprintf("failed to apply parking safety hold while stopping: %v", holdErr)
+			i.status.LastError = fmt.Sprintf("failed to apply stopSign safety hold while stopping: %v", holdErr)
 			i.mu.Unlock()
 		}
 	}
@@ -826,7 +826,7 @@ func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
 	}
 
 	if holdErr != nil {
-		return i.Status(), fmt.Errorf("%w: failed to apply parking safety hold: %v", ErrStopFailed, holdErr)
+		return i.Status(), fmt.Errorf("%w: failed to apply stopSign safety hold: %v", ErrStopFailed, holdErr)
 	}
 	return i.Status(), nil
 }
@@ -845,40 +845,40 @@ func (i *Inferencer) finishInferenceSession(session *inferenceSession, err error
 	defer i.mu.Unlock()
 	active := i.active
 	if active != nil && active == session {
-		completed := i.parkingCompleted
-		safetyTripped := i.parkingSafetyTripped
-		manualStop := i.parkingManualStop
-		holdFailed := i.parkingHoldFailed
-		holdConfirmed := i.parkingHoldConfirmed
+		completed := i.stopSignCompleted
+		safetyTripped := i.stopSignSafetyTripped
+		manualStop := i.stopSignManualStop
+		holdFailed := i.stopSignHoldFailed
+		holdConfirmed := i.stopSignHoldConfirmed
 		i.active = nil
 		i.status.Active = false
-		i.parkingTarget = nil
-		i.parkingCheckpoint = ""
-		i.parkingStartEnvelopePending = false
+		i.stopSignTarget = nil
+		i.stopSignCheckpoint = ""
+		i.stopSignStartEnvelopePending = false
 		i.status.StoppedAt = i.nowFunc().UTC().Format(time.RFC3339Nano)
 		switch {
 		case holdFailed:
 			i.status.State = "error"
 			if i.status.LastError == "" {
-				i.status.LastError = "parking inference stopped because the safety hold failed"
+				i.status.LastError = "stopSign inference stopped because the safety hold failed"
 			}
 		case completed && !holdConfirmed:
 			i.status.State = "error"
-			i.status.LastError = "parking inference stopped before the safety hold was confirmed"
+			i.status.LastError = "stopSign inference stopped before the safety hold was confirmed"
 		case completed:
 			i.status.State = "succeeded"
 			i.status.LastError = ""
 		case manualStop:
 			i.status.State = "idle"
-			i.parkingSafetyTripped = false
-			i.parkingCompleted = false
-			i.parkingManualStop = false
-			i.parkingHoldFailed = false
-			i.parkingHoldConfirmed = false
+			i.stopSignSafetyTripped = false
+			i.stopSignCompleted = false
+			i.stopSignManualStop = false
+			i.stopSignHoldFailed = false
+			i.stopSignHoldConfirmed = false
 		case safetyTripped:
 			i.status.State = "error"
 			if i.status.LastError == "" {
-				i.status.LastError = "parking inference stopped by the safety interlock"
+				i.status.LastError = "stopSign inference stopped by the safety interlock"
 			}
 		case err != nil:
 			i.status.State = "error"
@@ -1201,7 +1201,7 @@ func (i *Inferencer) processPredictionWindow(ctx context.Context, session *infer
 		i.handleSessionPredictionFailure(session, window, err)
 		return
 	}
-	submitted, err := i.submitActiveParkingPrediction(session, prediction)
+	submitted, err := i.submitActiveStopSignPrediction(session, prediction)
 	if err != nil {
 		i.handleSessionPredictionFailure(session, window, err)
 		return
@@ -1211,7 +1211,7 @@ func (i *Inferencer) processPredictionWindow(ctx context.Context, session *infer
 	}
 
 	i.mu.Lock()
-	if i.active == session && !i.parkingSafetyTripped {
+	if i.active == session && !i.stopSignSafetyTripped {
 		i.status.LastPrediction = prediction
 		i.status.PredictionsSent++
 		i.status.LastError = ""
@@ -1276,7 +1276,7 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
-	if err := i.validateParkingPredictionModel(parsed); err != nil {
+	if err := i.validateStopSignPredictionModel(parsed); err != nil {
 		return nil, err
 	}
 	prediction, err := i.buildPrediction(
@@ -1297,28 +1297,28 @@ func (i *Inferencer) submitActuatorPrediction(prediction *InferencePrediction) e
 		return errors.New("inference actuator is not configured")
 	}
 	if prediction == nil || prediction.SetpointPlan == nil {
-		return errors.New("parking inference prediction has no setpoint plan")
+		return errors.New("stopSign inference prediction has no setpoint plan")
 	}
-	planSink, ok := i.actuator.(actuatorParkingPlanSubmitter)
+	planSink, ok := i.actuator.(actuatorStopSignPlanSubmitter)
 	if !ok {
-		return errors.New("inference actuator does not support parking setpoint plans")
+		return errors.New("inference actuator does not support stopSign setpoint plans")
 	}
-	_, err := planSink.SubmitParkingSetpointPlan(*prediction.SetpointPlan)
+	_, err := planSink.SubmitStopSignMotionPlan(*prediction.SetpointPlan)
 	return err
 }
 
-func (i *Inferencer) submitActiveParkingPrediction(
+func (i *Inferencer) submitActiveStopSignPrediction(
 	session *inferenceSession,
 	prediction *InferencePrediction,
 ) (bool, error) {
 	i.actuationMu.Lock()
 	defer i.actuationMu.Unlock()
 
-	if err := i.validateActiveParkingInference(); err != nil {
+	if err := i.validateActiveStopSignInference(); err != nil {
 		return false, err
 	}
 	i.mu.Lock()
-	allowed := i.active == session && !i.parkingSafetyTripped && !i.parkingCompleted && !i.parkingManualStop
+	allowed := i.active == session && !i.stopSignSafetyTripped && !i.stopSignCompleted && !i.stopSignManualStop
 	i.mu.Unlock()
 	if !allowed {
 		return false, nil
@@ -1355,7 +1355,7 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 	if i.normalizationErr != nil {
 		return plannerSelection{}, i.normalizationErr
 	}
-	if err := i.validateActiveParkingInference(); err != nil {
+	if err := i.validateActiveStopSignInference(); err != nil {
 		return plannerSelection{}, err
 	}
 	if i.telemetry == nil {
@@ -1367,7 +1367,7 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 	}
 	latest := history[len(history)-1]
 	latestAge := time.Duration(i.nowFunc().UTC().UnixMilli()-telemetrySourceTimestampMs(latest)) * time.Millisecond
-	if latestAge < -parkingSourceClockLeadLimit {
+	if latestAge < -stopSignSourceClockLeadLimit {
 		return plannerSelection{}, fmt.Errorf("planner telemetry source timestamp is %s in the future", -latestAge)
 	}
 	if latestAge > i.telemetryStaleAfter {
@@ -1413,8 +1413,8 @@ func (i *Inferencer) buildPlannerSelection(window predictionWindow) (plannerSele
 		frameSkewMs = math.Abs(float64(latestFrameMs - telemetryMs))
 		aligned = frameSkewMs <= durationMilliseconds(i.config.MaxFrameTelemetrySkew)
 		if !aligned {
-			return plannerSelection{}, parkingInferenceError(
-				"frame/telemetry skew exceeded the parking safety limit: sequence=%d frame_id=%d frame_ts_ms=%d telemetry_ts_ms=%d skew_ms=%.1f threshold_ms=%.1f",
+			return plannerSelection{}, stopSignInferenceError(
+				"frame/telemetry skew exceeded the stopSign safety limit: sequence=%d frame_id=%d frame_ts_ms=%d telemetry_ts_ms=%d skew_ms=%.1f threshold_ms=%.1f",
 				window.sequenceNumber,
 				window.frameIndex,
 				latestFrameMs,
@@ -1732,7 +1732,7 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 		copyPrediction.TelemetryTensorShape = append([]int(nil), status.LastPrediction.TelemetryTensorShape...)
 		copyPrediction.PredControlsShape = append([]int(nil), status.LastPrediction.PredControlsShape...)
 		copyPrediction.PredAuxShape = append([]int(nil), status.LastPrediction.PredAuxShape...)
-		copyPrediction.ControlContract = cloneParkingControlContract(status.LastPrediction.ControlContract)
+		copyPrediction.ControlContract = cloneStopSignControlContract(status.LastPrediction.ControlContract)
 		copyPrediction.ControlHorizonDtMs = append([]int(nil), status.LastPrediction.ControlHorizonDtMs...)
 		copyPrediction.RawPredControls = clone2DFloat64(status.LastPrediction.RawPredControls)
 		copyPrediction.RawPredAux = clone2DFloat64(status.LastPrediction.RawPredAux)
@@ -1740,7 +1740,7 @@ func cloneInferenceStatus(status InferenceStatus) InferenceStatus {
 		copyPrediction.NormalizedStateInputs = cloneFloat64Map(status.LastPrediction.NormalizedStateInputs)
 		if status.LastPrediction.SetpointPlan != nil {
 			planCopy := *status.LastPrediction.SetpointPlan
-			planCopy.Points = append([]parkingcontrol.Setpoint(nil), status.LastPrediction.SetpointPlan.Points...)
+			planCopy.Points = append([]stopsigncontrol.Setpoint(nil), status.LastPrediction.SetpointPlan.Points...)
 			copyPrediction.SetpointPlan = &planCopy
 		}
 		if status.LastPrediction.LastTelemetry != nil {
@@ -1802,30 +1802,30 @@ func (i *Inferencer) buildPrediction(
 	}
 	predictedAt := i.nowFunc().UTC()
 	sampledAtS := predictionInputTimestampS(window, selection)
-	if !finiteParkingValue(parsed.SampledAtS) || math.Abs(parsed.SampledAtS-sampledAtS) > 1e-6 {
+	if !finiteStopSignValue(parsed.SampledAtS) || math.Abs(parsed.SampledAtS-sampledAtS) > 1e-6 {
 		return nil, fmt.Errorf(
 			"prediction sampled_at_s did not echo the requested observation timestamp: got=%.9f want=%.9f",
 			parsed.SampledAtS,
 			sampledAtS,
 		)
 	}
-	points := make([]parkingcontrol.Setpoint, 0, len(controls[0]))
+	points := make([]stopsigncontrol.Setpoint, 0, len(controls[0]))
 	for index, row := range controls[0] {
-		points = append(points, parkingcontrol.Setpoint{
+		points = append(points, stopsigncontrol.Setpoint{
 			DtMs:                        i.config.ControlHorizonDtMs[index],
 			DesiredWheelSteerNormalized: 0,
 			DesiredSpeedMPS:             row[0],
 			StopProbability:             row[1],
 		})
 	}
-	plan := parkingcontrol.Plan{
+	plan := stopsigncontrol.Plan{
 		Contract:    parsed.ControlContract.Name,
 		SampledAtS:  parsed.SampledAtS,
 		ReceivedAtS: timeToSeconds(predictedAt),
 		Points:      points,
 		Direction:   parsed.Direction,
 	}
-	if err := parkingcontrol.ValidatePlan(plan); err != nil {
+	if err := stopsigncontrol.ValidatePlan(plan); err != nil {
 		return nil, err
 	}
 	frameTimesMs := make([]int64, 0, len(window.frameTimes))
@@ -1842,7 +1842,7 @@ func (i *Inferencer) buildPrediction(
 		ModelDevice:                   parsed.Device,
 		PlannerFormat:                 parsed.PlannerFormat,
 		PlannerFormatVersion:          parsed.PlannerFormatVersion,
-		ControlContract:               cloneParkingControlContract(parsed.ControlContract),
+		ControlContract:               cloneStopSignControlContract(parsed.ControlContract),
 		ControlHorizonDtMs:            append([]int(nil), parsed.ControlHorizonDtMs...),
 		TelemetrySampleIntervalMs:     parsed.TelemetrySampleIntervalMs,
 		CapturedAt:                    window.capturedAt.Format(time.RFC3339Nano),
@@ -1873,11 +1873,11 @@ func (i *Inferencer) buildPrediction(
 }
 
 func (i *Inferencer) handlePredictionFailure(window predictionWindow, cause error) {
-	i.terminateParkingInference(nil, window.sequenceNumber, cause)
+	i.terminateStopSignInference(nil, window.sequenceNumber, cause)
 }
 
 func (i *Inferencer) handleSessionPredictionFailure(session *inferenceSession, window predictionWindow, cause error) {
-	i.terminateParkingInference(session, window.sequenceNumber, cause)
+	i.terminateStopSignInference(session, window.sequenceNumber, cause)
 }
 
 func (i *Inferencer) handleInferenceProcessExit(session *inferenceSession, processErr error) {
@@ -1885,22 +1885,22 @@ func (i *Inferencer) handleInferenceProcessExit(session *inferenceSession, proce
 	if processErr != nil {
 		cause = fmt.Errorf("inference capture process exited unexpectedly: %w", processErr)
 	}
-	i.terminateParkingInference(session, 0, cause)
+	i.terminateStopSignInference(session, 0, cause)
 }
 
-func (i *Inferencer) terminateParkingInference(expectedSession *inferenceSession, sequence int, cause error) {
+func (i *Inferencer) terminateStopSignInference(expectedSession *inferenceSession, sequence int, cause error) {
 	i.actuationMu.Lock()
-	session, transitioned, succeeded := i.beginParkingTerminalTransition(expectedSession, cause)
+	session, transitioned, succeeded := i.beginStopSignTerminalTransition(expectedSession, cause)
 	if !transitioned {
 		i.actuationMu.Unlock()
 		return
 	}
 
-	holdErr := i.submitParkingSafetyHoldLocked(sequence)
+	holdErr := i.submitStopSignSafetyHoldLocked(sequence)
 	if holdErr != nil {
-		i.recordParkingSafetyHoldError(holdErr)
+		i.recordStopSignSafetyHoldError(holdErr)
 	} else if succeeded {
-		i.recordParkingSafetyHoldConfirmed()
+		i.recordStopSignSafetyHoldConfirmed()
 	}
 	i.actuationMu.Unlock()
 	if session != nil && session.cancel != nil {
@@ -1908,32 +1908,32 @@ func (i *Inferencer) terminateParkingInference(expectedSession *inferenceSession
 	}
 }
 
-func (i *Inferencer) beginParkingTerminalTransition(expectedSession *inferenceSession, cause error) (*inferenceSession, bool, bool) {
+func (i *Inferencer) beginStopSignTerminalTransition(expectedSession *inferenceSession, cause error) (*inferenceSession, bool, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if expectedSession != nil && i.active != expectedSession {
 		return nil, false, false
 	}
-	if i.parkingCompleted || i.parkingSafetyTripped {
+	if i.stopSignCompleted || i.stopSignSafetyTripped {
 		return nil, false, false
 	}
 
-	succeeded := errors.Is(cause, ErrParkingInferenceComplete)
-	i.parkingCompleted = succeeded
-	i.parkingSafetyTripped = true
-	i.parkingManualStop = false
-	i.parkingHoldConfirmed = false
+	succeeded := errors.Is(cause, ErrStopSignInferenceComplete)
+	i.stopSignCompleted = succeeded
+	i.stopSignSafetyTripped = true
+	i.stopSignManualStop = false
+	i.stopSignHoldConfirmed = false
 	if succeeded {
 		i.status.State = "stopping"
 		i.status.LastError = ""
 	} else {
 		if cause == nil {
-			cause = errors.New("parking inference failed without a reason")
+			cause = errors.New("stopSign inference failed without a reason")
 		}
 		i.status.State = "error"
 		i.status.LastError = cause.Error()
 		i.status.PredictionErrors++
-		log.Printf("[inference] parking safety stop: %v", cause)
+		log.Printf("[inference] stopSign safety stop: %v", cause)
 	}
 	if i.active == nil {
 		i.status.StoppedAt = i.nowFunc().UTC().Format(time.RFC3339Nano)
@@ -1943,28 +1943,28 @@ func (i *Inferencer) beginParkingTerminalTransition(expectedSession *inferenceSe
 	return i.active, true, succeeded
 }
 
-func (i *Inferencer) submitParkingSafetyHold(sequence int) error {
+func (i *Inferencer) submitStopSignSafetyHold(sequence int) error {
 	i.actuationMu.Lock()
 	defer i.actuationMu.Unlock()
-	return i.submitParkingSafetyHoldLocked(sequence)
+	return i.submitStopSignSafetyHoldLocked(sequence)
 }
 
-func (i *Inferencer) submitParkingSafetyHoldLocked(sequence int) error {
-	stopper, ok := i.actuator.(actuatorParkingSafetyStopper)
+func (i *Inferencer) submitStopSignSafetyHoldLocked(sequence int) error {
+	stopper, ok := i.actuator.(actuatorStopSignSafetyStopper)
 	if !ok {
-		return errors.New("parking safety stop cannot be requested because the actuator does not support it")
+		return errors.New("stopSign safety stop cannot be requested because the actuator does not support it")
 	}
-	submittedState, err := stopper.RequestParkingSafetyStop()
+	submittedState, err := stopper.RequestStopSignSafetyStop()
 	if err != nil {
 		return err
 	}
-	return i.confirmAppliedParkingStop(submittedState.LastCommandID, actuatorApplyExpectation{
-		label:    "parking safety stop",
+	return i.confirmAppliedStopSignStop(submittedState.LastCommandID, actuatorApplyExpectation{
+		label:    "stopSign safety stop",
 		stopping: true,
 	})
 }
 
-func (i *Inferencer) armActuatorForParkingInference() error {
+func (i *Inferencer) armActuatorForStopSignInference() error {
 	i.actuationMu.Lock()
 	defer i.actuationMu.Unlock()
 	enabled := true
@@ -1975,9 +1975,9 @@ func (i *Inferencer) armActuatorForParkingInference() error {
 		InputMode:        actuator.InputModeNormalized,
 		Handbrake:        false,
 		Enabled:          &enabled,
-		Owner:            actuator.OwnerParkingInference,
+		Owner:            actuator.OwnerStopSignInference,
 		TimestampMs:      i.nowFunc().UTC().UnixMilli(),
-	}, actuatorApplyExpectation{label: "parking inference arm"})
+	}, actuatorApplyExpectation{label: "stopSign inference arm"})
 }
 
 func (i *Inferencer) submitAndConfirmActuatorCommand(command actuator.CommandRequest, expected actuatorApplyExpectation) error {
@@ -1985,10 +1985,10 @@ func (i *Inferencer) submitAndConfirmActuatorCommand(command actuator.CommandReq
 	if err != nil {
 		return err
 	}
-	return i.confirmAppliedParkingStop(submittedState.LastCommandID, expected)
+	return i.confirmAppliedStopSignStop(submittedState.LastCommandID, expected)
 }
 
-func (i *Inferencer) confirmAppliedParkingStop(commandID int64, expected actuatorApplyExpectation) error {
+func (i *Inferencer) confirmAppliedStopSignStop(commandID int64, expected actuatorApplyExpectation) error {
 	provider, ok := i.actuator.(actuatorStateProvider)
 	if !ok {
 		return fmt.Errorf("%s cannot be confirmed because actuator state is unavailable", expected.label)
@@ -2034,7 +2034,7 @@ func actuatorStateConfirmsCommand(state actuator.State, expected actuatorApplyEx
 	if _, err := time.Parse(time.RFC3339Nano, state.LastApplySucceededAt); err != nil {
 		return false
 	}
-	if state.ParkingController.Owner != actuator.OwnerParkingInference || state.ParkingController.Stopping != expected.stopping {
+	if state.StopSignController.Owner != actuator.OwnerStopSignInference || state.StopSignController.Stopping != expected.stopping {
 		return false
 	}
 	if state.Applied.CommandID != commandID || !state.Applied.Enabled || state.Applied.Steer != 0 || state.Applied.Throttle != 0 {
@@ -2046,11 +2046,11 @@ func actuatorStateConfirmsCommand(state actuator.State, expected actuatorApplyEx
 	return state.Applied.Brake > 0
 }
 
-func (i *Inferencer) recordParkingSafetyHoldError(err error) {
-	message := fmt.Sprintf("failed to apply parking safety hold: %v", err)
+func (i *Inferencer) recordStopSignSafetyHoldError(err error) {
+	message := fmt.Sprintf("failed to apply stopSign safety hold: %v", err)
 	i.mu.Lock()
-	i.parkingHoldFailed = true
-	i.parkingHoldConfirmed = false
+	i.stopSignHoldFailed = true
+	i.stopSignHoldConfirmed = false
 	i.status.State = "error"
 	if i.status.LastError == "" {
 		i.status.LastError = message
@@ -2061,18 +2061,18 @@ func (i *Inferencer) recordParkingSafetyHoldError(err error) {
 	log.Printf("[inference] %s", message)
 }
 
-func (i *Inferencer) recordParkingSafetyHoldConfirmed() {
+func (i *Inferencer) recordStopSignSafetyHoldConfirmed() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.parkingCompleted && !i.parkingHoldFailed {
-		i.parkingHoldConfirmed = true
+	if i.stopSignCompleted && !i.stopSignHoldFailed {
+		i.stopSignHoldConfirmed = true
 		i.status.State = "succeeded"
 		i.status.LastError = ""
 	}
 }
 
-func (i *Inferencer) monitorParkingEvaluationDeadline(ctx context.Context, session *inferenceSession) {
-	timer := time.NewTimer(i.parkingEvaluationLimit)
+func (i *Inferencer) monitorStopSignEvaluationDeadline(ctx context.Context, session *inferenceSession) {
+	timer := time.NewTimer(i.stopSignEvaluationLimit)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -2081,7 +2081,7 @@ func (i *Inferencer) monitorParkingEvaluationDeadline(ctx context.Context, sessi
 		i.handleSessionPredictionFailure(
 			session,
 			predictionWindow{},
-			fmt.Errorf("%w: no settled success within %s", ErrParkingInferenceDeadlineExceeded, i.parkingEvaluationLimit),
+			fmt.Errorf("%w: no settled success within %s", ErrStopSignInferenceDeadlineExceeded, i.stopSignEvaluationLimit),
 		)
 	}
 }
@@ -2397,7 +2397,7 @@ func (i *Inferencer) logPlannerDebug(prediction *InferencePrediction) {
 	if prediction == nil || prediction.Sequence > 5 {
 		return
 	}
-	first := parkingcontrol.Setpoint{}
+	first := stopsigncontrol.Setpoint{}
 	if prediction.SetpointPlan != nil && len(prediction.SetpointPlan.Points) > 0 {
 		first = prediction.SetpointPlan.Points[0]
 	}

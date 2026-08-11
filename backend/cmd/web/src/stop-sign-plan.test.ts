@@ -15,17 +15,19 @@ assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 
 assertEqual(JSON.stringify(validateStopSignPlan(plan)), "[]");
 
 const parsed = parseStoredStopSignPlan(JSON.stringify(plan));
-assert(parsed, "v1 plan should restore");
+assert(parsed, "v2 plan should restore");
 parsed.entries[0]!.signPose.x = 999;
 assertEqual(plan.entries[0]!.signPose.x, 120, "restored plan must not alias input poses");
-assertEqual(parseStoredStopSignPlan('{"version":"parking"}'), null);
+assertEqual(parseStoredStopSignPlan('{"version":"legacy"}'), null);
 
 const invalid = createStopSignPlan();
 invalid.entries = [createStopSignEntry(1), createStopSignEntry(1)];
 invalid.entries[0]!.startDistanceM = 1;
+invalid.entries[0]!.exitDistanceM = 1;
 const errors = validateStopSignPlan(invalid).join(" ");
 assert(/duplicated/i.test(errors));
 assert(/start distance must be from/i.test(errors));
+assert(/exit distance must be from/i.test(errors));
 assertEqual(distanceBetweenPoses(
     {x: 0, y: 0, z: 0, heading: 0},
     {x: 3, y: 4, z: 0, heading: 90},

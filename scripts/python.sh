@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-parking_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+stop_sign_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ -x "${parking_project_root}/.venv/bin/python" ]]; then
-    exec "${parking_project_root}/.venv/bin/python" "$@"
+if [[ -x "${stop_sign_project_root}/.venv/bin/python" ]]; then
+    exec "${stop_sign_project_root}/.venv/bin/python" "$@"
 fi
 
-if [[ -f "${parking_project_root}/.venv/Scripts/python.exe" ]]; then
-    exec "${parking_project_root}/.venv/Scripts/python.exe" "$@"
+if [[ -f "${stop_sign_project_root}/.venv/Scripts/python.exe" ]]; then
+    exec "${stop_sign_project_root}/.venv/Scripts/python.exe" "$@"
 fi
 
 if command -v python3 >/dev/null 2>&1; then

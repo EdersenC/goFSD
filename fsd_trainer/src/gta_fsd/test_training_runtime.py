@@ -41,7 +41,7 @@ base_dir = "training_runs"
 [training]
 epochs = 15
 learning_rate = 0.001
-early_stopping_metric = "drive_score"
+early_stopping_metric = "stop_sign_score"
 smooth_l1_beta = 0.1
 
 [training.target_loss_weights]
@@ -78,7 +78,7 @@ class TrainingRuntimeTests(unittest.TestCase):
             self.assertEqual(page["epochs"], 15)
             self.assertEqual(page["learningRate"], 0.001)
             self.assertEqual(page["smoothL1Beta"], 0.1)
-            self.assertEqual(page["earlyStoppingMetric"], "drive_score")
+            self.assertEqual(page["earlyStoppingMetric"], "stop_sign_score")
             self.assertEqual(page["lossWeights"]["future_speed_mps"], 2.2)
             self.assertEqual(page["lossWeights"]["expert_brake"], 1.5)
             self.assertEqual(page["lossWeights"]["stop_intent"], 1.0)
@@ -87,7 +87,7 @@ class TrainingRuntimeTests(unittest.TestCase):
             self.assertNotIn("consistency", page)
             self.assertNotIn("allowedConsistencyKeys", page)
             self.assertNotIn("yawLossWeighting", page)
-            self.assertIn("turnOversampling", page)
+            self.assertNotIn("turnOversampling", page)
             self.assertIn("stateInputs", page)
             self.assertIn("trainRunIds", page)
             self.assertIn("valRunIds", page)
@@ -228,14 +228,11 @@ class TrainingRuntimeTests(unittest.TestCase):
                 "learningRate": 0.001,
                 "widthMultiplier": 1.5,
                 "smoothL1Beta": 0.1,
-                "earlyStoppingMetric": "drive_score",
+                "earlyStoppingMetric": "stop_sign_score",
                 "trainRunIds": ["run-a"],
                 "valRunIds": ["run-b"],
                 "lossWeights": {"future_speed_mps": 2.5},
-                "consistency": {"yaw_delta_vs_yaw_rate_weight": 1.25},
-                "turnOversampling": {"enabled": True},
-                "yawLossWeighting": {"enabled": False},
-                "stateInputs": {"currentSpeed": {"enabled": True, "cap": 25.0}},
+                "stateInputs": {"currentSpeed": {"enabled": True, "cap": 8.0}},
                 "createdAt": "2026-04-21T00:00:00.000000000Z",
                 "lastUpdatedAt": "2026-04-21T00:01:00.000000000Z",
                 "finishedAt": "2026-04-21T00:01:00.000000000Z",
@@ -269,7 +266,6 @@ class TrainingRuntimeTests(unittest.TestCase):
             self.assertEqual(created["trainRunIds"], failed_job["trainRunIds"])
             self.assertEqual(created["valRunIds"], failed_job["valRunIds"])
             self.assertEqual(created["lossWeights"], failed_job["lossWeights"])
-            self.assertEqual(created["turnOversampling"], failed_job["turnOversampling"])
             self.assertEqual(created["stateInputs"], failed_job["stateInputs"])
             self.assertNotIn("consistency", created)
             self.assertNotIn("yawLossWeighting", created)
@@ -298,7 +294,6 @@ class TrainingRuntimeTests(unittest.TestCase):
                 "trainRunIds": None,
                 "valRunIds": None,
                 "lossWeights": {},
-                "turnOversampling": {},
                 "stateInputs": {},
                 "createdAt": "2026-04-21T00:00:00.000000000Z",
                 "lastUpdatedAt": "2026-04-21T00:01:00.000000000Z",
@@ -321,7 +316,7 @@ class TrainingRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "failed or stopped"):
                 manager.requeue(completed_job["id"])
 
-    def test_parse_job_specs_accepts_sampling_routes_and_run_selection(self) -> None:
+    def test_parse_job_specs_accepts_stop_sign_training_and_run_selection(self) -> None:
         jobs = _parse_job_specs({
             "name": "YAW",
             "epochs": 15,
@@ -335,17 +330,10 @@ class TrainingRuntimeTests(unittest.TestCase):
                 "future_speed_mps": 2.0,
                 "expert_brake": 0.5,
             },
-            "turnOversampling": {
-                "enabled": True,
-                "sharp_turn_weight": 3.0,
-            },
             "stateInputs": {
                 "currentSpeed": {
                     "enabled": True,
-                    "cap": 25.0,
-                },
-                "hasLeadVehicle": {
-                    "enabled": True,
+                    "cap": 8.0,
                 },
             },
         })
@@ -360,9 +348,7 @@ class TrainingRuntimeTests(unittest.TestCase):
         self.assertEqual(job["earlyStoppingMetric"], "control_loss")
         self.assertEqual(job["lossWeights"]["future_speed_mps"], 2.0)
         self.assertEqual(job["lossWeights"]["expert_brake"], 0.5)
-        self.assertTrue(job["turnOversampling"]["enabled"])
         self.assertNotIn("heads", job["stateInputs"]["currentSpeed"])
-        self.assertNotIn("heads", job["stateInputs"]["hasLeadVehicle"])
 
     def test_parse_job_specs_rejects_removed_training_fields(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "removed training job field"):
@@ -396,7 +382,7 @@ class TrainingRuntimeTests(unittest.TestCase):
                 "lossWeights": {"expert_brake": 0.5},
                 "consistency": {"yaw_delta_vs_yaw_rate_weight": 9.0},
                 "yawLossWeighting": {"enabled": True, "tau": 0.5},
-                "turnOversampling": {"enabled": True, "sharp_turn_threshold": 0.15, "medium_turn_threshold": 0.30},
+                "turnOversampling": {"enabled": True},
             }
 
             manager._write_derived_config(job)
@@ -406,25 +392,17 @@ class TrainingRuntimeTests(unittest.TestCase):
             self.assertIn("expert_brake = 0.5", derived)
             self.assertIn("[training.target_loss_weights]", derived)
             self.assertNotIn("[training.loss_weights]", derived)
-            self.assertIn("[loader.turn_oversampling]", derived)
+            self.assertNotIn("[loader.turn_oversampling]", derived)
             self.assertNotIn("[training.consistency]", derived)
             self.assertNotIn("yaw_delta_vs_yaw_rate_weight", derived)
             self.assertNotIn("yaw_loss_weighting", derived)
 
-    def test_parse_job_specs_normalizes_turn_threshold_order(self) -> None:
-        jobs = _parse_job_specs({
-            "name": "YAW",
-            "turnOversampling": {
-                "enabled": True,
-                "light_turn_threshold": 0.05,
-                "medium_turn_threshold": 0.30,
-                "sharp_turn_threshold": 0.15,
-            },
-        })
-
-        job = jobs[0]
-        self.assertEqual(job["turnOversampling"]["medium_turn_threshold"], 0.30)
-        self.assertEqual(job["turnOversampling"]["sharp_turn_threshold"], 0.30)
+    def test_parse_job_specs_rejects_removed_turn_oversampling(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "removed training job field"):
+            _parse_job_specs({
+                "name": "stale",
+                "turnOversampling": {"enabled": True},
+            })
 
     def test_parse_job_specs_rejects_stale_loss_weight_names(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "unknown: yaw_rate"):
@@ -455,7 +433,7 @@ class TrainingRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             manager = TrainingManager(write_training_runtime_config(Path(tmp)), start_worker=False)
             spec = {
-                "name": "Parking baseline",
+                "name": "Stop sign baseline",
                 "epochs": 2,
                 "trainRunIds": ["run-a"],
                 "valRunIds": ["run-b"],

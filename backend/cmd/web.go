@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-//go:embed web/index.html web/app.js
+//go:embed web/index.html web/app.js web/stop-sign-locations.csv
 var webAssets embed.FS
 
 type embeddedWebRoute struct {
@@ -17,6 +17,7 @@ type embeddedWebRoute struct {
 var embeddedWebRoutes = []embeddedWebRoute{
 	{path: "/", asset: "web/index.html", contentType: "text/html; charset=utf-8"},
 	{path: "/app.js", asset: "web/app.js", contentType: "text/javascript; charset=utf-8"},
+	{path: "/stop-sign-locations.csv", asset: "web/stop-sign-locations.csv", contentType: "text/csv; charset=utf-8"},
 	{path: "/guide", asset: "web/index.html", contentType: "text/html; charset=utf-8"},
 	{path: "/architecture", asset: "web/index.html", contentType: "text/html; charset=utf-8"},
 }

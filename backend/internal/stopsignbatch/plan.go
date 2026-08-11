@@ -16,6 +16,7 @@ const (
 	DefaultStopDistanceM    = 3.0
 	DefaultEgoCenterOffsetM = 2.5
 	DefaultStartDistanceM   = 40.0
+	DefaultExitDistanceM    = 8.0
 	DefaultTargetSpeedMPS   = 8.0
 	DefaultDwellMS          = 5000
 	DefaultAttemptCount     = 1
@@ -29,6 +30,8 @@ const (
 	maximumEgoCenterOffsetM = 8.0
 	minimumStartDistanceM   = 5.0
 	maximumStartDistanceM   = 250.0
+	minimumExitDistanceM    = 2.0
+	maximumExitDistanceM    = 50.0
 	minimumTargetSpeedMPS   = 0.5
 	maximumTargetSpeedMPS   = 8.0
 	minimumDwellMS          = 500
@@ -78,6 +81,7 @@ type Variation struct {
 	StopDistanceM    *float64        `json:"stopDistanceM,omitempty"`
 	EgoCenterOffsetM *float64        `json:"egoCenterOffsetM,omitempty"`
 	StartDistanceM   *float64        `json:"startDistanceM,omitempty"`
+	ExitDistanceM    *float64        `json:"exitDistanceM,omitempty"`
 	TargetSpeedMPS   *float64        `json:"targetSpeedMps,omitempty"`
 	DwellMS          *int            `json:"dwellMs,omitempty"`
 	AttemptCount     *int            `json:"attemptCount,omitempty"`
@@ -94,6 +98,7 @@ type Entry struct {
 	StopDistanceM    *float64        `json:"stopDistanceM,omitempty"`
 	EgoCenterOffsetM *float64        `json:"egoCenterOffsetM,omitempty"`
 	StartDistanceM   *float64        `json:"startDistanceM,omitempty"`
+	ExitDistanceM    *float64        `json:"exitDistanceM,omitempty"`
 	TargetSpeedMPS   *float64        `json:"targetSpeedMps,omitempty"`
 	DwellMS          *int            `json:"dwellMs,omitempty"`
 	AttemptCount     *int            `json:"attemptCount,omitempty"`
@@ -109,8 +114,8 @@ type Plan struct {
 	Entries []Entry `json:"entries"`
 }
 
-// Job is a fully explicit collection unit. StopLinePose, EgoStopPose, and
-// StartPose are derived from SignPose and cannot diverge from it.
+// Job is a fully explicit collection unit. StopLinePose, EgoStopPose,
+// StartPose, and ExitPose are derived from SignPose and cannot diverge from it.
 type Job struct {
 	ID               string         `json:"id"`
 	EntryID          string         `json:"entryId"`
@@ -119,9 +124,11 @@ type Job struct {
 	StopLinePose     Pose           `json:"stopLinePose"`
 	EgoStopPose      Pose           `json:"egoStopPose"`
 	StartPose        Pose           `json:"startPose"`
+	ExitPose         Pose           `json:"exitPose"`
 	StopDistanceM    float64        `json:"stopDistanceM"`
 	EgoCenterOffsetM float64        `json:"egoCenterOffsetM"`
 	StartDistanceM   float64        `json:"startDistanceM"`
+	ExitDistanceM    float64        `json:"exitDistanceM"`
 	TargetSpeedMPS   float64        `json:"targetSpeedMps"`
 	DwellMS          int            `json:"dwellMs"`
 	AttemptCount     int            `json:"attemptCount"`
@@ -135,6 +142,7 @@ type settings struct {
 	stopDistanceM    float64
 	egoCenterOffsetM float64
 	startDistanceM   float64
+	exitDistanceM    float64
 	targetSpeedMPS   float64
 	dwellMS          int
 	attemptCount     int
@@ -201,6 +209,7 @@ func Expand(plan Plan) ([]Job, error) {
 			stopLinePose := poseBehind(entry.SignPose, resolved.stopDistanceM)
 			egoStopPose := poseBehind(stopLinePose, resolved.egoCenterOffsetM)
 			startPose := poseBehind(egoStopPose, resolved.startDistanceM)
+			exitPose := poseAhead(entry.SignPose, resolved.exitDistanceM)
 			if err := validatePose(label+".stopLinePose", stopLinePose); err != nil {
 				return nil, err
 			}
@@ -208,6 +217,9 @@ func Expand(plan Plan) ([]Job, error) {
 				return nil, err
 			}
 			if err := validatePose(label+".startPose", startPose); err != nil {
+				return nil, err
+			}
+			if err := validatePose(label+".exitPose", exitPose); err != nil {
 				return nil, err
 			}
 
@@ -224,9 +236,11 @@ func Expand(plan Plan) ([]Job, error) {
 				StopLinePose:     stopLinePose,
 				EgoStopPose:      egoStopPose,
 				StartPose:        startPose,
+				ExitPose:         exitPose,
 				StopDistanceM:    resolved.stopDistanceM,
 				EgoCenterOffsetM: resolved.egoCenterOffsetM,
 				StartDistanceM:   resolved.startDistanceM,
+				ExitDistanceM:    resolved.exitDistanceM,
 				TargetSpeedMPS:   resolved.targetSpeedMPS,
 				DwellMS:          resolved.dwellMS,
 				AttemptCount:     resolved.attemptCount,
@@ -258,7 +272,7 @@ func ValidateExpandedJob(job Job) error {
 	}
 	for label, pose := range map[string]Pose{
 		"signPose": job.SignPose, "stopLinePose": job.StopLinePose,
-		"egoStopPose": job.EgoStopPose, "startPose": job.StartPose,
+		"egoStopPose": job.EgoStopPose, "startPose": job.StartPose, "exitPose": job.ExitPose,
 	} {
 		if err := validatePose("expanded job "+label, pose); err != nil {
 			return err
@@ -268,6 +282,7 @@ func ValidateExpandedJob(job Job) error {
 		stopDistanceM:    job.StopDistanceM,
 		egoCenterOffsetM: job.EgoCenterOffsetM,
 		startDistanceM:   job.StartDistanceM,
+		exitDistanceM:    job.ExitDistanceM,
 		targetSpeedMPS:   job.TargetSpeedMPS,
 		dwellMS:          job.DwellMS,
 		attemptCount:     job.AttemptCount,
@@ -287,10 +302,12 @@ func ValidateExpandedJob(job Job) error {
 	expectedStopLine := poseBehind(job.SignPose, job.StopDistanceM)
 	expectedEgoStop := poseBehind(expectedStopLine, job.EgoCenterOffsetM)
 	expectedStart := poseBehind(expectedEgoStop, job.StartDistanceM)
+	expectedExit := poseAhead(job.SignPose, job.ExitDistanceM)
 	for label, pair := range map[string][2]Pose{
 		"stopLinePose": {job.StopLinePose, expectedStopLine},
 		"egoStopPose":  {job.EgoStopPose, expectedEgoStop},
 		"startPose":    {job.StartPose, expectedStart},
+		"exitPose":     {job.ExitPose, expectedExit},
 	} {
 		if !posesNear(pair[0], pair[1], 1e-6) {
 			return invalid("expanded job %s contradicts sign-relative distances", label)
@@ -304,6 +321,7 @@ func defaultSettings() settings {
 		stopDistanceM:    DefaultStopDistanceM,
 		egoCenterOffsetM: DefaultEgoCenterOffsetM,
 		startDistanceM:   DefaultStartDistanceM,
+		exitDistanceM:    DefaultExitDistanceM,
 		targetSpeedMPS:   DefaultTargetSpeedMPS,
 		dwellMS:          DefaultDwellMS,
 		attemptCount:     DefaultAttemptCount,
@@ -319,18 +337,18 @@ func cloneSettings(source settings) settings {
 }
 
 func applyEntrySettings(destination *settings, entry Entry, label string) error {
-	return applySettings(destination, entry.StopDistanceM, entry.EgoCenterOffsetM, entry.StartDistanceM, entry.TargetSpeedMPS,
+	return applySettings(destination, entry.StopDistanceM, entry.EgoCenterOffsetM, entry.StartDistanceM, entry.ExitDistanceM, entry.TargetSpeedMPS,
 		entry.DwellMS, entry.AttemptCount, entry.Weather, entry.Time, entry.Vehicle, label)
 }
 
 func applyVariationSettings(destination *settings, variation Variation, label string) error {
-	return applySettings(destination, variation.StopDistanceM, variation.EgoCenterOffsetM, variation.StartDistanceM, variation.TargetSpeedMPS,
+	return applySettings(destination, variation.StopDistanceM, variation.EgoCenterOffsetM, variation.StartDistanceM, variation.ExitDistanceM, variation.TargetSpeedMPS,
 		variation.DwellMS, variation.AttemptCount, variation.Weather, variation.Time, variation.Vehicle, label)
 }
 
 func applySettings(
 	destination *settings,
-	stopDistanceM, egoCenterOffsetM, startDistanceM, targetSpeedMPS *float64,
+	stopDistanceM, egoCenterOffsetM, startDistanceM, exitDistanceM, targetSpeedMPS *float64,
 	dwellMS, attemptCount *int,
 	weather *string,
 	timeOfDay *TimeOfDay,
@@ -345,6 +363,9 @@ func applySettings(
 	}
 	if startDistanceM != nil {
 		destination.startDistanceM = *startDistanceM
+	}
+	if exitDistanceM != nil {
+		destination.exitDistanceM = *exitDistanceM
 	}
 	if targetSpeedMPS != nil {
 		destination.targetSpeedMPS = *targetSpeedMPS
@@ -375,6 +396,9 @@ func validateSettings(value settings, label string) error {
 		return err
 	}
 	if err := validateRange(label+".startDistanceM", value.startDistanceM, minimumStartDistanceM, maximumStartDistanceM); err != nil {
+		return err
+	}
+	if err := validateRange(label+".exitDistanceM", value.exitDistanceM, minimumExitDistanceM, maximumExitDistanceM); err != nil {
 		return err
 	}
 	if err := validateRange(label+".targetSpeedMps", value.targetSpeedMPS, minimumTargetSpeedMPS, maximumTargetSpeedMPS); err != nil {
@@ -445,6 +469,10 @@ func poseBehind(origin Pose, distanceM float64) Pose {
 		Z:       origin.Z,
 		Heading: origin.Heading,
 	}
+}
+
+func poseAhead(origin Pose, distanceM float64) Pose {
+	return poseBehind(origin, -distanceM)
 }
 
 func posesNear(first, second Pose, tolerance float64) bool {

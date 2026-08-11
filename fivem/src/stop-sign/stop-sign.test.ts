@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {gtaForwardVector, poseBehind, relativeStopLinePose} from "./geometry";
+import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
     brakingOnsetDistance,
     classifyStopSignPhase,
@@ -84,6 +84,8 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     const stopLinePose = poseBehind(signPose, stopDistanceM);
     const egoStopPose = poseBehind(stopLinePose, egoCenterOffsetM);
     const startPose = poseBehind(egoStopPose, startDistanceM);
+    const exitDistanceM = 8;
+    const exitPose = poseAhead(signPose, exitDistanceM);
     const job = {
         id: "alta:base",
         entryId: "alta",
@@ -92,9 +94,11 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         stopLinePose,
         egoStopPose,
         startPose,
+        exitPose,
         stopDistanceM,
         egoCenterOffsetM,
         startDistanceM,
+        exitDistanceM,
         targetSpeedMps: 8,
         dwellMs: 5000,
         attemptCount: 2,
@@ -106,6 +110,10 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
     assert.throws(
         () => parseStopSignJobs([{...job, egoStopPose: {...egoStopPose, y: egoStopPose.y + 1}}]),
+        /contradicts the sign-relative distance contract/,
+    );
+    assert.throws(
+        () => parseStopSignJobs([{...job, exitPose: {...exitPose, x: exitPose.x + 1}}]),
         /contradicts the sign-relative distance contract/,
     );
 }

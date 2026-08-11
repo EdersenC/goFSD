@@ -51,8 +51,6 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 		[]int{0},
 		[]int{1, 2},
 		50*time.Millisecond,
-		2,
-		true,
 	)
 
 	if len(samples) != 8 || stats.GeneratedSampleCount != 8 {
@@ -111,7 +109,7 @@ func TestRunDatasetReportProvidesStopSignPhaseAndLocationCoverage(t *testing.T) 
 		"status":  "collision",
 	}, []string{"accelerate", "decelerate"})
 
-	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB}, DatasetReportConfig{FutureSpeedDeltaClip: 2})
+	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB}, DatasetReportConfig{})
 	if err != nil {
 		t.Fatalf("BuildRunDatasetReport: %v", err)
 	}

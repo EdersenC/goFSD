@@ -30,6 +30,19 @@ export function poseBehind(reference: StopSignPose, distanceM: number): StopSign
     };
 }
 
+export function poseAhead(reference: StopSignPose, distanceM: number): StopSignPose {
+    if (!Number.isFinite(distanceM) || distanceM < 0) {
+        throw new RangeError("distanceM must be finite and non-negative");
+    }
+    const [forwardX, forwardY] = gtaForwardVector(reference.heading);
+    return {
+        x: reference.x + forwardX * distanceM,
+        y: reference.y + forwardY * distanceM,
+        z: reference.z,
+        heading: normalizeHeading(reference.heading),
+    };
+}
+
 export function relativeStopLinePose(pose: StopSignPose, stopLine: StopSignPose): StopSignRelativePose {
     const [forwardX, forwardY] = gtaForwardVector(stopLine.heading);
     const [rightX, rightY] = gtaRightVector(stopLine.heading);

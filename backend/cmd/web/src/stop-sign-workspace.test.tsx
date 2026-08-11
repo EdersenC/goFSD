@@ -4,6 +4,7 @@ import {createStopSignPlan} from "./stop-sign-plan";
 import {PhaseRail, resolvePhaseIndex} from "./stop-sign/PhaseRail";
 import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
+import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
 import {operatorTheme} from "./theme";
 import type {ControlState} from "./types";
 
@@ -33,10 +34,15 @@ const editorMarkup = render(
         calibrationBusy={false}
     />,
 );
-for (const label of ["Stop-sign plan", "Calibrate current sign", "Sign pose", "Base run", "Variants", "Attempts"]) {
+for (const label of ["Stop-sign plan", "Calibrate current sign", "Sign pose", "Base run", "Variants", "Exit distance (m)", "Attempts"]) {
     assert(editorMarkup.includes(label), `plan editor missing ${label}`);
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
+
+const catalogMarkup = render(<StopSignCatalog connected busy={false} onSetWaypoint={() => undefined} />);
+for (const label of ["Stop-sign catalog", "Set GTA waypoint", "/tpwaypoint", "Physical prop only"]) {
+    assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
+}
 
 const control: ControlState = {
     safetyEpoch: 2,

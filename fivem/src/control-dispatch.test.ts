@@ -40,6 +40,17 @@ function testConfirmedResponseReturnsCanonicalCommand() {
     assert(dispatchConfirmationAdvancesCursor(confirmation), "confirmed command should advance the cursor");
 }
 
+function testStopSignCommandsAreCanonical() {
+    for (const type of ["setStopSignTarget", "clearStopSignTarget", "setStopSignCatalogWaypoint", "startStopSignBatch"] as const) {
+        const confirmation = parseControlDispatchConfirmation({
+            commandId: `cmd-${type}`,
+            confirmed: true,
+            command: {id: `cmd-${type}`, type, safetyEpoch: 8},
+        }, `cmd-${type}`);
+        assert(confirmation.confirmed && confirmation.command.type === type, `${type} must be accepted`);
+    }
+}
+
 function testCleanRejectionsAreExplicit() {
     for (const reason of ["missing", "canceled", "staleSafetyEpoch"] as const) {
         const confirmation = parseControlDispatchConfirmation({
@@ -156,6 +167,7 @@ async function testTimedOutConnectCanBeRetriedByHeartbeat() {
 
 async function main() {
     testConfirmedResponseReturnsCanonicalCommand();
+    testStopSignCommandsAreCanonical();
     testCleanRejectionsAreExplicit();
     testMalformedResponsesFailClosed();
     await testTimeoutReleasesPollAndPreservesCursorForHold();

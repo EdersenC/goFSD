@@ -48,28 +48,20 @@ from control_contract import (
     DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
     PLANNER_FORMAT,
     PLANNER_FORMAT_VERSION,
-    STOP_PROBABILITY,
+    STOP_INTENT,
     control_contract_metadata,
     derive_control_horizon_dt_ms,
 )
 from dataset import DatasetItem, FsdDataset
-from models.planner import DrivingCNN
+from models.planner import StopSignTemporalPlanner
 from target_transforms import (
-    DEFAULT_FUTURE_SPEED_DELTA_CLIP,
-    DEFAULT_FUTURE_SPEED_DELTA_NORMALIZE,
     build_target_transform_registry,
     denormalize_target_tensor,
-    TARGET_TRANSFORM_TYPE_SIGNED_CAP,
     TargetTransform,
     target_transform_metadata,
     validate_stop_sign_control_target_transforms,
 )
 from state_inputs import (
-    ROUTE_DIRECTION_KEEP_STRAIGHT_KEY,
-    ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY,
-    ROUTE_DIRECTION_TURN_LEFT_KEY,
-    ROUTE_DIRECTION_TURN_RIGHT_KEY,
-    ROUTE_DIRECTION_UNKNOWN_KEY,
     StateInputConfig,
     default_inference_state_input_config,
     state_input_definition,
@@ -81,9 +73,9 @@ from stop_sign_contract import release_policy_metadata, require_disjoint_stop_lo
 
 MetricPayload = dict[str, Any]
 DEFAULT_WIDTH_MULTIPLIER = 1.0
-DEFAULT_EARLY_STOPPING_METRIC = "drive_score"
-DRIVE_SCORE_CONTROL_MAE_WEIGHT = 0.25
-DRIVE_SCORE_GENERALIZATION_GAP_WEIGHT = 0.10
+DEFAULT_EARLY_STOPPING_METRIC = "stop_sign_score"
+STOP_SIGN_SCORE_MOTION_PLAN_MAE_WEIGHT = 0.25
+STOP_SIGN_SCORE_GENERALIZATION_GAP_WEIGHT = 0.10
 SUPPORTED_LOSS_FUNCTIONS = {DEFAULT_LOSS_FUNCTION}
 SUPPORTED_OPTIMIZERS = {"adam", "adamw"}
 SUPPORTED_SCHEDULERS = {"none", "cosine"}
@@ -93,18 +85,6 @@ try:
     import psutil  # type: ignore[import-not-found]
 except ImportError:
     psutil = None
-
-
-@dataclass(frozen=True)
-class TurnOversamplingConfig:
-    enabled: bool = False
-    straight_weight: float = 1.0
-    light_turn_weight: float = 1.5
-    medium_turn_weight: float = 2.5
-    sharp_turn_weight: float = 4.0
-    light_turn_threshold: float = 0.05
-    medium_turn_threshold: float = 0.15
-    sharp_turn_threshold: float = 0.30
 
 
 @dataclass(frozen=True)
@@ -224,7 +204,6 @@ class LoaderConfig:
     log_every_n_batches: int
     val_split: float
     cpu_batch_size: int
-    turn_oversampling: TurnOversamplingConfig = field(default_factory=lambda: TurnOversamplingConfig())
     phase_balancing: PhaseBalancingConfig = field(default_factory=PhaseBalancingConfig)
 
 
@@ -499,12 +478,9 @@ def _parse_target_loss_weights(
         weights[name] = weight
 
     if unknown:
-        hint = ""
-        if "yaw_rate" in unknown and "future_yaw_rate" in supported_names:
-            hint = "; use future_yaw_rate for the auxiliary future yaw-rate target"
         raise ValueError(
             "unknown target loss weight name(s): "
-            f"{', '.join(sorted(unknown))}. Supported targets: {', '.join(sorted(supported_names))}{hint}"
+            f"{', '.join(sorted(unknown))}. Supported targets: {', '.join(sorted(supported_names))}"
         )
     return weights
 
@@ -598,41 +574,6 @@ def _parse_horizon_decoder_config(model_raw: dict[str, Any]) -> HorizonDecoderCo
         num_layers=num_layers,
         dropout=dropout,
     )
-
-
-def _parse_turn_oversampling_config(loader_raw: dict[str, Any]) -> TurnOversamplingConfig:
-    raw = loader_raw.get("turn_oversampling")
-    if raw is None:
-        return TurnOversamplingConfig()
-    if not isinstance(raw, dict):
-        raise ValueError("loader.turn_oversampling must be a TOML table")
-
-    config = TurnOversamplingConfig(
-        enabled=bool(raw.get("enabled", False)),
-        straight_weight=float(raw.get("straight_weight", 1.0)),
-        light_turn_weight=float(raw.get("light_turn_weight", 1.5)),
-        medium_turn_weight=float(raw.get("medium_turn_weight", 2.5)),
-        sharp_turn_weight=float(raw.get("sharp_turn_weight", 4.0)),
-        light_turn_threshold=float(raw.get("light_turn_threshold", 0.05)),
-        medium_turn_threshold=float(raw.get("medium_turn_threshold", 0.15)),
-        sharp_turn_threshold=float(raw.get("sharp_turn_threshold", 0.30)),
-    )
-    if config.light_turn_threshold < 0.0:
-        raise ValueError("loader.turn_oversampling.light_turn_threshold must be >= 0")
-    if config.medium_turn_threshold < config.light_turn_threshold:
-        raise ValueError("loader.turn_oversampling.medium_turn_threshold must be >= light_turn_threshold")
-    if config.sharp_turn_threshold < config.medium_turn_threshold:
-        raise ValueError("loader.turn_oversampling.sharp_turn_threshold must be >= medium_turn_threshold")
-    for field_name in (
-        "straight_weight",
-        "light_turn_weight",
-        "medium_turn_weight",
-        "sharp_turn_weight",
-    ):
-        weight = float(getattr(config, field_name))
-        if not math.isfinite(weight) or weight <= 0.0:
-            raise ValueError(f"loader.turn_oversampling.{field_name} must be a positive finite number")
-    return config
 
 
 def _parse_phase_balancing_config(loader_raw: dict[str, Any]) -> PhaseBalancingConfig:
@@ -749,16 +690,6 @@ def _parse_target_transforms(
         raw_target_transforms or {},
     )
 
-    if "future_speed_delta" in target_names and "future_speed_delta" not in transforms:
-        future_speed_delta = TargetTransform(
-            target_name="future_speed_delta",
-            transform_type=TARGET_TRANSFORM_TYPE_SIGNED_CAP,
-            range_min=-float(dataset_raw.get("future_speed_delta_clip", DEFAULT_FUTURE_SPEED_DELTA_CLIP)),
-            range_max=float(dataset_raw.get("future_speed_delta_clip", DEFAULT_FUTURE_SPEED_DELTA_CLIP)),
-            normalize=bool(dataset_raw.get("future_speed_delta_normalize", DEFAULT_FUTURE_SPEED_DELTA_NORMALIZE)),
-        )
-        transforms["future_speed_delta"] = future_speed_delta
-
     validate_stop_sign_control_target_transforms(transforms)
     return transforms
 
@@ -799,7 +730,6 @@ def load_config(path: Path) -> TrainConfig:
     scheduler_config = _parse_scheduler_config(training_raw)
     ema_config = _parse_ema_config(training_raw)
     consistency_settings = _parse_consistency_settings(training_raw)
-    turn_oversampling_config = _parse_turn_oversampling_config(loader_raw)
     phase_balancing_config = _parse_phase_balancing_config(loader_raw)
 
     include_failed_or_non_stop_sign_trips = dataset_raw.get(
@@ -884,7 +814,6 @@ def load_config(path: Path) -> TrainConfig:
             log_every_n_batches=max(1, int(loader_raw.get("log_every_n_batches", 10))),
             val_split=float(loader_raw["val_split"]),
             cpu_batch_size=int(loader_raw["cpu_batch_size"]),
-            turn_oversampling=turn_oversampling_config,
             phase_balancing=phase_balancing_config,
         ),
         state_inputs=state_input_config_from_metadata(raw.get("state_inputs")),
@@ -1037,16 +966,6 @@ def _build_checkpoint_metadata(
             },
         },
         "loader": {
-            "turn_oversampling": {
-                "enabled": config.loader.turn_oversampling.enabled,
-                "straight_weight": config.loader.turn_oversampling.straight_weight,
-                "light_turn_weight": config.loader.turn_oversampling.light_turn_weight,
-                "medium_turn_weight": config.loader.turn_oversampling.medium_turn_weight,
-                "sharp_turn_weight": config.loader.turn_oversampling.sharp_turn_weight,
-                "light_turn_threshold": config.loader.turn_oversampling.light_turn_threshold,
-                "medium_turn_threshold": config.loader.turn_oversampling.medium_turn_threshold,
-                "sharp_turn_threshold": config.loader.turn_oversampling.sharp_turn_threshold,
-            },
             "phase_balancing": {"enabled": config.loader.phase_balancing.enabled},
         },
         "model_state_dict": dict(model_state_dict),
@@ -1539,7 +1458,7 @@ def _control_elementwise_loss(
     for index, name in enumerate(control_target_names):
         pred_column = prediction[..., index]
         target_column = target[..., index]
-        if name == STOP_PROBABILITY:
+        if name == STOP_INTENT:
             if bool(torch.any((target_column < 0.0) | (target_column > 1.0)).item()):
                 raise ValueError("stop_intent targets must be in [0, 1]")
             with torch.autocast(device_type=prediction.device.type, enabled=False):
@@ -1831,12 +1750,6 @@ def finalize_metrics(
     control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
     aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
 ) -> MetricPayload:
-    def _group_mean(metric_names: tuple[str, ...], suffix: str) -> float | None:
-        values = [metrics[f"{name}{suffix}"] for name in metric_names if f"{name}{suffix}" in metrics]
-        if not values:
-            return None
-        return float(sum(float(value) for value in values) / len(values))
-
     batch_count = int(totals["batch_count"])
     metrics: MetricPayload = {
         "loss": _mean_or_zero(float(totals["loss_sum"]), batch_count),
@@ -1895,47 +1808,26 @@ def finalize_metrics(
         metrics["aux_mae_overall_denorm"] = _mean_or_zero(aux_denorm_abs_sum, aux_denorm_count)
         metrics["aux_overall_mae_denorm"] = float(metrics["aux_mae_overall_denorm"])
 
-    longitudinal_targets = tuple(
-        name for name in aux_target_names if name in {"future_speed", "future_speed_delta"}
-    )
-    if longitudinal_targets:
-        longitudinal_norm = _group_mean(longitudinal_targets, "_mae")
-        if longitudinal_norm is not None:
-            metrics["longitudinal_aux_mae"] = longitudinal_norm
-        longitudinal_denorm = _group_mean(longitudinal_targets, "_mae_denorm")
-        if longitudinal_denorm is not None:
-            metrics["longitudinal_aux_mae_denorm"] = longitudinal_denorm
-
-    lateral_targets = tuple(
-        name for name in aux_target_names if name in {"future_yaw_delta", "future_yaw_rate"}
-    )
-    if lateral_targets:
-        lateral_norm = _group_mean(lateral_targets, "_mae")
-        if lateral_norm is not None:
-            metrics["lateral_aux_mae"] = lateral_norm
-        lateral_denorm = _group_mean(lateral_targets, "_mae_denorm")
-        if lateral_denorm is not None:
-            metrics["lateral_aux_mae_denorm"] = lateral_denorm
     return metrics
 
 
-def compute_drive_score(
+def compute_stop_sign_score(
     train_metrics: MetricPayload,
     val_metrics: MetricPayload,
     *,
-    control_mae_weight: float = DRIVE_SCORE_CONTROL_MAE_WEIGHT,
-    generalization_gap_weight: float = DRIVE_SCORE_GENERALIZATION_GAP_WEIGHT,
+    motion_plan_mae_weight: float = STOP_SIGN_SCORE_MOTION_PLAN_MAE_WEIGHT,
+    generalization_gap_weight: float = STOP_SIGN_SCORE_GENERALIZATION_GAP_WEIGHT,
 ) -> float:
     val_control_loss = float(val_metrics["control_loss"])
     val_control_mae = float(val_metrics["control_mae_overall"])
     train_control_mae = float(train_metrics["control_mae_overall"])
     generalization_gap = max(0.0, val_control_mae - train_control_mae)
-    return val_control_loss + (control_mae_weight * val_control_mae) + (generalization_gap_weight * generalization_gap)
+    return val_control_loss + (motion_plan_mae_weight * val_control_mae) + (generalization_gap_weight * generalization_gap)
 
 
-def attach_drive_score(train_metrics: MetricPayload, val_metrics: MetricPayload) -> float:
-    score = compute_drive_score(train_metrics, val_metrics)
-    val_metrics["drive_score"] = score
+def attach_stop_sign_score(train_metrics: MetricPayload, val_metrics: MetricPayload) -> float:
+    score = compute_stop_sign_score(train_metrics, val_metrics)
+    val_metrics["stop_sign_score"] = score
     val_metrics["control_mae_generalization_gap"] = max(
         0.0,
         float(val_metrics["control_mae_overall"]) - float(train_metrics["control_mae_overall"]),
@@ -1975,41 +1867,6 @@ def _format_state_input_values(
         definition = state_input_definition(key)
         pairs.append(f"{definition.camel_key}={round(float(sample0[index]), 4)}")
     return pairs
-
-
-def _navigation_choice_from_state_inputs(
-    state_inputs: Tensor,
-    state_input_names: tuple[str, ...],
-) -> str:
-    if state_inputs.ndim < 2 or not state_input_names:
-        return "unavailable"
-    sample0 = state_inputs[0].detach().float().cpu().tolist()
-    value_by_key = {
-        key: float(sample0[index])
-        for index, key in enumerate(state_input_names)
-        if index < len(sample0)
-    }
-    nav_candidates = (
-        (ROUTE_DIRECTION_UNKNOWN_KEY, "unknown"),
-        (ROUTE_DIRECTION_KEEP_STRAIGHT_KEY, "keep_straight"),
-        (ROUTE_DIRECTION_TURN_LEFT_KEY, "turn_left"),
-        (ROUTE_DIRECTION_TURN_RIGHT_KEY, "turn_right"),
-        (ROUTE_DIRECTION_REROUTE_WRONG_WAY_KEY, "reroute_wrong_way"),
-    )
-    available = [
-        (label, value_by_key[key])
-        for key, label in nav_candidates
-        if key in value_by_key
-    ]
-    if not available:
-        return "unavailable"
-    best_label, best_value = max(available, key=lambda item: item[1])
-    if best_value <= 0.0:
-        return "inactive"
-    active = [label for label, value in available if value >= 0.5]
-    if len(active) > 1:
-        return "|".join(active)
-    return best_label
 
 
 def _round_nested(values: Any, digits: int = 4) -> Any:
@@ -2066,10 +1923,8 @@ def format_first_batch_predictions(
     if batch_index is not None:
         header += f" batch={batch_index}"
     state_input_pairs = _format_state_input_values(state_inputs, state_input_names)
-    navigation_choice = _navigation_choice_from_state_inputs(state_inputs, state_input_names)
     return "\n".join((
         header,
-        f"navigation_choice: {navigation_choice}",
         "state_inputs_sample0: " + (" ".join(state_input_pairs) if state_input_pairs else "<none>"),
         _format_named_horizon_section("pred_controls:", pred_controls, control_target_names, future_offsets),
         _format_named_horizon_section("target_controls:", target_controls, control_target_names, future_offsets),
@@ -2586,16 +2441,6 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             "val_persistent_workers": context.config.loader.val_persistent_workers,
             "cpu_batch_size": context.config.loader.cpu_batch_size,
             "log_every_n_batches": context.config.loader.log_every_n_batches,
-            "turn_oversampling": {
-                "enabled": context.config.loader.turn_oversampling.enabled,
-                "straight_weight": context.config.loader.turn_oversampling.straight_weight,
-                "light_turn_weight": context.config.loader.turn_oversampling.light_turn_weight,
-                "medium_turn_weight": context.config.loader.turn_oversampling.medium_turn_weight,
-                "sharp_turn_weight": context.config.loader.turn_oversampling.sharp_turn_weight,
-                "light_turn_threshold": context.config.loader.turn_oversampling.light_turn_threshold,
-                "medium_turn_threshold": context.config.loader.turn_oversampling.medium_turn_threshold,
-                "sharp_turn_threshold": context.config.loader.turn_oversampling.sharp_turn_threshold,
-            },
             "phase_balancing": {"enabled": context.config.loader.phase_balancing.enabled},
         },
         "epochs": [],
@@ -2621,7 +2466,7 @@ def prepare_model(
     horizon_decoder: HorizonDecoderConfig,
     state_input_config: StateInputConfig,
 ) -> tuple[Module, torch.device]:
-    model = DrivingCNN(
+    model = StopSignTemporalPlanner(
         frame_count=frame_count,
         telemetry_feature_dim=telemetry_feature_dim,
         telemetry_hidden_dim=telemetry_hidden_dim,
@@ -2664,7 +2509,7 @@ def prepare_model(
         "(likely missing sm_120 support). Falling back to CPU."
     )
     fallback_device = torch.device("cpu")
-    fallback_model = DrivingCNN(
+    fallback_model = StopSignTemporalPlanner(
         frame_count=frame_count,
         telemetry_feature_dim=telemetry_feature_dim,
         telemetry_hidden_dim=telemetry_hidden_dim,
@@ -2832,7 +2677,7 @@ def _supported_metric_names(
     aux_target_names: tuple[str, ...],
 ) -> set[str]:
     names = {
-        "drive_score",
+        "stop_sign_score",
         "loss",
         "val_loss",
         "control_loss",
@@ -2998,7 +2843,7 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
     memory_snapshots["val_end"] = _memory_snapshot(context.device)
     print(_format_memory_snapshot("memory val_end", memory_snapshots["val_end"]))
     val_metrics["eval_model"] = "ema" if (context.ema is not None and context.config.training.ema.enabled) else "model"
-    attach_drive_score(train_metrics, val_metrics)
+    attach_stop_sign_score(train_metrics, val_metrics)
     return EpochResult(
         epoch_index=epoch_index,
         train_metrics=train_metrics,
@@ -3108,7 +2953,7 @@ def print_epoch_summary(
         f"epoch={epoch_result.epoch_index}",
         f"train_loss={float(epoch_result.train_metrics['loss']):.6f}",
         f"val_loss={float(epoch_result.val_metrics['val_loss']):.6f}",
-        f"drive_score={float(epoch_result.val_metrics['drive_score']):.6f}",
+        f"stop_sign_score={float(epoch_result.val_metrics['stop_sign_score']):.6f}",
         f"train_control_mae={float(epoch_result.train_metrics['control_mae_overall']):.6f}",
         f"val_control_mae={float(epoch_result.val_metrics['control_mae_overall']):.6f}",
         f"train_aux_mae={float(epoch_result.train_metrics['aux_mae_overall']):.6f}",
@@ -3275,7 +3120,7 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
             "metrics": {
                 "trainLoss": float(epoch_result.train_metrics["loss"]),
                 "valLoss": float(epoch_result.val_metrics["val_loss"]),
-                "driveScore": float(epoch_result.val_metrics["drive_score"]),
+                "stopSignScore": float(epoch_result.val_metrics["stop_sign_score"]),
                 "valControlMae": float(epoch_result.val_metrics["control_mae_overall"]),
             },
         })

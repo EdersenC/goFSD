@@ -34,7 +34,7 @@ ALLOWED_LOSS_WEIGHT_KEYS = [
 ]
 
 ALLOWED_EARLY_STOPPING_METRICS = [
-    "drive_score",
+    "stop_sign_score",
     "val_loss",
     "control_loss",
     "aux_loss",
@@ -65,7 +65,6 @@ JOB_SPEC_KEYS = (
     "trainRunIds",
     "valRunIds",
     "lossWeights",
-    "turnOversampling",
     "stateInputs",
 )
 
@@ -250,19 +249,6 @@ def _normalize_runtime_path(raw_value: str) -> Path:
     return Path(cleaned)
 
 
-def _normalize_turn_oversampling_thresholds(raw_map: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(raw_map)
-    light = normalized.get("light_turn_threshold")
-    medium = normalized.get("medium_turn_threshold")
-    sharp = normalized.get("sharp_turn_threshold")
-    if isinstance(light, (int, float)) and isinstance(medium, (int, float)) and float(medium) < float(light):
-        normalized["medium_turn_threshold"] = float(light)
-        medium = float(light)
-    if isinstance(medium, (int, float)) and isinstance(sharp, (int, float)) and float(sharp) < float(medium):
-        normalized["sharp_turn_threshold"] = float(medium)
-    return normalized
-
-
 def _resolve_jobs_dir(config_path: Path) -> Path:
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     backend_training = raw.get("backend", {}).get("training", {})
@@ -305,7 +291,6 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
     loss_weights = training_raw.get("target_loss_weights")
     if not isinstance(loss_weights, dict):
         loss_weights = training_raw.get("loss_weights", {})
-    turn_oversampling = loader_raw.get("turn_oversampling", {})
     optimizer_raw = training_raw.get("optimizer", {}) if isinstance(training_raw.get("optimizer"), dict) else {}
     scheduler_raw = training_raw.get("scheduler", {}) if isinstance(training_raw.get("scheduler"), dict) else {}
     ema_raw = training_raw.get("ema", {}) if isinstance(training_raw.get("ema"), dict) else {}
@@ -341,7 +326,6 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
         }
         if definition.default_cap is not None:
             payload["cap"] = float(spec.cap if spec.cap is not None else definition.default_cap)
-        payload["plannerFusedOnly"] = bool(definition.planner_fused_only)
         state_inputs_payload[definition.camel_key] = payload
     return {
         "configPath": str(config_path),
@@ -352,7 +336,10 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
         "learningRate": learning_rate,
         "lossFunction": str(training_raw.get("loss_function", "smooth_l1") or "smooth_l1"),
         "smoothL1Beta": float(training_raw.get("smooth_l1_beta", 0.1) or 0.1),
-        "earlyStoppingMetric": str(training_raw.get("early_stopping_metric", "drive_score") or "drive_score"),
+        "earlyStoppingMetric": str(
+            training_raw.get("early_stopping_metric", "stop_sign_score")
+            or "stop_sign_score"
+        ),
         "optimizer": {
             "name": optimizer_name,
             "weightDecay": optimizer_weight_decay,
@@ -372,16 +359,6 @@ def _load_page_defaults(config_path: Path, jobs_dir: Path) -> dict[str, Any]:
         "trainRunIds": [str(value) for value in dataset_raw.get("train_run_ids", []) if str(value).strip()],
         "valRunIds": [str(value) for value in dataset_raw.get("val_run_ids", []) if str(value).strip()],
         "lossWeights": {key: float_from_map(loss_weights, key, 1.0) for key in ALLOWED_LOSS_WEIGHT_KEYS},
-        "turnOversampling": {
-            "enabled": bool(turn_oversampling.get("enabled", False)),
-            "straight_weight": float(turn_oversampling.get("straight_weight", 1.0) or 1.0),
-            "light_turn_weight": float(turn_oversampling.get("light_turn_weight", 1.5) or 1.5),
-            "medium_turn_weight": float(turn_oversampling.get("medium_turn_weight", 2.5) or 2.5),
-            "sharp_turn_weight": float(turn_oversampling.get("sharp_turn_weight", 4.0) or 4.0),
-            "light_turn_threshold": float(turn_oversampling.get("light_turn_threshold", 0.05) or 0.05),
-            "medium_turn_threshold": float(turn_oversampling.get("medium_turn_threshold", 0.15) or 0.15),
-            "sharp_turn_threshold": float(turn_oversampling.get("sharp_turn_threshold", 0.30) or 0.30),
-        },
         "stateInputs": state_inputs_payload,
         "stateInputDefinitions": state_input_definitions_metadata(),
         "allowedLossWeightKeys": list(ALLOWED_LOSS_WEIGHT_KEYS),
@@ -406,7 +383,15 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
     for spec in specs:
         if not isinstance(spec, dict):
             raise TrainingJobRequestError("each training job must be a JSON object")
-        removed_keys = sorted(set(spec) & {"consistency", "yawLossWeighting", "yaw_loss_weighting"})
+        removed_keys = sorted(
+            set(spec)
+            & {
+                "consistency",
+                "turnOversampling",
+                "yawLossWeighting",
+                "yaw_loss_weighting",
+            }
+        )
         if removed_keys:
             raise TrainingJobRequestError(
                 "removed training job field(s): "
@@ -498,26 +483,6 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
                 raise TrainingJobRequestError(f"{field_name} must be a positive finite number")
             return float(raw_value)
 
-        def normalize_toggle_map(raw_map: Any, field_name: str) -> dict[str, Any]:
-            if raw_map is None:
-                return {}
-            if not isinstance(raw_map, dict):
-                raise TrainingJobRequestError(f"{field_name} must be an object map")
-            normalized: dict[str, Any] = {}
-            for key, value in raw_map.items():
-                key_name = str(key).strip()
-                if not key_name:
-                    raise TrainingJobRequestError(f"{field_name} contains an invalid key")
-                if key_name == "enabled":
-                    normalized[key_name] = normalize_bool(value, f"{field_name}.enabled")
-                else:
-                    normalized[key_name] = normalize_optional_positive_float(value, f"{field_name}.{key_name}")
-            return normalized
-
-        def normalize_turn_oversampling(raw_map: Any) -> dict[str, Any]:
-            normalized = normalize_toggle_map(raw_map, "turnOversampling")
-            return _normalize_turn_oversampling_thresholds(normalized)
-
         def normalize_state_inputs(raw_map: Any) -> dict[str, Any]:
             if raw_map is None:
                 return {}
@@ -579,7 +544,6 @@ def _parse_job_specs(payload: Any) -> list[dict[str, Any]]:
             "trainRunIds": train_run_ids,
             "valRunIds": val_run_ids,
             "lossWeights": loss_weight_overrides,
-            "turnOversampling": normalize_turn_oversampling(spec.get("turnOversampling")),
             "stateInputs": normalize_state_inputs(spec.get("stateInputs")),
         })
     return normalized_specs
@@ -804,7 +768,6 @@ class TrainingManager:
             "trainRunIds": list(spec["trainRunIds"]) if spec["trainRunIds"] is not None else None,
             "valRunIds": list(spec["valRunIds"]) if spec["valRunIds"] is not None else None,
             "lossWeights": dict(spec["lossWeights"]),
-            "turnOversampling": dict(spec["turnOversampling"]),
             "stateInputs": copy.deepcopy(spec["stateInputs"]),
             "createdAt": created_at,
             "queueOrder": time.time_ns() * 1_000 + index,
@@ -837,7 +800,6 @@ class TrainingManager:
             "trainRunIds": list(job["trainRunIds"]) if job.get("trainRunIds") is not None else None,
             "valRunIds": list(job["valRunIds"]) if job.get("valRunIds") is not None else None,
             "lossWeights": dict(job.get("lossWeights") or {}),
-            "turnOversampling": dict(job.get("turnOversampling") or {}),
             "stateInputs": copy.deepcopy(job.get("stateInputs") or {}),
         }
 
@@ -1261,12 +1223,7 @@ class TrainingManager:
             training_raw.pop("loss_weights", None)
         training_raw.pop("consistency", None)
         training_raw.pop("yaw_loss_weighting", None)
-        if job.get("turnOversampling"):
-            turn_oversampling = _normalize_turn_oversampling_thresholds(dict(job["turnOversampling"]))
-            loader_raw["turn_oversampling"] = {
-                key: (bool(value) if key == "enabled" else float(value))
-                for key, value in turn_oversampling.items()
-            }
+        loader_raw.pop("turn_oversampling", None)
         if job.get("stateInputs"):
             state_input_overrides = dict(job["stateInputs"])
             for definition in STATE_INPUT_DEFINITIONS:

@@ -16,55 +16,50 @@ import (
 const (
 	datasetReportFileName = "dataset_report.json"
 	flatRangeEpsilon      = 1e-6
-	clipBoundaryEpsilon   = 1e-6
 )
 
 var trackedLabelFields = map[string]string{
-	"steer":                     "Steering",
-	"future_yaw_delta":          "future_yaw_delta",
-	"future_horizon_s":          "future_horizon_seconds",
-	"future_speed_delta":        "future_speed_delta",
-	"future_speed_delta_target": "future_speed_delta_target",
-	"future_speed":              "future_speed",
-	"future_speed_target":       "future_speed_target",
-	"current_speed":             "currentSpeed",
-	"velocity_forward":          "velocityForward",
-	"velocity_lateral":          "velocityLateral",
-	"velocity_vertical":         "velocityVertical",
-	"yaw_rate":                  "yaw_rate",
-	"gear":                      "gear",
-	"rpm":                       "rpm",
-	"engine_health":             "engineHealth",
-	"body_health":               "bodyHealth",
-	"route_distance":            "routeDistance",
-	"route_heading_err":         "routeHeadingError",
-	"route_forward":             "routeForwardDelta",
-	"route_lateral":             "routeLateralDelta",
-	"road_node_distance":        "roadNodeDistance",
-	"road_node_heading":         "roadNodeHeading",
-	"road_node_density":         "roadNodeDensity",
-	"road_lanes_fwd":            "roadLaneCountForward",
-	"road_lanes_back":           "roadLaneCountBackward",
-	"road_edge_span":            "roadEdgeSpan",
-	"nearby_vehicles":           "nearbyVehicleCount30m",
-	"nearby_peds":               "nearbyPedCount20m",
-	"lead_distance":             "leadVehicleDistance",
-	"lead_rel_speed":            "leadVehicleRelativeSpeed",
-	"lead_ttc":                  "leadVehicleTTC",
-	"lead_heading_delta":        "leadVehicleHeadingDelta",
-	"time_since_sync_ms":        "timeSinceSyncMs",
-	"time_since_chunk_ms":       "timeSinceChunkStartMs",
-	"expert_desired_speed":      "expertDesiredSpeedMps",
-	"expert_throttle":           "expertThrottle",
-	"expert_brake":              "expertBrake",
-	"expert_stop_probability":   "expertStopProbability",
-	"expert_go_probability":     "expertGoProbability",
-	"actual_acceleration":       "acceleration",
-	"actual_brake_pressure":     "brakePressureAvg",
-	"stop_line_distance":        "stopLineDistanceM",
-	"stop_longitudinal_error":   "stopSignLongitudinalErrorM",
-	"stop_lateral_error":        "stopSignLateralErrorM",
-	"stop_heading_error":        "stopSignHeadingErrorDeg",
+	"steer":                   "Steering",
+	"future_horizon_s":        "future_horizon_seconds",
+	"future_speed":            "future_speed",
+	"future_speed_target":     "future_speed_target",
+	"current_speed":           "currentSpeed",
+	"velocity_forward":        "velocityForward",
+	"velocity_lateral":        "velocityLateral",
+	"velocity_vertical":       "velocityVertical",
+	"gear":                    "gear",
+	"rpm":                     "rpm",
+	"engine_health":           "engineHealth",
+	"body_health":             "bodyHealth",
+	"route_distance":          "routeDistance",
+	"route_heading_err":       "routeHeadingError",
+	"route_forward":           "routeForwardDelta",
+	"route_lateral":           "routeLateralDelta",
+	"road_node_distance":      "roadNodeDistance",
+	"road_node_heading":       "roadNodeHeading",
+	"road_node_density":       "roadNodeDensity",
+	"road_lanes_fwd":          "roadLaneCountForward",
+	"road_lanes_back":         "roadLaneCountBackward",
+	"road_edge_span":          "roadEdgeSpan",
+	"nearby_vehicles":         "nearbyVehicleCount30m",
+	"nearby_peds":             "nearbyPedCount20m",
+	"lead_distance":           "leadVehicleDistance",
+	"lead_rel_speed":          "leadVehicleRelativeSpeed",
+	"lead_ttc":                "leadVehicleTTC",
+	"lead_heading_delta":      "leadVehicleHeadingDelta",
+	"time_since_sync_ms":      "timeSinceSyncMs",
+	"time_since_chunk_ms":     "timeSinceChunkStartMs",
+	"expert_desired_speed":    "expertDesiredSpeedMps",
+	"expert_throttle":         "expertThrottle",
+	"expert_brake":            "expertBrake",
+	"expert_stop_probability": "expertStopProbability",
+	"expert_go_probability":   "expertGoProbability",
+	"actual_acceleration":     "acceleration",
+	"actual_brake_pressure":   "brakePressureAvg",
+	"stop_line_distance":      "stopLineDistanceM",
+	"stop_longitudinal_error": "stopSignLongitudinalErrorM",
+	"stop_lateral_error":      "stopSignLateralErrorM",
+	"stop_heading_error":      "stopSignHeadingErrorDeg",
 }
 
 const (
@@ -91,18 +86,16 @@ var trackedBooleanFields = map[string]string{
 }
 
 type DatasetReportConfig struct {
-	ImageWidth                int     `json:"image_width"`
-	ImageHeight               int     `json:"image_height"`
-	WindowSize                int     `json:"window_size"`
-	FrameStride               int     `json:"frame_stride"`
-	ImageOffsets              []int   `json:"image_offsets,omitempty"`
-	TelemetryOffsets          []int   `json:"telemetry_offsets,omitempty"`
-	FutureOffsets             []int   `json:"future_offsets,omitempty"`
-	TelemetrySampleIntervalMs int     `json:"telemetry_sample_interval_ms,omitempty"`
-	SampleStride              int     `json:"sample_stride"`
-	LabelTolerance            string  `json:"label_tolerance"`
-	FutureSpeedDeltaClip      float64 `json:"future_speed_delta_clip"`
-	FutureSpeedDeltaNormalize bool    `json:"future_speed_delta_normalize"`
+	ImageWidth                int    `json:"image_width"`
+	ImageHeight               int    `json:"image_height"`
+	WindowSize                int    `json:"window_size"`
+	FrameStride               int    `json:"frame_stride"`
+	ImageOffsets              []int  `json:"image_offsets,omitempty"`
+	TelemetryOffsets          []int  `json:"telemetry_offsets,omitempty"`
+	FutureOffsets             []int  `json:"future_offsets,omitempty"`
+	TelemetrySampleIntervalMs int    `json:"telemetry_sample_interval_ms,omitempty"`
+	SampleStride              int    `json:"sample_stride"`
+	LabelTolerance            string `json:"label_tolerance"`
 }
 
 type NumericSummary struct {
@@ -120,16 +113,6 @@ type BooleanSummary struct {
 	FalseCount int     `json:"false_count"`
 	TrueRate   float64 `json:"true_rate"`
 	FalseRate  float64 `json:"false_rate"`
-}
-
-type FutureSpeedDeltaClipSummary struct {
-	ClipValue         float64 `json:"clip_value"`
-	NegativeClipCount int     `json:"negative_clip_count"`
-	PositiveClipCount int     `json:"positive_clip_count"`
-	AnyClipCount      int     `json:"any_clip_count"`
-	NegativeClipRate  float64 `json:"negative_clip_rate"`
-	PositiveClipRate  float64 `json:"positive_clip_rate"`
-	AnyClipRate       float64 `json:"any_clip_rate"`
 }
 
 type CategoricalSummary struct {
@@ -151,24 +134,23 @@ type DatasetDiversitySummary struct {
 }
 
 type DatasetReportSummary struct {
-	TripCount            int                         `json:"trip_count"`
-	CompletedTrips       int                         `json:"completed_trips"`
-	SkippedTrips         int                         `json:"skipped_trips"`
-	FailedTrips          int                         `json:"failed_trips"`
-	MissingDatasetTrips  int                         `json:"missing_dataset_trips"`
-	ZeroSampleTrips      int                         `json:"zero_sample_trips"`
-	FrameCount           int                         `json:"frame_count"`
-	SampleCount          int                         `json:"sample_count"`
-	StoppedSampleCount   int                         `json:"stopped_sample_count"`
-	MovingSampleCount    int                         `json:"moving_sample_count"`
-	StoppedSampleShare   float64                     `json:"stopped_sample_share"`
-	TripStates           map[string]int              `json:"trip_states"`
-	FlatLabelTripCounts  map[string]int              `json:"flat_label_trip_counts"`
-	LabelStats           map[string]NumericSummary   `json:"label_stats"`
-	BooleanStats         map[string]BooleanSummary   `json:"boolean_stats"`
-	FutureSpeedDeltaClip FutureSpeedDeltaClipSummary `json:"future_speed_delta_clip"`
-	Diversity            DatasetDiversitySummary     `json:"diversity"`
-	StopSignCoverage     StopSignCoverageSummary     `json:"stop_sign_coverage"`
+	TripCount           int                       `json:"trip_count"`
+	CompletedTrips      int                       `json:"completed_trips"`
+	SkippedTrips        int                       `json:"skipped_trips"`
+	FailedTrips         int                       `json:"failed_trips"`
+	MissingDatasetTrips int                       `json:"missing_dataset_trips"`
+	ZeroSampleTrips     int                       `json:"zero_sample_trips"`
+	FrameCount          int                       `json:"frame_count"`
+	SampleCount         int                       `json:"sample_count"`
+	StoppedSampleCount  int                       `json:"stopped_sample_count"`
+	MovingSampleCount   int                       `json:"moving_sample_count"`
+	StoppedSampleShare  float64                   `json:"stopped_sample_share"`
+	TripStates          map[string]int            `json:"trip_states"`
+	FlatLabelTripCounts map[string]int            `json:"flat_label_trip_counts"`
+	LabelStats          map[string]NumericSummary `json:"label_stats"`
+	BooleanStats        map[string]BooleanSummary `json:"boolean_stats"`
+	Diversity           DatasetDiversitySummary   `json:"diversity"`
+	StopSignCoverage    StopSignCoverageSummary   `json:"stop_sign_coverage"`
 }
 
 type StopSignCoverageSummary struct {
@@ -188,41 +170,40 @@ type StopSignCoverageSummary struct {
 }
 
 type TripDatasetReport struct {
-	RunID                   string                      `json:"run_id"`
-	SceneID                 string                      `json:"scene_id"`
-	SceneVariant            string                      `json:"scene_variant"`
-	SceneKey                string                      `json:"scene_key"`
-	TripName                string                      `json:"trip_name"`
-	TripDir                 string                      `json:"trip_dir"`
-	ProcessingState         string                      `json:"processing_state"`
-	ConfigFingerprint       string                      `json:"processing_config_fingerprint,omitempty"`
-	ProcessingError         string                      `json:"processing_error,omitempty"`
-	ProcessingWarning       string                      `json:"processing_warning,omitempty"`
-	FrameCount              int                         `json:"frame_count"`
-	SampleCount             int                         `json:"sample_count"`
-	MissingDataset          bool                        `json:"missing_dataset"`
-	ZeroSamples             bool                        `json:"zero_samples"`
-	ZeroSampleReasons       map[string]int              `json:"zero_sample_reasons,omitempty"`
-	TripSeed                string                      `json:"trip_seed,omitempty"`
-	WeatherType             string                      `json:"weather_type,omitempty"`
-	TimeOfDay               string                      `json:"time_of_day,omitempty"`
-	VehicleModel            string                      `json:"vehicle_model,omitempty"`
-	VehicleColor            string                      `json:"vehicle_color,omitempty"`
-	StoppedSampleCount      int                         `json:"stopped_sample_count"`
-	MovingSampleCount       int                         `json:"moving_sample_count"`
-	StoppedSampleShare      float64                     `json:"stopped_sample_share"`
-	FlatLabels              []string                    `json:"flat_labels"`
-	LabelStats              map[string]NumericSummary   `json:"label_stats"`
-	BooleanStats            map[string]BooleanSummary   `json:"boolean_stats"`
-	FutureSpeedDeltaClip    FutureSpeedDeltaClipSummary `json:"future_speed_delta_clip"`
-	Warnings                []string                    `json:"warnings,omitempty"`
-	StopSignLocationID      string                      `json:"stop_sign_location_id,omitempty"`
-	StopSignSplitGroup      string                      `json:"stop_sign_split_group,omitempty"`
-	StopSignVariationID     string                      `json:"stop_sign_variation_id,omitempty"`
-	StopSignPhaseCounts     map[string]int              `json:"stop_sign_phase_counts,omitempty"`
-	StopSignOutcomeStatus   string                      `json:"stop_sign_outcome_status,omitempty"`
-	TrainingEligible        *bool                       `json:"training_eligible,omitempty"`
-	TrainingExclusionReason string                      `json:"training_exclusion_reason,omitempty"`
+	RunID                   string                    `json:"run_id"`
+	SceneID                 string                    `json:"scene_id"`
+	SceneVariant            string                    `json:"scene_variant"`
+	SceneKey                string                    `json:"scene_key"`
+	TripName                string                    `json:"trip_name"`
+	TripDir                 string                    `json:"trip_dir"`
+	ProcessingState         string                    `json:"processing_state"`
+	ConfigFingerprint       string                    `json:"processing_config_fingerprint,omitempty"`
+	ProcessingError         string                    `json:"processing_error,omitempty"`
+	ProcessingWarning       string                    `json:"processing_warning,omitempty"`
+	FrameCount              int                       `json:"frame_count"`
+	SampleCount             int                       `json:"sample_count"`
+	MissingDataset          bool                      `json:"missing_dataset"`
+	ZeroSamples             bool                      `json:"zero_samples"`
+	ZeroSampleReasons       map[string]int            `json:"zero_sample_reasons,omitempty"`
+	TripSeed                string                    `json:"trip_seed,omitempty"`
+	WeatherType             string                    `json:"weather_type,omitempty"`
+	TimeOfDay               string                    `json:"time_of_day,omitempty"`
+	VehicleModel            string                    `json:"vehicle_model,omitempty"`
+	VehicleColor            string                    `json:"vehicle_color,omitempty"`
+	StoppedSampleCount      int                       `json:"stopped_sample_count"`
+	MovingSampleCount       int                       `json:"moving_sample_count"`
+	StoppedSampleShare      float64                   `json:"stopped_sample_share"`
+	FlatLabels              []string                  `json:"flat_labels"`
+	LabelStats              map[string]NumericSummary `json:"label_stats"`
+	BooleanStats            map[string]BooleanSummary `json:"boolean_stats"`
+	Warnings                []string                  `json:"warnings,omitempty"`
+	StopSignLocationID      string                    `json:"stop_sign_location_id,omitempty"`
+	StopSignSplitGroup      string                    `json:"stop_sign_split_group,omitempty"`
+	StopSignVariationID     string                    `json:"stop_sign_variation_id,omitempty"`
+	StopSignPhaseCounts     map[string]int            `json:"stop_sign_phase_counts,omitempty"`
+	StopSignOutcomeStatus   string                    `json:"stop_sign_outcome_status,omitempty"`
+	TrainingEligible        *bool                     `json:"training_eligible,omitempty"`
+	TrainingExclusionReason string                    `json:"training_exclusion_reason,omitempty"`
 }
 
 type SceneDatasetReport struct {
@@ -386,10 +367,6 @@ type summaryAccumulator struct {
 	vehicleModels                       *categoricalAccumulator
 	vehicleColors                       *categoricalAccumulator
 	tripSeeds                           *categoricalAccumulator
-	clipValue                           float64
-	negativeClipCount                   int
-	positiveClipCount                   int
-	anyClipCount                        int
 	stopSignClipCount                   int
 	stopSignEligibleClipCount           int
 	stopSignExcludedClipCount           int
@@ -405,7 +382,7 @@ type summaryAccumulator struct {
 	stopSignEligibleLocationPhaseCounts map[string]map[string]int
 }
 
-func newSummaryAccumulator(clipValue float64) *summaryAccumulator {
+func newSummaryAccumulator() *summaryAccumulator {
 	return &summaryAccumulator{
 		tripStates:                          make(map[string]int),
 		flatLabelTripCounts:                 make(map[string]int),
@@ -416,7 +393,6 @@ func newSummaryAccumulator(clipValue float64) *summaryAccumulator {
 		vehicleModels:                       newCategoricalAccumulator(),
 		vehicleColors:                       newCategoricalAccumulator(),
 		tripSeeds:                           newCategoricalAccumulator(),
-		clipValue:                           clipValue,
 		stopSignPhaseCounts:                 make(map[string]int),
 		stopSignLocationCounts:              make(map[string]int),
 		stopSignVariationCounts:             make(map[string]int),
@@ -475,17 +451,6 @@ func (a *summaryAccumulator) addSample(label map[string]any) {
 			a.labelStats[key] = acc
 		}
 		acc.add(value)
-		if key == "future_speed_delta" {
-			if math.Abs(value+a.clipValue) <= clipBoundaryEpsilon {
-				a.negativeClipCount++
-			}
-			if math.Abs(value-a.clipValue) <= clipBoundaryEpsilon {
-				a.positiveClipCount++
-			}
-			if math.Abs(math.Abs(value)-a.clipValue) <= clipBoundaryEpsilon {
-				a.anyClipCount++
-			}
-		}
 	}
 	for key, rawKey := range trackedBooleanFields {
 		value, ok := booleanField(label[rawKey])
@@ -565,17 +530,6 @@ func (a *summaryAccumulator) summary() DatasetReportSummary {
 		booleanStats[key] = acc.summary()
 	}
 
-	clipSummary := FutureSpeedDeltaClipSummary{ClipValue: a.clipValue}
-	if deltaStats, ok := labelStats["future_speed_delta"]; ok && deltaStats.Count > 0 {
-		denom := float64(deltaStats.Count)
-		clipSummary.NegativeClipCount = a.negativeClipCount
-		clipSummary.PositiveClipCount = a.positiveClipCount
-		clipSummary.AnyClipCount = a.anyClipCount
-		clipSummary.NegativeClipRate = float64(a.negativeClipCount) / denom
-		clipSummary.PositiveClipRate = float64(a.positiveClipCount) / denom
-		clipSummary.AnyClipRate = float64(a.anyClipCount) / denom
-	}
-
 	stoppedShare := 0.0
 	if a.sampleCount > 0 {
 		stoppedShare = float64(a.stoppedSampleCount) / float64(a.sampleCount)
@@ -613,23 +567,22 @@ func (a *summaryAccumulator) summary() DatasetReportSummary {
 	diversity.Warnings = warnings
 
 	return DatasetReportSummary{
-		TripCount:            a.tripCount,
-		CompletedTrips:       a.completedTrips,
-		SkippedTrips:         a.skippedTrips,
-		FailedTrips:          a.failedTrips,
-		MissingDatasetTrips:  a.missingDatasetTrips,
-		ZeroSampleTrips:      a.zeroSampleTrips,
-		FrameCount:           a.frameCount,
-		SampleCount:          a.sampleCount,
-		StoppedSampleCount:   a.stoppedSampleCount,
-		MovingSampleCount:    a.movingSampleCount,
-		StoppedSampleShare:   stoppedShare,
-		TripStates:           tripStates,
-		FlatLabelTripCounts:  flatTripCounts,
-		LabelStats:           labelStats,
-		BooleanStats:         booleanStats,
-		FutureSpeedDeltaClip: clipSummary,
-		Diversity:            diversity,
+		TripCount:           a.tripCount,
+		CompletedTrips:      a.completedTrips,
+		SkippedTrips:        a.skippedTrips,
+		FailedTrips:         a.failedTrips,
+		MissingDatasetTrips: a.missingDatasetTrips,
+		ZeroSampleTrips:     a.zeroSampleTrips,
+		FrameCount:          a.frameCount,
+		SampleCount:         a.sampleCount,
+		StoppedSampleCount:  a.stoppedSampleCount,
+		MovingSampleCount:   a.movingSampleCount,
+		StoppedSampleShare:  stoppedShare,
+		TripStates:          tripStates,
+		FlatLabelTripCounts: flatTripCounts,
+		LabelStats:          labelStats,
+		BooleanStats:        booleanStats,
+		Diversity:           diversity,
 		StopSignCoverage: StopSignCoverageSummary{
 			ClipCount:                           a.stopSignClipCount,
 			TrainingEligibleClipCount:           a.stopSignEligibleClipCount,
@@ -742,14 +695,14 @@ func BuildRunDatasetReport(runDir string, tripDirs []string, config DatasetRepor
 		return contexts[i].tripName < contexts[j].tripName
 	})
 
-	runSummary := newSummaryAccumulator(config.FutureSpeedDeltaClip)
+	runSummary := newSummaryAccumulator()
 	sceneAccumulators := make(map[string]*summaryAccumulator)
 	sceneDescriptors := make(map[string]SceneDatasetReport)
 	tripReports := make([]TripDatasetReport, 0, len(contexts))
 
 	runID := filepath.Base(filepath.Clean(runDir))
 	for _, ctx := range contexts {
-		report, rawLabels, err := buildTripDatasetReport(ctx, config.FutureSpeedDeltaClip)
+		report, rawLabels, err := buildTripDatasetReport(ctx)
 		if err != nil {
 			return RunDatasetReport{}, err
 		}
@@ -761,7 +714,7 @@ func BuildRunDatasetReport(runDir string, tripDirs []string, config DatasetRepor
 
 		sceneAcc := sceneAccumulators[ctx.sceneKey]
 		if sceneAcc == nil {
-			sceneAcc = newSummaryAccumulator(config.FutureSpeedDeltaClip)
+			sceneAcc = newSummaryAccumulator()
 			sceneAccumulators[ctx.sceneKey] = sceneAcc
 			sceneDescriptors[ctx.sceneKey] = SceneDatasetReport{
 				SceneID:      ctx.sceneID,
@@ -868,7 +821,7 @@ func parseSceneKey(sceneKey string) (string, string) {
 	return sceneKey[:idx], sceneKey[idx+1:]
 }
 
-func buildTripDatasetReport(ctx tripContext, futureSpeedDeltaClip float64) (TripDatasetReport, []map[string]any, error) {
+func buildTripDatasetReport(ctx tripContext) (TripDatasetReport, []map[string]any, error) {
 	statusPath := filepath.Join(ctx.tripDir, "processing.json")
 	status, err := ReadStatusFile(statusPath)
 	if err != nil {
@@ -892,7 +845,7 @@ func buildTripDatasetReport(ctx tripContext, futureSpeedDeltaClip float64) (Trip
 		metadata = loaded
 	}
 
-	acc := newSummaryAccumulator(futureSpeedDeltaClip)
+	acc := newSummaryAccumulator()
 	rawLabels := make([]map[string]any, 0, len(samples))
 	stopSignPhaseCounts := make(map[string]int)
 	stopSignLocationID := ""
@@ -999,7 +952,6 @@ func buildTripDatasetReport(ctx tripContext, futureSpeedDeltaClip float64) (Trip
 		FlatLabels:              flatLabels,
 		LabelStats:              summary.LabelStats,
 		BooleanStats:            summary.BooleanStats,
-		FutureSpeedDeltaClip:    summary.FutureSpeedDeltaClip,
 		Warnings:                warnings,
 		StopSignLocationID:      stopSignLocationID,
 		StopSignSplitGroup:      stopSignSplitGroup,

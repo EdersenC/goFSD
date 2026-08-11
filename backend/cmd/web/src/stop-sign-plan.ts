@@ -6,7 +6,7 @@ import {
     StopSignVariation,
 } from "./types";
 
-export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-plan.v1";
+export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-plan.v2";
 const VALID_WEATHER = new Set([
     "BLIZZARD", "CLEAR", "CLEARING", "CLOUDS", "EXTRASUNNY", "FOGGY", "HALLOWEEN", "NEUTRAL",
     "OVERCAST", "RAIN", "SMOG", "SNOW", "SNOWLIGHT", "THUNDER", "XMAS",
@@ -35,6 +35,7 @@ export function createStopSignEntry(index: number): StopSignPlanEntry {
         stopDistanceM: 4,
         egoCenterOffsetM: 2.5,
         startDistanceM: 45,
+        exitDistanceM: 8,
         targetSpeedMps: 8,
         dwellMs: 5000,
         attemptCount: 10,
@@ -108,6 +109,7 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     positive(errors, "stop distance", entry.stopDistanceM, 0.5, 15);
     positive(errors, "ego-center offset", entry.egoCenterOffsetM, 0.5, 8);
     positive(errors, "start distance", entry.startDistanceM, 5, 250);
+    positive(errors, "exit distance", entry.exitDistanceM, 2, 50);
     positive(errors, "target speed", entry.targetSpeedMps, 0.5, 8);
     integer(errors, "dwell", entry.dwellMs, 500, 30000);
     integer(errors, "attempt count", entry.attemptCount, 1, 50);
@@ -154,6 +156,7 @@ function validateVariation(variation: StopSignVariation): string[] {
     optionalRange(errors, "stop distance", variation.stopDistanceM, 0.5, 15);
     optionalRange(errors, "ego-center offset", variation.egoCenterOffsetM, 0.5, 8);
     optionalRange(errors, "start distance", variation.startDistanceM, 5, 250);
+    optionalRange(errors, "exit distance", variation.exitDistanceM, 2, 50);
     optionalRange(errors, "target speed", variation.targetSpeedMps, 0.5, 8);
     optionalInteger(errors, "dwell", variation.dwellMs, 500, 30000);
     optionalInteger(errors, "attempt count", variation.attemptCount, 1, 50);
