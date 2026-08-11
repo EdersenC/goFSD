@@ -1,6 +1,7 @@
 import {
     createStopSignEntry,
     createStopSignPlan,
+    createProofVariations,
     distanceBetweenPoses,
     parseStoredStopSignPlan,
     stopSignPlanStats,
@@ -17,7 +18,7 @@ assertEqual(plan.entries[0]?.id, "sign-01", "catalog staging must not mutate the
 plan.entries[0]!.signPose = {x: 120, y: -40, z: 30, heading: 90};
 plan.entries[0]!.variations.push({id: "rain", weather: "RAIN", targetSpeedMps: 6, attemptCount: 4});
 
-assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 2, jobCount: 2, attemptCount: 14}));
+assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 2, jobCount: 2, attemptCount: 7}));
 assertEqual(JSON.stringify(validateStopSignPlan(plan)), "[]");
 
 const stagedAdditional = stageStopSignCatalogLocation(plan, "gta-v-sign-0002");
@@ -31,6 +32,14 @@ assert(parsed, "v2 plan should restore");
 parsed.entries[0]!.signPose.x = 999;
 assertEqual(plan.entries[0]!.signPose.x, 120, "restored plan must not alias input poses");
 assertEqual(parseStoredStopSignPlan('{"version":"legacy"}'), null);
+
+const proofVariations = createProofVariations();
+assertEqual(proofVariations.length, 4);
+assertEqual(proofVariations[0]?.id, "clear-baseline");
+assertEqual(proofVariations[0]?.targetSpeedMps, 5);
+assertEqual(proofVariations[0]?.attemptCount, 3);
+assertEqual(proofVariations[0]?.vehicle?.model, "sultan");
+assert(proofVariations.some((variation) => variation.weather === "RAIN"), "proof set should include one visual-domain variant");
 
 const invalid = createStopSignPlan();
 invalid.entries = [createStopSignEntry(1), createStopSignEntry(1)];

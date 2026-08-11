@@ -179,6 +179,9 @@ export type ProcessingReadiness = {
     trainingEligibleTripCount: number
     trainingSampleCount: number
     trainingEligibleRunIds: string[]
+    trainingLocationCount: number
+    suggestedTrainRunIds: string[]
+    suggestedValRunIds: string[]
     trainingEligibilityErrorCount: number
     trainingReady: boolean
 };

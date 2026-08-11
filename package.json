@@ -20,6 +20,8 @@
     "data:backfill": "bash scripts/dev-backend.sh process-runs -stop-sign-only",
     "data:rebuild": "bash scripts/dev-backend.sh process-runs -stop-sign-only -dataset-only -force",
     "data:report": "bash scripts/dev-backend.sh report-runs -stop-sign-only",
+    "data:audit": "node scripts/audit-stop-sign-data.mjs",
+    "train:stop-sign": "node scripts/queue-stop-sign-training.mjs",
     "probe:stop-sign": "node scripts/stop-sign-probe.mjs"
   }
 }

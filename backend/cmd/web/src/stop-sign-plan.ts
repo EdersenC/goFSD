@@ -34,16 +34,26 @@ export function createStopSignEntry(index: number): StopSignPlanEntry {
         signPose: {x: 0, y: 0, z: 0, heading: 0},
         stopDistanceM: 4,
         egoCenterOffsetM: 2.5,
-        startDistanceM: 45,
+        startDistanceM: 35,
         exitDistanceM: 8,
-        targetSpeedMps: 8,
+        targetSpeedMps: 5,
         dwellMs: 5000,
-        attemptCount: 10,
-        weather: "CLEAR",
+        attemptCount: 3,
+        weather: "EXTRASUNNY",
         time: {hour: 12, minute: 0},
-        vehicle: {model: "adder", color: {r: 26, g: 86, b: 219}},
+        vehicle: {model: "sultan", color: {r: 26, g: 86, b: 219}},
         variations: [{id: "base"}],
     };
+}
+
+export function createProofVariations(): StopSignVariation[] {
+    const vehicle = () => ({model: "sultan", color: {r: 26, g: 86, b: 219}});
+    return [
+        {id: "clear-baseline", startDistanceM: 35, targetSpeedMps: 5, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
+        {id: "short-slow", startDistanceM: 25, targetSpeedMps: 4, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
+        {id: "long-brisk", startDistanceM: 55, targetSpeedMps: 6, attemptCount: 3, weather: "EXTRASUNNY", vehicle: vehicle()},
+        {id: "rain-approach", startDistanceM: 40, targetSpeedMps: 4.5, attemptCount: 3, weather: "RAIN", vehicle: vehicle()},
+    ];
 }
 
 export function cloneStopSignPlan(plan: StopSignPlan): StopSignPlan {

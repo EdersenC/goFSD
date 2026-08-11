@@ -65,7 +65,7 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 3. Place the setup car at the lane reference point with its heading aligned to the vehicle's intended travel direction. The catalog prop position and quaternion are navigation references, not a training pose.
 4. Select **Calibrate current sign**, then copy the accepted live pose into the desired plan entry with **Use live pose**.
 5. Set the stop-line distance, ego-center offset, approach distance, exit distance, target speed, dwell, attempts, and base environment.
-6. Add variations for weather, time, vehicle model/color, speed, distances, dwell, or attempt count. Blank variation fields inherit the entry's base values.
+6. Select **Load proof set** for the seeded clear baseline, short/slow, long/brisk, and rainy daytime variants, or add your own. Blank variation fields inherit the entry's base values.
 7. Add more physical stop-sign entries as needed, review the total signs/variations/attempts, then select **Queue collection**.
 8. Watch the fine phase labels: `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`.
 9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
@@ -92,7 +92,7 @@ signPose
 - `startPose` is the deterministic reset pose for the approach.
 - `exitPose` is the exact scripted-release waypoint beyond the sign.
 
-Derived poses are validated again at the FiveM boundary; clients cannot send contradictory geometry. The defaults are a `3.0 m` sign-to-line offset, `2.5 m` line-to-ego-center offset, `40.0 m` approach, `8.0 m` sign-to-exit distance, `8.0 m/s` target speed, and `5000 ms` dwell.
+Derived poses are validated again at the FiveM boundary; clients cannot send contradictory geometry. The workbench defaults are the proven `4.0 m` sign-to-line offset, `2.5 m` line-to-ego-center offset, `35.0 m` approach, `8.0 m` sign-to-exit distance, `5.0 m/s` target speed, and `5000 ms` dwell.
 
 ## Data and model contract
 
@@ -127,7 +127,21 @@ See [`docs/stop-sign-model-control.md`](docs/stop-sign-model-control.md) for the
 
 The checked-in [`fsd_trainer/train_config.toml`](fsd_trainer/train_config.toml) intentionally contains no run IDs or checkpoint. A fresh workspace showing zero runs and zero checkpoints is expected.
 
-Training admits successful, complete `stop-sign-goal.v1` attempts by default, balances the five behavior phases, and prevents a physical stop-sign location from appearing in both training and validation. Collect at least two independent runs across distinct locations before expecting the workbench to report training ready.
+Training admits successful, complete `stop-sign-goal.v1` attempts by default, balances the observed anchor phases, and prevents a physical stop-sign location from appearing in both training and validation. The scripted release remains present in future phase/speed labels even when the five-second future horizon leaves no release anchor rows. Collect successful clips at two distinct physical signs before expecting the workbench to report training ready.
+
+Before training, run the contract audit. It verifies every referenced RGB image, dense 50 ms telemetry ordering, frame spacing, phase/variant/location labels, horizon target alignment, and stable RGB-to-game-time offset:
+
+```bash
+npm run data:audit
+```
+
+With the full lab running, one command reconciles pending processing, chooses a location-disjoint train/validation split, and queues the job:
+
+```bash
+npm run train:stop-sign -- --epochs 150
+```
+
+Use `npm run train:stop-sign -- --dry-run` to print the exact split without starting training.
 
 Do not process or rebuild paths while a training job is actively reading them. The normal workflow is to finish collection, use **Data** to make processing current, then queue training from **Train**.
 

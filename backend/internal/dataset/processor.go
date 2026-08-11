@@ -2163,28 +2163,16 @@ func numberedFramesComplete(framesDir string, expectedCount int) bool {
 }
 
 func referencedFramesComplete(framesDir string, referenced map[string]struct{}, expectedCount int) bool {
-	if expectedCount < 0 || len(referenced) != expectedCount {
+	if expectedCount < 0 || len(referenced) > expectedCount || !numberedFramesComplete(framesDir, expectedCount) {
 		return false
 	}
-	entries, err := os.ReadDir(framesDir)
-	if err != nil {
-		return false
-	}
-	foundCount := 0
-	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) != ".jpg" {
-			continue
-		}
-		if _, ok := referenced[entry.Name()]; !ok {
-			return false
-		}
-		info, err := entry.Info()
+	for name := range referenced {
+		info, err := os.Stat(filepath.Join(framesDir, name))
 		if err != nil || !info.Mode().IsRegular() || info.Size() < 1 {
 			return false
 		}
-		foundCount++
 	}
-	return foundCount == expectedCount
+	return true
 }
 
 func readDatasetFrameReferences(path string) (int, map[string]struct{}, bool, error) {

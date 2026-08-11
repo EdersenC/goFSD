@@ -274,16 +274,17 @@ export function App() {
         if (collectionActive || inference.status.data?.active) {
             throw new Error("Stop collection or inference before training.");
         }
-        const runIds = [...new Set(readiness.trainingEligibleRunIds)].sort();
-        if (runIds.length < 2) {
-            throw new Error("Training requires at least two independent runs.");
+        const trainRunIds = [...new Set(readiness.suggestedTrainRunIds)].sort();
+        const valRunIds = [...new Set(readiness.suggestedValRunIds)].sort();
+        if (trainRunIds.length < 1 || valRunIds.length < 1) {
+            throw new Error("Training requires successful clips from at least two physical stop-sign locations.");
         }
         const spec: TrainingJobSpec = {
             name: trainingName.trim() || `stop-sign-${new Date().toISOString().slice(0, 10)}`,
             notes: "Stop-sign temporal policy: launch, approach/brake, stop/dwell, go.",
             epochs,
-            trainRunIds: runIds.slice(0, -1),
-            valRunIds: runIds.slice(-1),
+            trainRunIds,
+            valRunIds,
         };
         const result = await queueTrainingJob(spec);
         setNotice({message: `${result.jobs[0]?.name ?? spec.name} queued.`, severity: "success"});
@@ -506,7 +507,7 @@ function DataTrainingPanel({readiness, processingActive, trainingName, epochs, a
                     <Chip size="small" color={readiness?.trainingReady ? "success" : "default"} label={readiness?.trainingReady ? "ready" : "not ready"} />
                 </Stack>
                 <Box sx={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 1, my: 2}}>
-                    <DataMetric label="Runs" value={readiness?.trainingEligibleRunIds.length ?? 0} />
+                    <DataMetric label="Locations" value={readiness?.trainingLocationCount ?? 0} />
                     <DataMetric label="Trips" value={readiness?.trainingEligibleTripCount ?? 0} />
                     <DataMetric label="Samples" value={readiness?.trainingSampleCount ?? 0} />
                 </Box>

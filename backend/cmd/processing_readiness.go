@@ -31,6 +31,9 @@ type processingReadinessSummary struct {
 	TrainingEligibleTripCount int      `json:"trainingEligibleTripCount"`
 	TrainingSampleCount       int      `json:"trainingSampleCount"`
 	TrainingEligibleRunIDs    []string `json:"trainingEligibleRunIds"`
+	TrainingLocationCount     int      `json:"trainingLocationCount"`
+	SuggestedTrainRunIDs      []string `json:"suggestedTrainRunIds"`
+	SuggestedValRunIDs        []string `json:"suggestedValRunIds"`
 	TrainingEligibilityErrors int      `json:"trainingEligibilityErrorCount"`
 	TrainingReady             bool     `json:"trainingReady"`
 }
@@ -40,6 +43,7 @@ type processingRunReadiness struct {
 	currentTripCount  int
 	eligibleTripCount int
 	eligibilityError  bool
+	locationKeys      map[string]struct{}
 }
 
 type trainingStopSignMetadata struct {
@@ -108,6 +112,8 @@ func buildProcessingReadinessSummary(
 		Scope:                  "all",
 		ReadyRunIDs:            make([]string, 0),
 		TrainingEligibleRunIDs: make([]string, 0),
+		SuggestedTrainRunIDs:   make([]string, 0),
+		SuggestedValRunIDs:     make([]string, 0),
 	}
 	if stopSignOnly {
 		summary.Scope = "stop-sign-temporal-v1"
@@ -156,7 +162,7 @@ func buildProcessingReadinessSummary(
 		}
 		summary.CurrentTripCount++
 		run.currentTripCount++
-		eligible, metadataValid := trainingStopSignTripEligible(tripDir)
+		eligible, metadataValid, locationKey := trainingStopSignTripEligible(tripDir)
 		if !metadataValid {
 			summary.TrainingEligibilityErrors++
 			run.eligibilityError = true
@@ -172,6 +178,10 @@ func buildProcessingReadinessSummary(
 		summary.TrainingEligibleTripCount++
 		summary.TrainingSampleCount += status.SampleCount
 		run.eligibleTripCount++
+		if run.locationKeys == nil {
+			run.locationKeys = make(map[string]struct{})
+		}
+		run.locationKeys[locationKey] = struct{}{}
 	}
 	for runID, run := range runReadiness {
 		if run.tripCount == 0 || run.currentTripCount != run.tripCount {
@@ -184,25 +194,27 @@ func buildProcessingReadinessSummary(
 	}
 	sort.Strings(summary.ReadyRunIDs)
 	sort.Strings(summary.TrainingEligibleRunIDs)
-	summary.TrainingReady = len(summary.TrainingEligibleRunIDs) >= 2
+	summary.SuggestedTrainRunIDs, summary.SuggestedValRunIDs, summary.TrainingLocationCount =
+		buildDisjointTrainingSplit(runReadiness)
+	summary.TrainingReady = len(summary.SuggestedTrainRunIDs) > 0 && len(summary.SuggestedValRunIDs) > 0
 	summary.MissingDatasetCount = summary.SelectedTripCount - summary.SelectedDatasetCount
 	summary.UnreadyDatasetCount = summary.SelectedDatasetCount - summary.CurrentTripCount
 	return summary, nil
 }
 
-func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid bool) {
+func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid bool, locationKey string) {
 	body, err := os.ReadFile(filepath.Join(tripDir, "metadata.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return false, true
+		return false, true, ""
 	}
 	if err != nil {
-		return false, false
+		return false, false, ""
 	}
 	var metadata trainingStopSignMetadata
 	if err := json.Unmarshal(body, &metadata); err != nil {
-		return false, false
+		return false, false, ""
 	}
-	return strings.EqualFold(strings.TrimSpace(metadata.SceneID), "stop-sign") &&
+	eligible = strings.EqualFold(strings.TrimSpace(metadata.SceneID), "stop-sign") &&
 		strings.EqualFold(strings.TrimSpace(metadata.SceneVariant), "temporal-v1") &&
 		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Task), "stop-sign") &&
 		strings.EqualFold(strings.TrimSpace(metadata.StopSignGoal.Contract), "stop-sign-goal.v1") &&
@@ -211,7 +223,64 @@ func trainingStopSignTripEligible(tripDir string) (eligible bool, metadataValid 
 		finiteTrainingStopSignPose(metadata.StopSignGoal.EgoStopPose) &&
 		finiteTrainingStopSignPose(metadata.StopSignGoal.StartPose) &&
 		metadata.StopSignOutcome.Success &&
-		strings.EqualFold(strings.TrimSpace(metadata.StopSignOutcome.Status), "succeeded"), true
+		strings.EqualFold(strings.TrimSpace(metadata.StopSignOutcome.Status), "succeeded")
+	if !eligible {
+		return false, true, ""
+	}
+	return true, true, trainingStopSignLocationKey(metadata.StopSignGoal.SignPose)
+}
+
+func trainingStopSignLocationKey(pose *trainingStopSignPose) string {
+	heading := math.Mod(*pose.Heading, 360)
+	if heading < 0 {
+		heading += 360
+	}
+	return fmt.Sprintf("sign:%.2f:%.2f:%.2f:%.1f", *pose.X, *pose.Y, *pose.Z, heading)
+}
+
+func buildDisjointTrainingSplit(runs map[string]*processingRunReadiness) (trainRunIDs, valRunIDs []string, locationCount int) {
+	eligibleRuns := make(map[string]*processingRunReadiness)
+	locations := make(map[string]struct{})
+	for runID, run := range runs {
+		if run.tripCount == 0 || run.currentTripCount != run.tripCount || run.eligibleTripCount == 0 || run.eligibilityError {
+			continue
+		}
+		eligibleRuns[runID] = run
+		for locationKey := range run.locationKeys {
+			locations[locationKey] = struct{}{}
+		}
+	}
+	locationCount = len(locations)
+	locationKeys := make([]string, 0, len(locations))
+	for locationKey := range locations {
+		locationKeys = append(locationKeys, locationKey)
+	}
+	sort.Strings(locationKeys)
+
+	for _, validationLocation := range locationKeys {
+		candidateTrain := make([]string, 0)
+		candidateVal := make([]string, 0)
+		for runID, run := range eligibleRuns {
+			_, containsValidationLocation := run.locationKeys[validationLocation]
+			switch {
+			case len(run.locationKeys) == 1 && containsValidationLocation:
+				candidateVal = append(candidateVal, runID)
+			case !containsValidationLocation:
+				candidateTrain = append(candidateTrain, runID)
+			}
+		}
+		if len(candidateTrain) == 0 || len(candidateVal) == 0 {
+			continue
+		}
+		sort.Strings(candidateTrain)
+		sort.Strings(candidateVal)
+		if len(candidateTrain) > len(trainRunIDs) ||
+			(len(candidateTrain) == len(trainRunIDs) && (len(valRunIDs) == 0 || len(candidateVal) < len(valRunIDs))) {
+			trainRunIDs = candidateTrain
+			valRunIDs = candidateVal
+		}
+	}
+	return trainRunIDs, valRunIDs, locationCount
 }
 
 func finiteTrainingStopSignPose(pose *trainingStopSignPose) bool {

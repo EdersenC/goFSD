@@ -184,7 +184,7 @@ func TestProcessingReadinessRequiresTwoIndependentEligibleRunsForTraining(t *tes
 	writeCurrentProcessingFixture(t, firstTrip, config, processor, 3)
 	writeCurrentProcessingFixture(t, secondTrip, config, processor, 5)
 	writeSuccessfulStopSignMetadataFixture(t, firstTrip)
-	writeSuccessfulStopSignMetadataFixture(t, secondTrip)
+	writeSuccessfulStopSignMetadataFixtureAt(t, secondTrip, 101)
 
 	summary, err := buildProcessingReadinessSummary(runsRoot, true, processor)
 	if err != nil {
@@ -196,6 +196,29 @@ func TestProcessingReadinessRequiresTwoIndependentEligibleRunsForTraining(t *tes
 	if !reflect.DeepEqual(summary.TrainingEligibleRunIDs, []string{"run-a", "run-b"}) ||
 		!reflect.DeepEqual(summary.ReadyRunIDs, []string{"run-a", "run-b"}) {
 		t.Fatalf("ready run ids should be stable and sorted: %+v", summary)
+	}
+	if summary.TrainingLocationCount != 2 || len(summary.SuggestedTrainRunIDs) != 1 || len(summary.SuggestedValRunIDs) != 1 {
+		t.Fatalf("training split must isolate physical stop locations: %+v", summary)
+	}
+}
+
+func TestProcessingReadinessRejectsRunOnlySplitAtOnePhysicalLocation(t *testing.T) {
+	runsRoot := t.TempDir()
+	config := capture.DefaultDatasetConfig()
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(config)...)
+	for _, runID := range []string{"run-a", "run-b"} {
+		tripDir := filepath.Join(runsRoot, runID, stopSignSceneFolder, "trip-000")
+		writeCurrentProcessingFixture(t, tripDir, config, processor, 3)
+		writeSuccessfulStopSignMetadataFixture(t, tripDir)
+	}
+
+	summary, err := buildProcessingReadinessSummary(runsRoot, true, processor)
+	if err != nil {
+		t.Fatalf("buildProcessingReadinessSummary: %v", err)
+	}
+	if summary.TrainingReady || summary.TrainingLocationCount != 1 ||
+		len(summary.SuggestedTrainRunIDs) != 0 || len(summary.SuggestedValRunIDs) != 0 {
+		t.Fatalf("two runs at one location must not be presented as a valid generalization split: %+v", summary)
 	}
 }
 
@@ -386,11 +409,16 @@ func writeCurrentProcessingFixture(
 
 func writeSuccessfulStopSignMetadataFixture(t *testing.T, tripDir string) {
 	t.Helper()
+	writeSuccessfulStopSignMetadataFixtureAt(t, tripDir, 1)
+}
+
+func writeSuccessfulStopSignMetadataFixtureAt(t *testing.T, tripDir string, signX float64) {
+	t.Helper()
 	writeCommandJSONFile(t, filepath.Join(tripDir, "metadata.json"), map[string]any{
 		"sceneId": "stop-sign", "sceneVariant": "temporal-v1",
 		"stopSignGoal": map[string]any{
 			"task": "stop-sign", "contract": "stop-sign-goal.v1",
-			"signPose":     map[string]any{"x": 1, "y": 2, "z": 3, "heading": 4},
+			"signPose":     map[string]any{"x": signX, "y": 2, "z": 3, "heading": 4},
 			"stopLinePose": map[string]any{"x": 1, "y": 0, "z": 3, "heading": 4},
 			"egoStopPose":  map[string]any{"x": 1, "y": -2.5, "z": 3, "heading": 4},
 			"startPose":    map[string]any{"x": 1, "y": -42.5, "z": 3, "heading": 4},

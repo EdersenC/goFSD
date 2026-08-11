@@ -18,7 +18,7 @@ import {
     Typography,
 } from "@mui/material";
 import {useMemo} from "react";
-import {createStopSignEntry, stopSignPlanStats, validateStopSignPlan} from "../stop-sign-plan";
+import {createProofVariations, createStopSignEntry, stopSignPlanStats, validateStopSignPlan} from "../stop-sign-plan";
 import type {Pose, StopSignPlan, StopSignPlanEntry, StopSignVariation} from "../types";
 
 type Props = {
@@ -191,13 +191,18 @@ function StopSignEntryEditor({entry, index, onChange, onRemove, onApplyCalibrati
                         <Typography sx={{fontWeight: 800}}>Variants</Typography>
                         <Typography variant="caption" color="text.secondary">Blank fields inherit the base run.</Typography>
                     </Box>
-                    <Button
-                        size="small"
-                        startIcon={<AddRounded />}
-                        onClick={() => onChange({...entry, variations: [...entry.variations, {id: `variation-${entry.variations.length + 1}`}]})}
-                    >
-                        Add variation
-                    </Button>
+                    <Stack direction="row" sx={{gap: 1}}>
+                        <Button size="small" color="secondary" onClick={() => onChange({...entry, variations: createProofVariations()})}>
+                            Load proof set
+                        </Button>
+                        <Button
+                            size="small"
+                            startIcon={<AddRounded />}
+                            onClick={() => onChange({...entry, variations: [...entry.variations, {id: `variation-${entry.variations.length + 1}`}]})}
+                        >
+                            Add variation
+                        </Button>
+                    </Stack>
                 </Stack>
                 <Stack sx={{gap: 1, mt: 1}}>
                     {entry.variations.map((variation, variationIndex) => (

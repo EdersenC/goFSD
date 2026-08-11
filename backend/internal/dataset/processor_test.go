@@ -822,6 +822,27 @@ func TestTripOutputsCurrentAcceptsExplicitCompletedZeroSampleOutputs(t *testing.
 	}
 }
 
+func TestTripOutputsCurrentAcceptsCompleteInspectionFramesBeyondTrainingReferences(t *testing.T) {
+	processor := NewProcessor()
+	tripDir := t.TempDir()
+	writeCompletedProcessingFixture(t, tripDir, processor, 3, 1)
+
+	datasetPath := filepath.Join(tripDir, "dataset.jsonl")
+	if err := os.WriteFile(datasetPath, []byte(`{"frame_paths":["frames/000002.jpg"]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write sparse training references: %v", err)
+	}
+	if !processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("complete stop-sign inspection frames may exceed the subset referenced by training rows")
+	}
+
+	if err := os.Remove(filepath.Join(tripDir, "frames", "000003.jpg")); err != nil {
+		t.Fatalf("remove unreferenced inspection frame: %v", err)
+	}
+	if processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("a missing inspection frame must still invalidate the published output")
+	}
+}
+
 func TestValidateFrameSetRejectsTruncationAndDimensionDrift(t *testing.T) {
 	tripDir := t.TempDir()
 	framesDir := filepath.Join(tripDir, "frames")
