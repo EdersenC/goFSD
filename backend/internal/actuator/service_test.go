@@ -434,6 +434,7 @@ steering_profile = [
   { wheel_steer = 0.0, command = 0.0 },
   { wheel_steer = 1.0, command = 0.8 },
 ]
+straight_approach_only = true
 speed_kp = 0.5
 plan_timeout = '350ms'
 telemetry_timeout = '200ms'
@@ -451,7 +452,7 @@ expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
 	if cfg.ParkingCalibration.Verified || cfg.ParkingCalibration.VehicleModelHash != 0 {
 		t.Fatalf("expected the placeholder calibration to remain fail-closed, got=%+v", cfg.ParkingCalibration)
 	}
-	if cfg.TickHz != 60 || cfg.ParkingController.SpeedKp != 0.5 || cfg.ParkingController.SteeringProfile[0].Command != -0.8 {
+	if cfg.TickHz != 60 || !cfg.ParkingController.StraightApproachOnly || cfg.ParkingController.SpeedKp != 0.5 || cfg.ParkingController.SteeringProfile[0].Command != -0.8 {
 		t.Fatalf("unexpected parsed parking controller config: %+v", cfg)
 	}
 	if cfg.ParkingPlanTimeout != 350*time.Millisecond || cfg.ParkingTelemetryTimeout != 200*time.Millisecond || cfg.ParkingEstimatedActuationLatency != 40*time.Millisecond {
@@ -506,8 +507,11 @@ func TestParkingSetpointPlanRunsCalibratedFeedbackController(t *testing.T) {
 	if applied.Applied.Throttle <= 0 || applied.Applied.Brake != 0 {
 		t.Fatalf("expected mutually exclusive positive speed effort, got=%+v", applied.Applied)
 	}
-	if applied.Applied.Steer <= 0 || applied.Applied.Steer > 1 {
-		t.Fatalf("expected bounded calibrated steering output, got=%+v", applied.Applied)
+	if applied.Applied.Steer >= 0 || applied.Applied.Steer < -1 {
+		t.Fatalf("expected straight-mode feedback to center positive measured steering, got=%+v", applied.Applied)
+	}
+	if applied.Target.Parking.ControllerOutput.SteeringFeedForward != 0 {
+		t.Fatalf("expected straight mode to ignore model steering feed-forward, got=%+v", applied.Target.Parking)
 	}
 	if applied.ParkingController.LastPlanAppliedID != 1 || applied.LastApplyAttemptedPlanID != 1 {
 		t.Fatalf("expected exact plan receipt through controller apply, got=%+v", applied)

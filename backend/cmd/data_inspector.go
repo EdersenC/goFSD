@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	datasetproc "awesomeProject/internal/dataset"
 )
 
 const (
@@ -38,10 +40,13 @@ type inspectorSceneSummary struct {
 }
 
 type inspectorTripSummary struct {
-	TripName           string `json:"tripName"`
-	TripIndex          int    `json:"tripIndex"`
-	RawAvailable       bool   `json:"rawAvailable"`
-	ProcessedAvailable bool   `json:"processedAvailable"`
+	TripName                    string `json:"tripName"`
+	TripIndex                   int    `json:"tripIndex"`
+	RawAvailable                bool   `json:"rawAvailable"`
+	ProcessedAvailable          bool   `json:"processedAvailable"`
+	ProcessingState             string `json:"processingState"`
+	ProcessingError             string `json:"processingError,omitempty"`
+	ProcessingConfigFingerprint string `json:"processingConfigFingerprint,omitempty"`
 }
 
 type inspectorFieldInfo struct {
@@ -71,13 +76,16 @@ type inspectorTripSelection struct {
 	tripDir      string
 }
 
-func registerDataInspectorHandlers(mux *http.ServeMux, runsRoot string) {
+func registerDataInspectorHandlers(mux *http.ServeMux, runsRoot string, processor *datasetproc.Processor) {
+	if processor == nil {
+		panic("data inspector handlers require a non-nil processor")
+	}
 	mux.HandleFunc("/data/runs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		runs, err := discoverInspectorRuns(runsRoot)
+		runs, err := discoverInspectorRuns(runsRoot, processor)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -179,7 +187,10 @@ func normalizeInspectorSource(value string) string {
 	}
 }
 
-func discoverInspectorRuns(runsRoot string) ([]inspectorRunSummary, error) {
+func discoverInspectorRuns(runsRoot string, processor *datasetproc.Processor) ([]inspectorRunSummary, error) {
+	if processor == nil {
+		return nil, errors.New("data inspector discovery requires a processor")
+	}
 	entries, err := os.ReadDir(runsRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -194,7 +205,7 @@ func discoverInspectorRuns(runsRoot string) ([]inspectorRunSummary, error) {
 			continue
 		}
 		runDir := filepath.Join(runsRoot, entry.Name())
-		runSummary, ok, err := discoverInspectorRun(runDir)
+		runSummary, ok, err := discoverInspectorRun(runDir, processor)
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +219,7 @@ func discoverInspectorRuns(runsRoot string) ([]inspectorRunSummary, error) {
 	return runs, nil
 }
 
-func discoverInspectorRun(runDir string) (inspectorRunSummary, bool, error) {
+func discoverInspectorRun(runDir string, processor *datasetproc.Processor) (inspectorRunSummary, bool, error) {
 	sceneEntries, err := os.ReadDir(runDir)
 	if err != nil {
 		return inspectorRunSummary{}, false, fmt.Errorf("read run dir %s: %w", runDir, err)
@@ -222,7 +233,7 @@ func discoverInspectorRun(runDir string) (inspectorRunSummary, bool, error) {
 			continue
 		}
 		sceneDir := filepath.Join(runDir, sceneEntry.Name())
-		sceneSummary, ok, err := discoverInspectorScene(sceneDir)
+		sceneSummary, ok, err := discoverInspectorScene(sceneDir, processor)
 		if err != nil {
 			return inspectorRunSummary{}, false, err
 		}
@@ -247,7 +258,7 @@ func discoverInspectorRun(runDir string) (inspectorRunSummary, bool, error) {
 	}, true, nil
 }
 
-func discoverInspectorScene(sceneDir string) (inspectorSceneSummary, bool, error) {
+func discoverInspectorScene(sceneDir string, processor *datasetproc.Processor) (inspectorSceneSummary, bool, error) {
 	sceneKey := filepath.Base(sceneDir)
 	sceneID, sceneVariant := splitSceneKey(sceneKey)
 	entries, err := os.ReadDir(sceneDir)
@@ -262,11 +273,15 @@ func discoverInspectorScene(sceneDir string) (inspectorSceneSummary, bool, error
 		}
 		tripName := entry.Name()
 		tripDir := filepath.Join(sceneDir, tripName)
+		processingState, processingError, processingFingerprint := inspectTripProcessingStatus(tripDir)
 		trips = append(trips, inspectorTripSummary{
-			TripName:           tripName,
-			TripIndex:          parseTripIndex(tripName),
-			RawAvailable:       fileExists(filepath.Join(sceneDir, "run.jsonl")),
-			ProcessedAvailable: fileExists(filepath.Join(tripDir, "dataset.jsonl")),
+			TripName:                    tripName,
+			TripIndex:                   parseTripIndex(tripName),
+			RawAvailable:                fileExists(filepath.Join(sceneDir, "run.jsonl")),
+			ProcessedAvailable:          processor.TripOutputsCurrent(tripDir),
+			ProcessingState:             processingState,
+			ProcessingError:             processingError,
+			ProcessingConfigFingerprint: processingFingerprint,
 		})
 	}
 	if len(trips) == 0 {
@@ -283,6 +298,21 @@ func discoverInspectorScene(sceneDir string) (inspectorSceneSummary, bool, error
 		TripCount:     len(trips),
 		Trips:         trips,
 	}, true, nil
+}
+
+func inspectTripProcessingStatus(tripDir string) (string, string, string) {
+	status, err := datasetproc.ReadStatusFile(filepath.Join(tripDir, "processing.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "not-started", "", ""
+	}
+	if err != nil {
+		return "invalid", err.Error(), ""
+	}
+	state := strings.TrimSpace(status.State)
+	if state == "" {
+		state = "invalid"
+	}
+	return state, strings.TrimSpace(status.Error), strings.TrimSpace(status.ConfigFingerprint)
 }
 
 func resolveInspectorTrip(runsRoot string, runID string, sceneKey string, tripName string) (inspectorTripSelection, error) {

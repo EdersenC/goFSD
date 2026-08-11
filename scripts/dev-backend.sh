@@ -2,6 +2,11 @@
 set -euo pipefail
 
 parking_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+parking_backend_mode="${1:-serve}"
+
+if [[ "${parking_backend_mode}" == "serve" ]]; then
+    npm --prefix "${parking_project_root}/backend/cmd/web" run build
+fi
 
 if [[ "$(uname -s)" == "Linux" ]] \
     && uname -r | grep -qi microsoft \
@@ -22,8 +27,11 @@ if [[ "$(uname -s)" == "Linux" ]] \
         fi
         parking_powershell_args+=(-DataRoot "${parking_data_root}")
     fi
+    # The WSL launcher already built the bundle with the working Linux Node runtime.
+    parking_powershell_args+=(-SkipWebBuild)
+    parking_powershell_args+=("$@")
     exec powershell.exe "${parking_powershell_args[@]}"
 fi
 
 cd "${parking_project_root}/backend"
-exec go run ./cmd
+exec go run ./cmd "$@"

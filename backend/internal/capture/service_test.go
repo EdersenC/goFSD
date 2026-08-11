@@ -190,7 +190,8 @@ func TestBuildFFmpegArgsForMonitorAddsRegion(t *testing.T) {
 }
 
 func TestParseWindowsIncludesBounds(t *testing.T) {
-	raw := "0x100|FiveM - Client|100|200|1600|900\n0x101|CitizenFX - Route|-1920|0|1920|1080\n"
+	raw := "0x100|FiveM - Client|100|200|1600|900|FiveM_b3258_GTAProcess|grcWindow\n" +
+		"0x101|CitizenFX - Route|-1920|0|1920|1080|FiveM_GTAProcess|grcWindow\n"
 
 	got := parseWindows(raw)
 	if len(got) != 2 {
@@ -202,6 +203,78 @@ func TestParseWindowsIncludesBounds(t *testing.T) {
 	if got[1].X != -1920 || got[1].Width != 1920 {
 		t.Fatalf("unexpected second window bounds: %+v", got[1])
 	}
+	if got[0].ProcessName != "FiveM_b3258_GTAProcess" || got[0].WindowClass != "grcWindow" {
+		t.Fatalf("unexpected first window identity: %+v", got[0])
+	}
+}
+
+func TestBuildSourcesRejectsTerminalNamedForFiveMDirectory(t *testing.T) {
+	windows, _ := observedCaptureLayout()
+	sources := buildSources(windows, nil)
+	if len(sources) != 2 {
+		t.Fatalf("expected game plus desktop sources, got: %+v", sources)
+	}
+	if sources[0].Name != "FiveMr by Cfx.re - FXServer, but unconfigured" {
+		t.Fatalf("expected the actual FiveM game window, got: %+v", sources[0])
+	}
+	if sources[0].ProcessName != "FiveM_b3258_GTAProcess" || sources[0].WindowClass != "grcWindow" {
+		t.Fatalf("expected game identity to be retained for selection, got: %+v", sources[0])
+	}
+}
+
+func TestResolveCaptureSpecSelectsObservedFiveMGameMonitor(t *testing.T) {
+	svc := NewService(WithCapabilityProbe(func(context.Context, string, string) (bool, error) {
+		return true, nil
+	}))
+	windows, monitors := observedCaptureLayout()
+	sources := buildSources(windows, monitors)
+
+	spec, err := svc.resolveCaptureSpec(context.Background(), sources, "", "", false)
+	if err != nil {
+		t.Fatalf("resolveCaptureSpec: %v", err)
+	}
+	if spec.selectedMonitorID != "monitor-2" {
+		t.Fatalf("expected observed FiveM game on monitor-2, got: %+v", spec)
+	}
+	if !strings.Contains(spec.input, "ddagrab=output_idx=1") {
+		t.Fatalf("expected output index 1 for monitor-2, got: %+v", spec)
+	}
+
+	override, err := svc.resolveCaptureSpec(context.Background(), sources, "monitor-1", "", false)
+	if err != nil {
+		t.Fatalf("resolve explicit capture source: %v", err)
+	}
+	if override.selectedMonitorID != "monitor-1" || !strings.Contains(override.input, "ddagrab=output_idx=0") {
+		t.Fatalf("expected explicit monitor-1 override to win, got: %+v", override)
+	}
+}
+
+func observedCaptureLayout() ([]windowInfo, []monitorInfo) {
+	return []windowInfo{
+			{
+				Handle:      "0x20982",
+				Title:       "eddy@Eddy: ~/Fivem",
+				ProcessName: "WindowsTerminal",
+				WindowClass: "CASCADIA_HOSTING_WINDOW_CLASS",
+				X:           230,
+				Y:           100,
+				Width:       1489,
+				Height:      965,
+			},
+			{
+				Handle:      "0x45080C",
+				Title:       "FiveMr by Cfx.re - FXServer, but unconfigured",
+				ProcessName: "FiveM_b3258_GTAProcess",
+				WindowClass: "grcWindow",
+				X:           1920,
+				Y:           0,
+				Width:       1920,
+				Height:      1080,
+			},
+		}, []monitorInfo{
+			{X: 0, Y: 0, Width: 1920, Height: 1080, Primary: true},
+			{X: 1920, Y: 0, Width: 1920, Height: 1080},
+		}
 }
 
 func TestResolveOutputFileAllowsRunRelativePath(t *testing.T) {

@@ -23,8 +23,9 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 		vehicleModel: "sultan",
 		vehicleColor: "Black",
 		status: ProcessingStatus{
-			State:      "completed",
-			FrameCount: 5,
+			State:             "completed",
+			ConfigFingerprint: "sha256:report-test",
+			FrameCount:        5,
 		},
 		samples: []DatasetSample{
 			reportSample(0.1, 20.0, 0.2, -2.0, -1.0, 3.0, 3.5, reportTelemetry{
@@ -154,11 +155,13 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 
 	var foundMissing bool
 	var foundFlatSteer bool
+	var foundFingerprint bool
 	for _, trip := range report.Trips {
 		if trip.TripName == "trip-001" {
 			foundMissing = trip.MissingDataset && trip.ZeroSamples && trip.ZeroSampleReasons["missing_yaw_rate_target"] == 4
 		}
 		if trip.TripName == "trip-000" && trip.SceneID == "scene-a" {
+			foundFingerprint = trip.ConfigFingerprint == "sha256:report-test"
 			for _, label := range trip.FlatLabels {
 				if label == "steer" {
 					foundFlatSteer = true
@@ -172,6 +175,9 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 	}
 	if !foundFlatSteer {
 		t.Fatalf("expected flat steer label to be flagged")
+	}
+	if !foundFingerprint {
+		t.Fatal("expected processing fingerprint in the trip report")
 	}
 }
 

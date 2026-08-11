@@ -22,7 +22,7 @@ from torch.nn import Module
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler, LambdaLR
-from torch.utils.data import DataLoader, Dataset as TorchDataset, Subset
+from torch.utils.data import DataLoader, Dataset as TorchDataset, Subset, WeightedRandomSampler
 
 from config import (
     DEFAULT_AUX_LOSS_WEIGHT,
@@ -62,7 +62,7 @@ from target_transforms import (
     TARGET_TRANSFORM_TYPE_SIGNED_CAP,
     TargetTransform,
     target_transform_metadata,
-    validate_parking_control_target_transforms,
+    validate_stop_sign_control_target_transforms,
 )
 from state_inputs import (
     ROUTE_DIRECTION_KEEP_STRAIGHT_KEY,
@@ -76,6 +76,7 @@ from state_inputs import (
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
+from stop_sign_contract import release_policy_metadata, require_disjoint_stop_locations
 
 
 MetricPayload = dict[str, Any]
@@ -107,6 +108,11 @@ class TurnOversamplingConfig:
 
 
 @dataclass(frozen=True)
+class PhaseBalancingConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class DatasetConfig:
     data_root: str
     train_run_ids: tuple[str, ...]
@@ -126,7 +132,7 @@ class DatasetConfig:
     frame_stride: int = 2
     sample_stride: int = DEFAULT_SAMPLE_STRIDE
     telemetry_sample_interval_ms: int = DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS
-    include_failed_or_nonparking_trips: bool = False
+    include_failed_or_non_stop_sign_trips: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,7 @@ class LoaderConfig:
     val_split: float
     cpu_batch_size: int
     turn_oversampling: TurnOversamplingConfig = field(default_factory=lambda: TurnOversamplingConfig())
+    phase_balancing: PhaseBalancingConfig = field(default_factory=PhaseBalancingConfig)
 
 
 @dataclass(frozen=True)
@@ -371,6 +378,19 @@ def _optional_str(value: Any) -> str | None:
     return text or None
 
 
+def _require_safe_run_id(run_id: str, *, key: str) -> str:
+    if (
+        not run_id
+        or len(run_id) > 255
+        or run_id in {".", ".."}
+        or "/" in run_id
+        or "\\" in run_id
+        or "\x00" in run_id
+    ):
+        raise ValueError(f"dataset.{key} must contain run folder names, not paths")
+    return run_id
+
+
 def _resolve_training_run_ids(
     dataset_raw: dict[str, Any],
     key: str,
@@ -381,15 +401,23 @@ def _resolve_training_run_ids(
     if raw_value is not None:
         if not isinstance(raw_value, list):
             raise ValueError(f"dataset.{key} must be a TOML array of run ids")
-        run_ids = tuple(str(item).strip() for item in raw_value if str(item).strip())
+        if any(not isinstance(item, str) for item in raw_value):
+            raise ValueError(f"dataset.{key} must only contain string run ids")
+        run_ids = tuple(
+            _require_safe_run_id(item.strip(), key=key)
+            for item in raw_value
+            if item.strip()
+        )
         if not run_ids:
             raise ValueError(f"dataset.{key} must contain at least one run id")
+        if len(set(run_ids)) != len(run_ids):
+            raise ValueError(f"dataset.{key} must not contain duplicate run ids")
         return run_ids
 
     fallback_run_id = _optional_str(dataset_raw.get(fallback_key))
     if fallback_run_id is None:
         raise ValueError(f"Missing dataset.{key} and deprecated dataset.{fallback_key}")
-    return (fallback_run_id,)
+    return (_require_safe_run_id(fallback_run_id, key=fallback_key),)
 
 
 def _resolve_run_paths_from_ids(data_root: str, run_ids: tuple[str, ...]) -> tuple[str, ...]:
@@ -607,6 +635,18 @@ def _parse_turn_oversampling_config(loader_raw: dict[str, Any]) -> TurnOversampl
     return config
 
 
+def _parse_phase_balancing_config(loader_raw: dict[str, Any]) -> PhaseBalancingConfig:
+    raw = loader_raw.get("phase_balancing")
+    if raw is None:
+        return PhaseBalancingConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("loader.phase_balancing must be a TOML table")
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("loader.phase_balancing.enabled must be boolean")
+    return PhaseBalancingConfig(enabled=enabled)
+
+
 def _parse_optimizer_config(training_raw: dict[str, Any], *, default_lr: float) -> OptimizerConfig:
     optimizer_raw = training_raw.get("optimizer")
     if optimizer_raw is None:
@@ -719,7 +759,7 @@ def _parse_target_transforms(
         )
         transforms["future_speed_delta"] = future_speed_delta
 
-    validate_parking_control_target_transforms(transforms)
+    validate_stop_sign_control_target_transforms(transforms)
     return transforms
 
 
@@ -734,6 +774,12 @@ def load_config(path: Path) -> TrainConfig:
     data_root = resolve_data_root(dataset_raw.get("data_root"))
     train_run_ids = _resolve_training_run_ids(dataset_raw, "train_run_ids", fallback_key="run_id")
     val_run_ids = _resolve_training_run_ids(dataset_raw, "val_run_ids", fallback_key="val_id")
+    overlapping_run_ids = sorted(set(train_run_ids) & set(val_run_ids))
+    if overlapping_run_ids:
+        raise ValueError(
+            "dataset.train_run_ids and dataset.val_run_ids must be separate; overlap: "
+            f"{', '.join(overlapping_run_ids)}"
+        )
     (
         image_offsets,
         telemetry_offsets,
@@ -754,13 +800,14 @@ def load_config(path: Path) -> TrainConfig:
     ema_config = _parse_ema_config(training_raw)
     consistency_settings = _parse_consistency_settings(training_raw)
     turn_oversampling_config = _parse_turn_oversampling_config(loader_raw)
+    phase_balancing_config = _parse_phase_balancing_config(loader_raw)
 
-    include_failed_or_nonparking_trips = dataset_raw.get(
-        "include_failed_or_nonparking_trips",
+    include_failed_or_non_stop_sign_trips = dataset_raw.get(
+        "include_failed_or_non_stop_sign_trips",
         False,
     )
-    if not isinstance(include_failed_or_nonparking_trips, bool):
-        raise ValueError("dataset.include_failed_or_nonparking_trips must be boolean")
+    if not isinstance(include_failed_or_non_stop_sign_trips, bool):
+        raise ValueError("dataset.include_failed_or_non_stop_sign_trips must be boolean")
 
     return TrainConfig(
         dataset=DatasetConfig(
@@ -786,7 +833,7 @@ def load_config(path: Path) -> TrainConfig:
             frame_stride=int(dataset_raw.get("frame_stride", _infer_frame_stride(image_offsets))),
             sample_stride=int(dataset_raw.get("sample_stride", max(future_offsets))),
             telemetry_sample_interval_ms=parse_telemetry_sample_interval_ms(raw),
-            include_failed_or_nonparking_trips=include_failed_or_nonparking_trips,
+            include_failed_or_non_stop_sign_trips=include_failed_or_non_stop_sign_trips,
         ),
         output=OutputConfig(base_dir=resolve_data_root_child(output_raw.get("base_dir"), "training_runs")),
         model=ModelConfig(
@@ -838,6 +885,7 @@ def load_config(path: Path) -> TrainConfig:
             val_split=float(loader_raw["val_split"]),
             cpu_batch_size=int(loader_raw["cpu_batch_size"]),
             turn_oversampling=turn_oversampling_config,
+            phase_balancing=phase_balancing_config,
         ),
         state_inputs=state_input_config_from_metadata(raw.get("state_inputs")),
     )
@@ -848,6 +896,26 @@ def prepare_output_paths(base_output_dir: Path) -> tuple[Path, Path]:
     run_dir = base_output_dir / f"run-{run_stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir, run_dir / "run_metrics.json"
+
+
+def _write_json_atomically(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def _optimizer_learning_rate(optimizer: Optimizer) -> float:
@@ -891,6 +959,7 @@ def _build_checkpoint_metadata(
         "planner_format": PLANNER_FORMAT,
         "planner_format_version": PLANNER_FORMAT_VERSION,
         "control_contract": control_contract_metadata(),
+        "release_policy": release_policy_metadata(),
         "checkpoint_variant": checkpoint_variant,
         "frame_window_size": config.dataset.window_size,
         "frame_stride": config.dataset.frame_stride,
@@ -909,7 +978,7 @@ def _build_checkpoint_metadata(
             config.dataset.future_offsets,
             config.dataset.telemetry_sample_interval_ms,
         )),
-        "include_failed_or_nonparking_trips": config.dataset.include_failed_or_nonparking_trips,
+        "include_failed_or_non_stop_sign_trips": config.dataset.include_failed_or_non_stop_sign_trips,
         "telemetry_feature_names": list(config.dataset.telemetry_feature_names),
         "control_target_names": list(config.dataset.control_target_names),
         "aux_target_names": list(config.dataset.aux_target_names),
@@ -977,7 +1046,8 @@ def _build_checkpoint_metadata(
                 "light_turn_threshold": config.loader.turn_oversampling.light_turn_threshold,
                 "medium_turn_threshold": config.loader.turn_oversampling.medium_turn_threshold,
                 "sharp_turn_threshold": config.loader.turn_oversampling.sharp_turn_threshold,
-            }
+            },
+            "phase_balancing": {"enabled": config.loader.phase_balancing.enabled},
         },
         "model_state_dict": dict(model_state_dict),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -1207,12 +1277,24 @@ def _build_phase_loader(
     prefetch_factor: int,
     persistent_workers: bool,
     cpu_batch_size: int,
+    sample_weights: tuple[float, ...] | None = None,
 ) -> DataLoader[DatasetItem]:
+    sampler = None
+    if sample_weights is not None:
+        if len(sample_weights) != len(dataset):
+            raise ValueError("phase-balanced sample weights must match dataset length")
+        sampler = WeightedRandomSampler(
+            torch.tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        shuffle = False
     if device.type != "cuda":
         return DataLoader(
             dataset,
             batch_size=cpu_batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=0,
             pin_memory=False,
         )
@@ -1226,6 +1308,7 @@ def _build_phase_loader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=resolved_num_workers,
         pin_memory=resolved_pin_memory,
         persistent_workers=resolved_persistent_workers,
@@ -1254,12 +1337,13 @@ def _build_configured_dataset(config: TrainConfig, run_paths: tuple[str, ...]) -
         image_offsets=config.dataset.image_offsets,
         telemetry_offsets=config.dataset.telemetry_offsets,
         future_offsets=config.dataset.future_offsets,
+        telemetry_sample_interval_ms=config.dataset.telemetry_sample_interval_ms,
         telemetry_feature_names=config.dataset.telemetry_feature_names,
         control_target_names=config.dataset.control_target_names,
         aux_target_names=config.dataset.aux_target_names,
         target_transforms=config.dataset.target_transforms,
         state_input_config=config.state_inputs,
-        include_failed_or_nonparking_trips=config.dataset.include_failed_or_nonparking_trips,
+        include_failed_or_non_stop_sign_trips=config.dataset.include_failed_or_non_stop_sign_trips,
     )
 
 
@@ -1273,20 +1357,30 @@ def build_validation_subset(
     if total_trip_count <= 0:
         raise ValueError("Validation dataset has no trips")
 
-    selected_trip_count = max(1, int(total_trip_count * val_split))
-    if selected_trip_count >= total_trip_count:
+    trip_location_keys = dataset.trip_stop_location_keys()
+    location_keys = tuple(dict.fromkeys(trip_location_keys))
+    selected_location_count = max(1, int(len(location_keys) * val_split))
+    if selected_location_count >= len(location_keys):
         return dataset, total_trip_count, total_trip_count
 
     generator = torch.Generator().manual_seed(seed)
-    shuffled_trip_indices = torch.randperm(total_trip_count, generator=generator).tolist()
-    selected_trip_indices = sorted(shuffled_trip_indices[:selected_trip_count])
+    shuffled_location_indices = torch.randperm(len(location_keys), generator=generator).tolist()
+    selected_location_keys = {
+        location_keys[index]
+        for index in shuffled_location_indices[:selected_location_count]
+    }
+    selected_trip_indices = [
+        index
+        for index, location_key in enumerate(trip_location_keys)
+        if location_key in selected_location_keys
+    ]
 
     subset_indices: list[int] = []
     trip_indices = dataset.trip_sample_indices()
     for trip_index in selected_trip_indices:
         subset_indices.extend(trip_indices[trip_index])
 
-    return Subset(dataset, subset_indices), selected_trip_count, total_trip_count
+    return Subset(dataset, subset_indices), len(selected_trip_indices), total_trip_count
 
 
 def _loader_dataset_len(dataset: TorchDataset[DatasetItem]) -> int:
@@ -1447,7 +1541,7 @@ def _control_elementwise_loss(
         target_column = target[..., index]
         if name == STOP_PROBABILITY:
             if bool(torch.any((target_column < 0.0) | (target_column > 1.0)).item()):
-                raise ValueError("stop_probability targets must be in [0, 1]")
+                raise ValueError("stop_intent targets must be in [0, 1]")
             with torch.autocast(device_type=prediction.device.type, enabled=False):
                 if control_logits is not None:
                     per_target_losses.append(F.binary_cross_entropy_with_logits(
@@ -2398,7 +2492,7 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
             context.config.dataset.future_offsets,
             context.config.dataset.telemetry_sample_interval_ms,
         )),
-        "include_failed_or_nonparking_trips": context.config.dataset.include_failed_or_nonparking_trips,
+        "include_failed_or_non_stop_sign_trips": context.config.dataset.include_failed_or_non_stop_sign_trips,
         "telemetry_feature_names": list(context.config.dataset.telemetry_feature_names),
         "control_target_names": list(context.config.dataset.control_target_names),
         "aux_target_names": list(context.config.dataset.aux_target_names),
@@ -2502,6 +2596,7 @@ def build_run_summary(context: TrainingContext) -> dict[str, object]:
                 "medium_turn_threshold": context.config.loader.turn_oversampling.medium_turn_threshold,
                 "sharp_turn_threshold": context.config.loader.turn_oversampling.sharp_turn_threshold,
             },
+            "phase_balancing": {"enabled": context.config.loader.phase_balancing.enabled},
         },
         "epochs": [],
     }
@@ -2616,6 +2711,7 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
             trip_count=train_dataset.trip_count,
             loader_sample_count=len(train_dataset),
         )
+        train_location_keys = train_dataset.stop_location_keys()
         train_image_shape = tuple(train_images.shape)
         train_telemetry_shape = tuple(train_telemetry.shape)
         train_state_input_shape = tuple(train_state_inputs.shape)
@@ -2657,6 +2753,7 @@ def build_training_context(config: TrainConfig, config_path: Path) -> TrainingCo
                 "Check processed validation runs for empty dataset.jsonl files. "
                 f"{val_dataset.format_rejected_sample_summary()}"
             )
+        require_disjoint_stop_locations(train_location_keys, val_dataset.stop_location_keys())
 
         val_subset, selected_val_trip_count, total_val_trip_count = build_validation_subset(
             val_dataset,
@@ -2800,6 +2897,11 @@ def run_epoch(context: TrainingContext, epoch_index: int) -> EpochResult:
             prefetch_factor=context.config.loader.train_prefetch_factor,
             persistent_workers=context.config.loader.train_persistent_workers,
             cpu_batch_size=context.config.loader.cpu_batch_size,
+            sample_weights=(
+                train_dataset.phase_balanced_sample_weights()
+                if context.config.loader.phase_balancing.enabled
+                else None
+            ),
         )
         print(_format_loader_summary("train", train_loader))
         train_metrics, train_epoch_time, avg_timings = train_epoch(
@@ -2976,7 +3078,7 @@ def record_epoch(
     run_summary["best_metric"] = early_stopping_state.best_value
     run_summary["stopped_early"] = False
     run_summary["epochs_completed"] = epoch_result.epoch_index
-    context.run_metrics_path.write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+    _write_json_atomically(context.run_metrics_path, run_summary)
     return epoch_artifact
 
 
@@ -3011,16 +3113,11 @@ def print_epoch_summary(
         f"val_control_mae={float(epoch_result.val_metrics['control_mae_overall']):.6f}",
         f"train_aux_mae={float(epoch_result.train_metrics['aux_mae_overall']):.6f}",
         f"val_aux_mae={float(epoch_result.val_metrics['aux_mae_overall']):.6f}",
-        f"longitudinal_aux_mae={float(epoch_result.val_metrics.get('longitudinal_aux_mae', float('nan'))):.6f}",
-        f"lateral_aux_mae={float(epoch_result.val_metrics.get('lateral_aux_mae', float('nan'))):.6f}",
-        f"desired_steer_mae={float(epoch_result.val_metrics.get('desired_wheel_steer_normalized_mae', float('nan'))):.6f}",
-        f"desired_speed_mae={float(epoch_result.val_metrics.get('desired_speed_mps_mae', float('nan'))):.6f}",
-        f"stop_probability_mae={float(epoch_result.val_metrics.get('stop_probability_mae', float('nan'))):.6f}",
-        f"future_speed_mae={float(epoch_result.val_metrics.get('future_speed_mae', float('nan'))):.6f}",
-        f"future_speed_delta_mae={float(epoch_result.val_metrics.get('future_speed_delta_mae', 0.0)):.6f}",
-        f"future_speed_delta_loss={float(epoch_result.val_metrics.get('future_speed_delta_loss', 0.0)):.6f}",
-        f"future_yaw_delta_mae={float(epoch_result.val_metrics.get('future_yaw_delta_mae', float('nan'))):.6f}",
-        f"future_yaw_rate_mae={float(epoch_result.val_metrics.get('future_yaw_rate_mae', float('nan'))):.6f}",
+        f"future_speed_mae={float(epoch_result.val_metrics.get('future_speed_mps_mae', float('nan'))):.6f}",
+        f"stop_intent_mae={float(epoch_result.val_metrics.get('stop_intent_mae', float('nan'))):.6f}",
+        f"expert_throttle_mae={float(epoch_result.val_metrics.get('expert_throttle_mae', float('nan'))):.6f}",
+        f"expert_brake_mae={float(epoch_result.val_metrics.get('expert_brake_mae', float('nan'))):.6f}",
+        f"actual_brake_pressure_mae={float(epoch_result.val_metrics.get('actual_brake_pressure_mae', float('nan'))):.6f}",
         f"checkpoint={checkpoint}",
         f"train_epoch_s={epoch_result.train_epoch_time:.3f}",
         f"val_epoch_s={epoch_result.val_epoch_time:.3f}",
@@ -3060,6 +3157,10 @@ def format_runtime_paths(context: TrainingContext) -> str:
     )
 
 
+def _emit_training_event(payload: Mapping[str, object]) -> None:
+    print(f"training_event={json.dumps(payload, separators=(',', ':'))}", flush=True)
+
+
 def execute_training(context: TrainingContext) -> dict[str, object]:
     run_summary = build_run_summary(context)
     early_stopping_state = create_early_stopping(
@@ -3069,6 +3170,12 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
         context.config.dataset.aux_target_names,
     )
     training_started_at = time.perf_counter()
+
+    _emit_training_event({
+        "type": "artifacts",
+        "runDir": str(context.run_dir),
+        "runMetricsPath": str(context.run_metrics_path),
+    })
 
     print(
         f"Using device: {context.device} with train_samples={context.train_stats.sample_count} "
@@ -3158,7 +3265,20 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
             early_stopping_state=early_stopping_state,
             elapsed_s=elapsed_s,
         )
-        context.run_metrics_path.write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+        _write_json_atomically(context.run_metrics_path, run_summary)
+        _emit_training_event({
+            "type": "epoch",
+            "epoch": epoch_result.epoch_index,
+            "totalEpochs": context.config.training.epochs,
+            "bestEpoch": early_stopping_state.best_epoch,
+            "elapsedSeconds": elapsed_s,
+            "metrics": {
+                "trainLoss": float(epoch_result.train_metrics["loss"]),
+                "valLoss": float(epoch_result.val_metrics["val_loss"]),
+                "driveScore": float(epoch_result.val_metrics["drive_score"]),
+                "valControlMae": float(epoch_result.val_metrics["control_mae_overall"]),
+            },
+        })
 
         if should_stop:
             run_summary["stopped_early"] = True
@@ -3167,7 +3287,7 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
                 f"{early_stopping_state.bad_epoch_count} consecutive epochs"
             )
             run_summary["completed_at"] = datetime.now().isoformat(timespec="seconds")
-            context.run_metrics_path.write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+            _write_json_atomically(context.run_metrics_path, run_summary)
             print(
                 f"Early stopping triggered at epoch {epoch_index}: "
                 f"best_epoch={early_stopping_state.best_epoch} "
@@ -3181,7 +3301,7 @@ def execute_training(context: TrainingContext) -> dict[str, object]:
         run_summary["elapsed_s"] = elapsed_s
         run_summary["elapsed_hms"] = _format_elapsed_hms(elapsed_s)
         run_summary["completed_at"] = datetime.now().isoformat(timespec="seconds")
-        context.run_metrics_path.write_text(json.dumps(run_summary, indent=2), encoding="utf-8")
+        _write_json_atomically(context.run_metrics_path, run_summary)
 
     return run_summary
 

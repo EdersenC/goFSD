@@ -12,22 +12,17 @@ import (
 	"awesomeProject/internal/parkingcontrol"
 )
 
-var ErrParkingModelIncompatible = errors.New("model is not compatible with parking inference")
+var ErrParkingModelIncompatible = errors.New("model is not compatible with stop-sign inference")
 
-const requiredParkingPlannerFormatVersion = 2
+const requiredParkingPlannerFormatVersion = 1
 
-var requiredParkingStateInputs = []string{
-	"current_speed",
-	"parking_target_configured",
-	"parking_longitudinal_error",
-	"parking_lateral_error",
-	"parking_heading_error",
-}
+// Phase 1 intentionally provides no scalar state vector. The model must locate
+// the orange bay marker from RGB; measured speed arrives through temporal telemetry.
+var requiredParkingStateInputs = []string{}
 
 var requiredParkingControlHeads = []string{
-	"desired_wheel_steer_normalized",
-	"desired_speed_mps",
-	"stop_probability",
+	"future_speed_mps",
+	"stop_intent",
 }
 
 type parkingControlContract struct {
@@ -42,6 +37,7 @@ type parkingControlContract struct {
 type parkingModelStatus struct {
 	Loaded                    bool                             `json:"loaded"`
 	Checkpoint                string                           `json:"checkpoint"`
+	Device                    string                           `json:"device"`
 	PlannerFormat             string                           `json:"planner_format"`
 	PlannerFormatVersion      int                              `json:"planner_format_version"`
 	ControlContract           parkingControlContract           `json:"control_contract"`
@@ -75,6 +71,17 @@ type parkingModelInputSpec struct {
 }
 
 func (i *Inferencer) validateLoadedParkingModel(ctx context.Context, modelServerURL string) (parkingModelStatus, error) {
+	status, err := i.fetchParkingModelStatus(ctx, modelServerURL)
+	if err != nil {
+		return parkingModelStatus{}, err
+	}
+	if err := validateParkingModelStatus(status, i.config); err != nil {
+		return parkingModelStatus{}, err
+	}
+	return status, nil
+}
+
+func (i *Inferencer) fetchParkingModelStatus(ctx context.Context, modelServerURL string) (parkingModelStatus, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, i.requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, modelServerURL+"/model", nil)
@@ -93,9 +100,6 @@ func (i *Inferencer) validateLoadedParkingModel(ctx context.Context, modelServer
 
 	var status parkingModelStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return parkingModelStatus{}, err
-	}
-	if err := validateParkingModelStatus(status, i.config); err != nil {
 		return parkingModelStatus{}, err
 	}
 	return status, nil
@@ -265,9 +269,8 @@ func validateParkingControlContract(contract parkingControlContract) error {
 		return err
 	}
 	expectedActivations := map[string]string{
-		"desired_wheel_steer_normalized": "tanh",
-		"desired_speed_mps":              "sigmoid",
-		"stop_probability":               "sigmoid",
+		"future_speed_mps": "sigmoid",
+		"stop_intent":      "sigmoid",
 	}
 	for name, expected := range expectedActivations {
 		if strings.ToLower(strings.TrimSpace(contract.OutputActivations[name])) != expected {
@@ -278,9 +281,8 @@ func validateParkingControlContract(contract parkingControlContract) error {
 		return parkingModelCompatibilityError("control contract output activations differ: got=%v", contract.OutputActivations)
 	}
 	expectedRanges := map[string][2]float64{
-		"desired_wheel_steer_normalized": {-1, 1},
-		"desired_speed_mps":              {0, parkingcontrol.ParkingSetpointMaxSpeedMPS},
-		"stop_probability":               {0, 1},
+		"future_speed_mps": {0, parkingcontrol.StopSignMotionPlanMaxSpeedMPS},
+		"stop_intent":      {0, 1},
 	}
 	for name, expected := range expectedRanges {
 		actual := contract.OutputRanges[name]

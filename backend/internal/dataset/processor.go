@@ -2,7 +2,9 @@ package dataset
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +37,10 @@ const (
 	defaultStoppedSampleBurst        = 3
 	defaultStoppedSampleSpacing      = 2.0
 	futureTargetSmoothingRadius      = 2
+	processingConfigVersion          = 5
+	processingWorkspacePrefix        = ".processing-work-"
+	processingJournalVersion         = 1
+	processingJournalFile            = "promotion.json"
 )
 
 var (
@@ -53,27 +59,41 @@ type VideoFrame struct {
 }
 
 type ProcessingStatus struct {
-	State             string         `json:"state"`
-	StartedAt         string         `json:"startedAt,omitempty"`
-	CompletedAt       string         `json:"completedAt,omitempty"`
-	Error             string         `json:"error,omitempty"`
-	Warning           string         `json:"warning,omitempty"`
-	FramesDir         string         `json:"framesDir,omitempty"`
-	DatasetFile       string         `json:"datasetFile,omitempty"`
-	ImageWidth        int            `json:"imageWidth,omitempty"`
-	ImageHeight       int            `json:"imageHeight,omitempty"`
-	FrameCount        int            `json:"frameCount,omitempty"`
-	SampleCount       int            `json:"sampleCount"`
-	ZeroSampleReasons map[string]int `json:"zeroSampleReasons,omitempty"`
+	State                     string         `json:"state"`
+	ConfigFingerprint         string         `json:"configFingerprint,omitempty"`
+	StartedAt                 string         `json:"startedAt,omitempty"`
+	CompletedAt               string         `json:"completedAt,omitempty"`
+	Error                     string         `json:"error,omitempty"`
+	Warning                   string         `json:"warning,omitempty"`
+	FramesDir                 string         `json:"framesDir,omitempty"`
+	DatasetFile               string         `json:"datasetFile,omitempty"`
+	ImageWidth                int            `json:"imageWidth,omitempty"`
+	ImageHeight               int            `json:"imageHeight,omitempty"`
+	ImageOffsets              []int          `json:"imageOffsets,omitempty"`
+	TelemetryOffsets          []int          `json:"telemetryOffsets,omitempty"`
+	FutureOffsets             []int          `json:"futureOffsets,omitempty"`
+	TelemetrySampleIntervalMs float64        `json:"telemetrySampleIntervalMs,omitempty"`
+	FrameCount                int            `json:"frameCount"`
+	SampleCount               int            `json:"sampleCount"`
+	ZeroSampleReasons         map[string]int `json:"zeroSampleReasons,omitempty"`
 }
 
 type DatasetSample struct {
-	AnchorVideoPTS   float64                `json:"anchor_video_pts"`
-	AnchorGameTime   float64                `json:"anchor_game_time"`
-	FramePaths       []string               `json:"frame_paths"`
-	TelemetryHistory []GroupedTelemetryItem `json:"telemetry_history,omitempty"`
-	TelemetryFuture  []GroupedTelemetryItem `json:"telemetry_future,omitempty"`
-	Label            GroupedLabel           `json:"label"`
+	AnchorVideoPTS          float64                `json:"anchor_video_pts"`
+	AnchorGameTime          float64                `json:"anchor_game_time"`
+	FramePaths              []string               `json:"frame_paths"`
+	TelemetryHistory        []GroupedTelemetryItem `json:"telemetry_history,omitempty"`
+	TelemetryFuture         []GroupedTelemetryItem `json:"telemetry_future,omitempty"`
+	Label                   GroupedLabel           `json:"label"`
+	Task                    string                 `json:"task,omitempty"`
+	Phase                   string                 `json:"phase,omitempty"`
+	ScenarioLocationID      string                 `json:"scenario_location_id,omitempty"`
+	ScenarioSplitGroup      string                 `json:"scenario_split_group,omitempty"`
+	VariationID             string                 `json:"variation_id,omitempty"`
+	TrainingEligible        *bool                  `json:"training_eligible,omitempty"`
+	TrainingExclusionReason string                 `json:"training_exclusion_reason,omitempty"`
+	StopSignGoal            map[string]any         `json:"stopSignGoal,omitempty"`
+	StopSignOutcome         map[string]any         `json:"stopSignOutcome,omitempty"`
 }
 
 type GroupedLabel struct {
@@ -82,18 +102,30 @@ type GroupedLabel struct {
 }
 
 type GroupedLabelControl struct {
-	Steering any `json:"Steering,omitempty"`
+	Steering                          any `json:"Steering,omitempty"`
+	ExpertDesiredWheelSteerNormalized any `json:"expertDesiredWheelSteerNormalized,omitempty"`
+	ExpertDesiredSpeedMps             any `json:"expertDesiredSpeedMps,omitempty"`
+	ExpertThrottle                    any `json:"expertThrottle,omitempty"`
+	ExpertBrake                       any `json:"expertBrake,omitempty"`
+	ExpertStopProbability             any `json:"expertStopProbability,omitempty"`
+	ExpertGoProbability               any `json:"expertGoProbability,omitempty"`
 }
 
 type GroupedLabelAux struct {
-	FutureSpeedDelta       any `json:"future_speed_delta,omitempty"`
-	FutureSpeedDeltaTarget any `json:"future_speed_delta_target,omitempty"`
-	FutureSpeed            any `json:"future_speed,omitempty"`
-	FutureSpeedTarget      any `json:"future_speed_target,omitempty"`
-	FutureYawDelta         any `json:"future_yaw_delta,omitempty"`
-	FutureHorizonSeconds   any `json:"future_horizon_seconds,omitempty"`
-	YawRate                any `json:"yaw_rate,omitempty"`
-	RouteForwardDelta      any `json:"routeForwardDelta,omitempty"`
+	FutureSpeedDelta        any       `json:"future_speed_delta,omitempty"`
+	FutureSpeedDeltaTarget  any       `json:"future_speed_delta_target,omitempty"`
+	FutureSpeed             any       `json:"future_speed,omitempty"`
+	FutureSpeedTarget       any       `json:"future_speed_target,omitempty"`
+	FutureYawDelta          any       `json:"future_yaw_delta,omitempty"`
+	FutureHorizonSeconds    any       `json:"future_horizon_seconds,omitempty"`
+	YawRate                 any       `json:"yaw_rate,omitempty"`
+	RouteForwardDelta       any       `json:"routeForwardDelta,omitempty"`
+	StopSignPhase           any       `json:"stopSignPhase,omitempty"`
+	FutureSpeedTargetsMps   []float64 `json:"future_speed_targets_mps,omitempty"`
+	FutureObservedSpeedMps  []float64 `json:"future_observed_speed_mps,omitempty"`
+	FutureStopProbabilities []float64 `json:"future_stop_probabilities,omitempty"`
+	FutureGoProbabilities   []float64 `json:"future_go_probabilities,omitempty"`
+	FutureStopSignPhases    []string  `json:"future_stop_sign_phases,omitempty"`
 }
 
 type GroupedTelemetryItem struct {
@@ -103,9 +135,22 @@ type GroupedTelemetryItem struct {
 }
 
 type GroupedTelemetryControl struct {
-	Steering         any `json:"Steering,omitempty"`
-	Acceleration     any `json:"acceleration,omitempty"`
-	BrakePressureAvg any `json:"brakePressureAvg,omitempty"`
+	Steering                          any `json:"Steering,omitempty"`
+	Acceleration                      any `json:"acceleration,omitempty"`
+	BrakePressureAvg                  any `json:"brakePressureAvg,omitempty"`
+	ExpertDesiredWheelSteerNormalized any `json:"expertDesiredWheelSteerNormalized,omitempty"`
+	ExpertDesiredSpeedMps             any `json:"expertDesiredSpeedMps,omitempty"`
+	ExpertThrottle                    any `json:"expertThrottle,omitempty"`
+	ExpertBrake                       any `json:"expertBrake,omitempty"`
+	ExpertStopProbability             any `json:"expertStopProbability,omitempty"`
+	ExpertGoProbability               any `json:"expertGoProbability,omitempty"`
+}
+
+type leanParkingTelemetry struct {
+	currentSpeed                      float64
+	expertDesiredWheelSteerNormalized float64
+	expertDesiredSpeedMps             float64
+	expertStopProbability             float64
 }
 
 type GroupedTelemetryAux struct {
@@ -131,6 +176,11 @@ type GroupedTelemetryAux struct {
 	LeadVehicleRelSpeed           any `json:"leadVehicleRelativeSpeed,omitempty"`
 	LeadVehicleHeadingDiff        any `json:"leadVehicleHeadingDelta,omitempty"`
 	LeadVehicleTTC                any `json:"leadVehicleTTC,omitempty"`
+	StopSignPhase                 any `json:"stopSignPhase,omitempty"`
+	StopLineDistanceM             any `json:"stopLineDistanceM,omitempty"`
+	StopSignLongitudinalErrorM    any `json:"stopSignLongitudinalErrorM,omitempty"`
+	StopSignLateralErrorM         any `json:"stopSignLateralErrorM,omitempty"`
+	StopSignHeadingErrorDeg       any `json:"stopSignHeadingErrorDeg,omitempty"`
 }
 
 type sampleBuildStats struct {
@@ -197,6 +247,7 @@ type Processor struct {
 	imageHeight               int
 	windowSize                int
 	frameStride               int
+	imageOffsets              []int
 	sampleStride              int
 	labelTolerance            time.Duration
 	telemetryOffsets          []int
@@ -234,8 +285,10 @@ type tripMetadata struct {
 		Minute int `json:"minute"`
 		Second int `json:"second"`
 	} `json:"time"`
-	VehicleModel string `json:"vehicleModel"`
-	VehicleColor string `json:"vehicleColor"`
+	VehicleModel    string         `json:"vehicleModel"`
+	VehicleColor    string         `json:"vehicleColor"`
+	StopSignGoal    map[string]any `json:"stopSignGoal"`
+	StopSignOutcome map[string]any `json:"stopSignOutcome"`
 }
 
 type runTripRecord struct {
@@ -283,6 +336,9 @@ func NewProcessor(opts ...Option) *Processor {
 	if p.frameStride < 1 {
 		p.frameStride = defaultFrameStride
 	}
+	if !validImageOffsets(p.imageOffsets) {
+		p.imageOffsets = deriveImageOffsets(p.windowSize, p.frameStride)
+	}
 	if p.imageWidth < 1 {
 		p.imageWidth = defaultImageWidth
 	}
@@ -328,6 +384,13 @@ func WithSamplingConfig(size int, frameStride int, sampleStride int) Option {
 	}
 }
 
+// WithImageOffsets sets the exact frame indices selected relative to each anchor frame.
+func WithImageOffsets(offsets []int) Option {
+	return func(p *Processor) {
+		p.imageOffsets = append([]int(nil), offsets...)
+	}
+}
+
 func WithLabelTolerance(tolerance time.Duration) Option {
 	return func(p *Processor) {
 		p.labelTolerance = tolerance
@@ -369,8 +432,81 @@ func WithDatasetOnly(datasetOnly bool) Option {
 	}
 }
 
-func (p *Processor) Queue(tripDir string) (string, error) {
-	statusPath, err := resolveStatusPath(tripDir)
+type processingFingerprintConfig struct {
+	Version                   int           `json:"version"`
+	ImageWidth                int           `json:"image_width"`
+	ImageHeight               int           `json:"image_height"`
+	ImageOffsets              []int         `json:"image_offsets"`
+	SampleStride              int           `json:"sample_stride"`
+	LabelTolerance            time.Duration `json:"label_tolerance_ns"`
+	TelemetryOffsets          []int         `json:"telemetry_offsets"`
+	FutureOffsets             []int         `json:"future_offsets"`
+	TelemetrySampleInterval   time.Duration `json:"telemetry_sample_interval_ns"`
+	FutureSpeedDeltaClip      float64       `json:"future_speed_delta_clip"`
+	FutureSpeedDeltaNormalize bool          `json:"future_speed_delta_normalize"`
+	FlashBrightnessThreshold  float64       `json:"flash_brightness_threshold"`
+	FlashFrameLimit           int           `json:"flash_frame_limit"`
+	StoppedSampleBurst        int           `json:"stopped_sample_burst"`
+	StoppedSampleSpacing      float64       `json:"stopped_sample_spacing"`
+	FutureSmoothingRadius     int           `json:"future_smoothing_radius"`
+}
+
+type processingWorkspace struct {
+	root        string
+	framesDir   string
+	datasetPath string
+	journalPath string
+}
+
+type promotionJournal struct {
+	Version       int                         `json:"version"`
+	Phase         string                      `json:"phase"`
+	IncludeFrames bool                        `json:"includeFrames"`
+	Operations    []promotionJournalOperation `json:"operations"`
+}
+
+type promotionJournalOperation struct {
+	Name           string `json:"name"`
+	HadPrior       bool   `json:"hadPrior"`
+	BackupStarted  bool   `json:"backupStarted"`
+	BackupDone     bool   `json:"backupDone"`
+	PublishStarted bool   `json:"publishStarted"`
+	PublishDone    bool   `json:"publishDone"`
+	RestoreStarted bool   `json:"restoreStarted"`
+	RestoreDone    bool   `json:"restoreDone"`
+	RemoveStarted  bool   `json:"removeStarted"`
+	RemoveDone     bool   `json:"removeDone"`
+}
+
+// ConfigFingerprint identifies every processor setting that affects published output.
+func (p *Processor) ConfigFingerprint() string {
+	payload := processingFingerprintConfig{
+		Version:                   processingConfigVersion,
+		ImageWidth:                p.imageWidth,
+		ImageHeight:               p.imageHeight,
+		ImageOffsets:              append([]int(nil), p.imageOffsets...),
+		SampleStride:              p.sampleStride,
+		LabelTolerance:            p.labelTolerance,
+		TelemetryOffsets:          append([]int(nil), p.telemetryOffsets...),
+		FutureOffsets:             append([]int(nil), p.futureOffsets...),
+		TelemetrySampleInterval:   p.telemetrySampleInterval,
+		FutureSpeedDeltaClip:      p.futureSpeedDeltaClip,
+		FutureSpeedDeltaNormalize: p.futureSpeedDeltaNormalize,
+		FlashBrightnessThreshold:  p.flashBrightnessThreshold,
+		FlashFrameLimit:           p.flashFrameLimit,
+		StoppedSampleBurst:        defaultStoppedSampleBurst,
+		StoppedSampleSpacing:      defaultStoppedSampleSpacing,
+		FutureSmoothingRadius:     futureTargetSmoothingRadius,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		panic(fmt.Sprintf("dataset processing fingerprint config must be JSON serializable: %v", err))
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(body))
+}
+
+func (p *Processor) Queue(tripDir string) (statusPath string, err error) {
+	statusPath, err = resolveStatusPath(tripDir)
 	if err != nil {
 		return "", err
 	}
@@ -378,142 +514,144 @@ func (p *Processor) Queue(tripDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	lock, err := acquireTripProcessingLock(tripPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		err = errors.Join(err, lock.Release())
+	}()
+	if err := recoverStaleProcessingArtifacts(tripPath); err != nil {
+		return "", err
+	}
 	if !p.force && p.shouldSkipTrip(tripPath) {
-		status := ProcessingStatus{
-			State:       "skipped",
-			CompletedAt: time.Now().Format(time.RFC3339),
-			FramesDir:   "frames",
-			DatasetFile: "dataset.jsonl",
-			ImageWidth:  p.imageWidth,
-			ImageHeight: p.imageHeight,
+		status, readErr := ReadStatusFile(statusPath)
+		if readErr != nil {
+			return "", readErr
 		}
+		status.State = "skipped"
+		status.CompletedAt = time.Now().Format(time.RFC3339)
+		status.Error = ""
 		return statusPath, writeStatusFile(statusPath, status)
 	}
-	status := ProcessingStatus{
-		State:       "queued",
-		FramesDir:   "frames",
-		DatasetFile: "dataset.jsonl",
-		ImageWidth:  p.imageWidth,
-		ImageHeight: p.imageHeight,
-	}
+	status := p.newProcessingStatus("queued")
 	return statusPath, writeStatusFile(statusPath, status)
 }
 
-func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
+func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) (err error) {
 	tripPath, err := resolveTripDir(tripDir)
 	if err != nil {
 		return err
 	}
+	lock, err := acquireTripProcessingLock(tripPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, lock.Release())
+	}()
+	if err := recoverStaleProcessingArtifacts(tripPath); err != nil {
+		return err
+	}
 	if !p.force && p.shouldSkipTrip(tripPath) {
-		return writeStatusFile(filepath.Join(tripPath, "processing.json"), ProcessingStatus{
-			State:       "skipped",
-			CompletedAt: time.Now().Format(time.RFC3339),
-			FramesDir:   "frames",
-			DatasetFile: "dataset.jsonl",
-			ImageWidth:  p.imageWidth,
-			ImageHeight: p.imageHeight,
-		})
+		return p.writeSkippedStatus(tripPath)
 	}
 
 	statusPath := filepath.Join(tripPath, "processing.json")
-	if err := writeStatusFile(statusPath, ProcessingStatus{
-		State:       "running",
-		StartedAt:   time.Now().Format(time.RFC3339),
-		FramesDir:   "frames",
-		DatasetFile: "dataset.jsonl",
-		ImageWidth:  p.imageWidth,
-		ImageHeight: p.imageHeight,
-	}); err != nil {
+	status := p.newProcessingStatus("running")
+	status.StartedAt = time.Now().Format(time.RFC3339)
+	if err := writeStatusFile(statusPath, status); err != nil {
 		return err
 	}
 
-	status := ProcessingStatus{
-		State:       "completed",
-		StartedAt:   time.Now().Format(time.RFC3339),
-		FramesDir:   "frames",
-		DatasetFile: "dataset.jsonl",
-		ImageWidth:  p.imageWidth,
-		ImageHeight: p.imageHeight,
+	workspace, err := newProcessingWorkspace(tripPath)
+	if err != nil {
+		return finishProcessingError(ctx, statusPath, status, err)
 	}
 
-	defer func() {
-		if status.State == "completed" {
-			status.CompletedAt = time.Now().Format(time.RFC3339)
-		}
-		_ = writeStatusFile(statusPath, status)
-	}()
+	if err := p.buildStagedOutputs(ctx, tripPath, workspace, &status); err != nil {
+		cleanupErr := removeProcessingWorkspace(workspace)
+		return finishProcessingError(ctx, statusPath, status, errors.Join(err, cleanupErr))
+	}
+	if err := promoteProcessingWorkspace(tripPath, workspace, !p.datasetOnly); err != nil {
+		rollbackErr := rollbackAndCleanupProcessingWorkspace(tripPath, workspace)
+		return finishProcessingError(ctx, statusPath, status, errors.Join(err, rollbackErr))
+	}
+
+	status.State = "completed"
+	status.CompletedAt = time.Now().Format(time.RFC3339)
+	status.Error = ""
+	if err := writeStatusFile(statusPath, status); err != nil {
+		rollbackErr := rollbackAndCleanupProcessingWorkspace(tripPath, workspace)
+		return finishProcessingError(ctx, statusPath, status, errors.Join(err, rollbackErr))
+	}
+	_ = removeProcessingWorkspace(workspace)
+	return nil
+}
+
+func (p *Processor) buildStagedOutputs(
+	ctx context.Context,
+	tripPath string,
+	workspace processingWorkspace,
+	status *ProcessingStatus,
+) error {
+	if status == nil {
+		panic("dataset processing status must not be nil")
+	}
 
 	videoPath := filepath.Join(tripPath, "video.mkv")
 	metadataPath := filepath.Join(tripPath, "metadata.json")
 	runFilePath := filepath.Join(filepath.Dir(tripPath), "run.jsonl")
-	framesDir := filepath.Join(tripPath, "frames")
-	datasetPath := filepath.Join(tripPath, "dataset.jsonl")
 
 	if !fileExists(videoPath) || !fileExists(metadataPath) || !fileExists(runFilePath) {
-		status.State = "failed"
-		status.Error = fmt.Sprintf("%v: expected video.mkv, metadata.json, and run.jsonl at %s", ErrMissingTripFiles, runFilePath)
 		return fmt.Errorf("%w: expected video.mkv, metadata.json, and run.jsonl at %s", ErrMissingTripFiles, runFilePath)
 	}
 
 	metadata, err := loadTripMetadata(metadataPath)
 	if err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
 		return err
 	}
 
 	frames, err := p.ProbeVideoFrames(ctx, videoPath)
 	if err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
 		return err
 	}
 	if len(frames) == 0 {
-		status.State = "failed"
-		status.Error = "ffprobe returned no video frames"
 		return errors.New("ffprobe returned no video frames")
 	}
 
+	frameRoot := workspace.root
 	if p.datasetOnly {
+		frameRoot = tripPath
 		frames = AttachImagePaths(frames, "frames")
-		frames = filterFramesWithExistingImages(tripPath, frames)
 	} else {
-		if err := extractFrames(ctx, p.newCommand, p.ffmpegBin, videoPath, framesDir, p.imageWidth, p.imageHeight); err != nil {
-			status.State = "failed"
-			status.Error = err.Error()
+		if err := extractFrames(ctx, p.newCommand, p.ffmpegBin, videoPath, workspace.framesDir, p.imageWidth, p.imageHeight); err != nil {
 			return err
 		}
 
 		frames = AttachImagePaths(frames, "frames")
-		frames = filterFramesWithExistingImages(tripPath, frames)
 	}
-	if len(frames) == 0 {
-		status.State = "failed"
-		status.Error = "no extracted frames found on disk"
-		return errors.New("no extracted frames found on disk")
+	if err := validateFrameSet(frameRoot, frames, p.imageWidth, p.imageHeight); err != nil {
+		return err
 	}
 
-	anchorPTS, err := detectSyncFlashPTS(tripPath, frames, p.flashFrameLimit, p.flashBrightnessThreshold)
+	anchorPTS, err := detectSyncFlashPTS(frameRoot, frames, p.flashFrameLimit, p.flashBrightnessThreshold)
 	if err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
 		return err
 	}
 
 	record, err := loadRunTripRecord(runFilePath, metadata.RunID, metadata.TripIndex)
 	if err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
 		return err
 	}
 
 	labels := buildTimedLabels(record.VehicleData, metadata.SyncTime)
-	samples, sampleStats := buildDatasetSamplesWithStats(
+	stopSignTimeline := isStopSignTimeline(labels)
+	samples, sampleStats := buildDatasetSamplesWithImageOffsetsAndStats(
 		frames,
 		labels,
 		anchorPTS,
-		p.windowSize,
-		p.frameStride,
+		p.imageOffsets,
 		p.sampleStride,
 		p.labelTolerance,
 		p.telemetryOffsets,
@@ -522,20 +660,118 @@ func (p *Processor) ProcessTrip(ctx context.Context, tripDir string) error {
 		p.futureSpeedDeltaClip,
 		p.futureSpeedDeltaNormalize,
 	)
-	samples = thinStoppedSamples(samples, defaultStoppedSampleBurst, defaultStoppedSampleSpacing)
-	if err := writeDatasetFile(datasetPath, samples); err != nil {
-		status.State = "failed"
-		status.Error = err.Error()
+	if stopSignTimeline {
+		samples = decorateStopSignSamples(samples, metadata)
+	} else {
+		samples = thinStoppedSamples(samples, defaultStoppedSampleBurst, defaultStoppedSampleSpacing)
+	}
+	retainedFrameCount := len(frames)
+	if !p.datasetOnly && !stopSignTimeline {
+		retainedFrameCount, err = pruneUnreferencedJPEGFrames(workspace.framesDir, samples)
+		if err != nil {
+			return err
+		}
+	}
+	if err := writeDatasetFile(workspace.datasetPath, samples); err != nil {
 		return err
 	}
 
-	status.FrameCount = len(frames)
+	status.FrameCount = retainedFrameCount
 	status.SampleCount = len(samples)
 	if len(samples) == 0 {
 		status.Warning = "no dataset samples generated"
 		status.ZeroSampleReasons = sampleStats.zeroSampleReasons()
 	}
 	return nil
+}
+
+func (p *Processor) newProcessingStatus(state string) ProcessingStatus {
+	return ProcessingStatus{
+		State:                     state,
+		ConfigFingerprint:         p.ConfigFingerprint(),
+		FramesDir:                 "frames",
+		DatasetFile:               "dataset.jsonl",
+		ImageWidth:                p.imageWidth,
+		ImageHeight:               p.imageHeight,
+		ImageOffsets:              append([]int(nil), p.imageOffsets...),
+		TelemetryOffsets:          append([]int(nil), p.telemetryOffsets...),
+		FutureOffsets:             append([]int(nil), p.futureOffsets...),
+		TelemetrySampleIntervalMs: float64(p.telemetrySampleInterval) / float64(time.Millisecond),
+	}
+}
+
+func (p *Processor) writeSkippedStatus(tripPath string) error {
+	statusPath := filepath.Join(tripPath, "processing.json")
+	status, err := ReadStatusFile(statusPath)
+	if err != nil {
+		return err
+	}
+	status.State = "skipped"
+	status.CompletedAt = time.Now().Format(time.RFC3339)
+	status.Error = ""
+	return writeStatusFile(statusPath, status)
+}
+
+func failProcessing(statusPath string, status ProcessingStatus, processingErr error) error {
+	status.State = "failed"
+	status.CompletedAt = ""
+	status.Error = processingErr.Error()
+	if statusErr := writeStatusFile(statusPath, status); statusErr != nil {
+		return errors.Join(processingErr, fmt.Errorf("write failed processing status: %w", statusErr))
+	}
+	return processingErr
+}
+
+func finishProcessingError(
+	ctx context.Context,
+	statusPath string,
+	status ProcessingStatus,
+	processingErr error,
+) error {
+	if ctx != nil && ctx.Err() != nil {
+		status.State = "queued"
+		status.CompletedAt = ""
+		status.Error = ""
+		if statusErr := writeStatusFile(statusPath, status); statusErr != nil {
+			return errors.Join(processingErr, fmt.Errorf("write interrupted processing status: %w", statusErr))
+		}
+		return processingErr
+	}
+	return failProcessing(statusPath, status, processingErr)
+}
+
+func rollbackAndCleanupProcessingWorkspace(tripPath string, workspace processingWorkspace) error {
+	if !fileExists(workspace.journalPath) {
+		return removeProcessingWorkspace(workspace)
+	}
+	if err := rollbackProcessingWorkspace(tripPath, workspace); err != nil {
+		return fmt.Errorf("rollback processing promotion; workspace preserved at %s: %w", workspace.root, err)
+	}
+	return removeProcessingWorkspace(workspace)
+}
+
+func removeProcessingWorkspace(workspace processingWorkspace) error {
+	if err := os.RemoveAll(workspace.root); err != nil {
+		return fmt.Errorf("remove processing workspace %s: %w", workspace.root, err)
+	}
+	return nil
+}
+
+func newProcessingWorkspace(tripPath string) (processingWorkspace, error) {
+	root, err := os.MkdirTemp(tripPath, processingWorkspacePrefix)
+	if err != nil {
+		return processingWorkspace{}, fmt.Errorf("create processing workspace: %w", err)
+	}
+	return processingWorkspaceForRoot(root), nil
+}
+
+func processingWorkspaceForRoot(root string) processingWorkspace {
+	return processingWorkspace{
+		root:        root,
+		framesDir:   filepath.Join(root, "frames"),
+		datasetPath: filepath.Join(root, "dataset.jsonl"),
+		journalPath: filepath.Join(root, processingJournalFile),
+	}
 }
 
 func (p *Processor) ProbeVideoFrames(ctx context.Context, videoPath string) ([]VideoFrame, error) {
@@ -562,7 +798,7 @@ func (p *Processor) ProbeVideoFrames(ctx context.Context, videoPath string) ([]V
 	frames := make([]VideoFrame, 0, len(parsed.Frames))
 	for i, frame := range parsed.Frames {
 		if strings.TrimSpace(frame.PTSTime) == "" {
-			continue
+			return nil, fmt.Errorf("missing pts_time at frame %d", i)
 		}
 		var pts float64
 		if err := json.Unmarshal([]byte(frame.PTSTime), &pts); err != nil {
@@ -583,7 +819,7 @@ func AttachImagePaths(frames []VideoFrame, dir string) []VideoFrame {
 	copy(out, frames)
 	cleanDir := filepath.ToSlash(strings.Trim(dir, "/\\"))
 	for i := range out {
-		out[i].ImagePath = fmt.Sprintf("%s/%06d.jpg", cleanDir, i+1)
+		out[i].ImagePath = fmt.Sprintf("%s/%06d.jpg", cleanDir, out[i].Index+1)
 	}
 	return out
 }
@@ -828,17 +1064,68 @@ func buildDatasetSamplesWithStats(
 	futureSpeedDeltaClip float64,
 	futureSpeedDeltaNormalize bool,
 ) ([]DatasetSample, sampleBuildStats) {
+	return buildDatasetSamplesWithImageOffsetsAndStats(
+		frames,
+		labels,
+		anchorPTS,
+		deriveImageOffsets(windowSize, frameStride),
+		sampleStride,
+		tolerance,
+		telemetryOffsets,
+		futureOffsets,
+		telemetrySampleInterval,
+		futureSpeedDeltaClip,
+		futureSpeedDeltaNormalize,
+	)
+}
+
+func buildDatasetSamplesWithImageOffsetsAndStats(
+	frames []VideoFrame,
+	labels []timedLabel,
+	anchorPTS float64,
+	imageOffsets []int,
+	sampleStride int,
+	tolerance time.Duration,
+	telemetryOffsets []int,
+	futureOffsets []int,
+	telemetrySampleInterval time.Duration,
+	futureSpeedDeltaClip float64,
+	futureSpeedDeltaNormalize bool,
+) ([]DatasetSample, sampleBuildStats) {
 	var stats sampleBuildStats
 	if len(frames) == 0 ||
 		len(labels) == 0 ||
-		windowSize < 1 ||
-		windowSize%2 == 0 ||
-		frameStride < 1 ||
+		!validImageOffsets(imageOffsets) ||
 		sampleStride < 1 ||
 		!validTelemetryOffsets(telemetryOffsets) ||
 		!validFutureOffsets(futureOffsets) ||
 		telemetrySampleInterval <= 0 {
 		return nil, stats
+	}
+	if isStopSignTimeline(labels) {
+		return buildStopSignSamplesWithImageOffsetsAndStats(
+			frames,
+			labels,
+			anchorPTS,
+			imageOffsets,
+			sampleStride,
+			tolerance,
+			telemetryOffsets,
+			futureOffsets,
+			telemetrySampleInterval,
+		)
+	}
+	if isLeanParkingTimeline(labels) {
+		return buildLeanParkingSamplesWithImageOffsetsAndStats(
+			frames,
+			labels,
+			anchorPTS,
+			imageOffsets,
+			sampleStride,
+			telemetryOffsets,
+			futureOffsets,
+			telemetrySampleInterval,
+		)
 	}
 
 	toleranceSeconds := tolerance.Seconds()
@@ -847,7 +1134,7 @@ func buildDatasetSamplesWithStats(
 	for anchorIndex := 0; anchorIndex < len(frames); anchorIndex += sampleStride {
 		stats.CandidateWindowCount++
 
-		window, ok := buildPastOnlyFrameWindow(frames, anchorIndex, windowSize, frameStride)
+		window, ok := buildFrameWindowAtOffsets(frames, anchorIndex, imageOffsets)
 		if !ok {
 			stats.IncompleteFrameHistoryCount++
 			continue
@@ -947,21 +1234,260 @@ func buildDatasetSamplesWithStats(
 	return samples, stats
 }
 
-func buildPastOnlyFrameWindow(frames []VideoFrame, anchorIndex int, windowSize int, frameStride int) ([]string, bool) {
-	if len(frames) == 0 || windowSize <= 0 || frameStride <= 0 {
+func buildLeanParkingSamplesWithImageOffsetsAndStats(
+	frames []VideoFrame,
+	labels []timedLabel,
+	anchorPTS float64,
+	imageOffsets []int,
+	sampleStride int,
+	telemetryOffsets []int,
+	futureOffsets []int,
+	telemetrySampleInterval time.Duration,
+) ([]DatasetSample, sampleBuildStats) {
+	var stats sampleBuildStats
+	maxInterpolationGap := 2 * telemetrySampleInterval
+	samples := make([]DatasetSample, 0)
+
+	for anchorIndex := 0; anchorIndex < len(frames); anchorIndex += sampleStride {
+		stats.CandidateWindowCount++
+		window, ok := buildFrameWindowAtOffsets(frames, anchorIndex, imageOffsets)
+		if !ok {
+			stats.IncompleteFrameHistoryCount++
+			continue
+		}
+
+		anchorFrame := frames[anchorIndex]
+		anchorGameTime := anchorFrame.PTS - anchorPTS
+		anchorTelemetry, ok := interpolateLeanParkingTelemetry(labels, anchorGameTime, maxInterpolationGap)
+		if !ok {
+			stats.MissingCurrentLabelCount++
+			continue
+		}
+		history, ok := buildLeanParkingHistory(
+			labels,
+			anchorGameTime,
+			telemetryOffsets,
+			telemetrySampleInterval,
+			maxInterpolationGap,
+		)
+		if !ok {
+			stats.IncompleteTelemetryHistoryCount++
+			continue
+		}
+		future, ok := buildLeanParkingFuture(
+			labels,
+			anchorGameTime,
+			futureOffsets,
+			telemetrySampleInterval,
+			maxInterpolationGap,
+		)
+		if !ok {
+			stats.IncompleteTelemetryFutureCount++
+			continue
+		}
+
+		samples = append(samples, DatasetSample{
+			AnchorVideoPTS:   anchorFrame.PTS,
+			AnchorGameTime:   anchorGameTime,
+			FramePaths:       window,
+			TelemetryHistory: history,
+			TelemetryFuture:  future,
+			Label:            leanParkingLabel(anchorTelemetry),
+		})
+		stats.GeneratedSampleCount++
+	}
+
+	return samples, stats
+}
+
+func isLeanParkingTimeline(labels []timedLabel) bool {
+	for _, label := range labels {
+		for _, key := range []string{
+			"expertDesiredWheelSteerNormalized",
+			"expertDesiredSpeedMps",
+			"expertStopProbability",
+		} {
+			if _, exists := label.Label[key]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildLeanParkingHistory(
+	labels []timedLabel,
+	anchorTime float64,
+	telemetryOffsets []int,
+	sampleInterval time.Duration,
+	maxInterpolationGap time.Duration,
+) ([]GroupedTelemetryItem, bool) {
+	if !validTelemetryOffsets(telemetryOffsets) || sampleInterval <= 0 {
 		return nil, false
 	}
-	earliestIndex := anchorIndex - ((windowSize - 1) * frameStride)
-	if earliestIndex < 0 || anchorIndex >= len(frames) {
-		return nil, false
-	}
-	window := make([]string, 0, windowSize)
-	for slot := 0; slot < windowSize; slot++ {
-		idx := earliestIndex + (slot * frameStride)
-		if idx < 0 || idx >= len(frames) {
+
+	firstOffset := telemetryOffsets[0]
+	history := make([]GroupedTelemetryItem, 0, -firstOffset+1)
+	for offset := firstOffset; offset <= 0; offset++ {
+		targetTime := anchorTime + float64(offset)*sampleInterval.Seconds()
+		telemetry, ok := interpolateLeanParkingTelemetry(labels, targetTime, maxInterpolationGap)
+		if !ok {
 			return nil, false
 		}
-		window = append(window, frames[idx].ImagePath)
+		history = append(history, leanParkingHistoryItem(telemetry))
+	}
+	return history, true
+}
+
+func buildLeanParkingFuture(
+	labels []timedLabel,
+	anchorTime float64,
+	futureOffsets []int,
+	sampleInterval time.Duration,
+	maxInterpolationGap time.Duration,
+) ([]GroupedTelemetryItem, bool) {
+	if !validFutureOffsets(futureOffsets) || sampleInterval <= 0 {
+		return nil, false
+	}
+
+	horizonLength := futureOffsets[len(futureOffsets)-1]
+	future := make([]GroupedTelemetryItem, 0, horizonLength)
+	for offset := 1; offset <= horizonLength; offset++ {
+		targetTime := anchorTime + float64(offset)*sampleInterval.Seconds()
+		telemetry, ok := interpolateLeanParkingTelemetry(labels, targetTime, maxInterpolationGap)
+		if !ok {
+			return nil, false
+		}
+		future = append(future, leanParkingFutureItem(telemetry))
+	}
+	return future, true
+}
+
+func interpolateLeanParkingTelemetry(
+	labels []timedLabel,
+	targetTime float64,
+	maxGap time.Duration,
+) (leanParkingTelemetry, bool) {
+	if len(labels) == 0 || !isFiniteFloat64(targetTime) || maxGap <= 0 {
+		return leanParkingTelemetry{}, false
+	}
+
+	rightIndex := sort.Search(len(labels), func(index int) bool {
+		return labels[index].RelativeSeconds >= targetTime
+	})
+	if rightIndex < len(labels) && nearlyEqualSeconds(labels[rightIndex].RelativeSeconds, targetTime) {
+		return parseLeanParkingTelemetry(labels[rightIndex].Label)
+	}
+	if rightIndex == 0 || rightIndex >= len(labels) {
+		return leanParkingTelemetry{}, false
+	}
+
+	left := labels[rightIndex-1]
+	right := labels[rightIndex]
+	gapSeconds := right.RelativeSeconds - left.RelativeSeconds
+	if !isFiniteFloat64(gapSeconds) || gapSeconds <= 0 || gapSeconds > maxGap.Seconds() {
+		return leanParkingTelemetry{}, false
+	}
+	leftTelemetry, ok := parseLeanParkingTelemetry(left.Label)
+	if !ok {
+		return leanParkingTelemetry{}, false
+	}
+	rightTelemetry, ok := parseLeanParkingTelemetry(right.Label)
+	if !ok {
+		return leanParkingTelemetry{}, false
+	}
+	ratio := (targetTime - left.RelativeSeconds) / gapSeconds
+	if !isFiniteFloat64(ratio) || ratio < 0 || ratio > 1 {
+		return leanParkingTelemetry{}, false
+	}
+
+	return leanParkingTelemetry{
+		currentSpeed:                      interpolateFloat64(leftTelemetry.currentSpeed, rightTelemetry.currentSpeed, ratio),
+		expertDesiredWheelSteerNormalized: interpolateFloat64(leftTelemetry.expertDesiredWheelSteerNormalized, rightTelemetry.expertDesiredWheelSteerNormalized, ratio),
+		expertDesiredSpeedMps:             interpolateFloat64(leftTelemetry.expertDesiredSpeedMps, rightTelemetry.expertDesiredSpeedMps, ratio),
+		expertStopProbability:             interpolateFloat64(leftTelemetry.expertStopProbability, rightTelemetry.expertStopProbability, ratio),
+	}, true
+}
+
+func parseLeanParkingTelemetry(source map[string]any) (leanParkingTelemetry, bool) {
+	currentSpeed, ok := numberField(source["currentSpeed"])
+	if !ok || !isFiniteFloat64(currentSpeed) || currentSpeed < 0 {
+		return leanParkingTelemetry{}, false
+	}
+	desiredSteer, ok := numberField(source["expertDesiredWheelSteerNormalized"])
+	if !ok || !isFiniteFloat64(desiredSteer) || desiredSteer < -1 || desiredSteer > 1 {
+		return leanParkingTelemetry{}, false
+	}
+	desiredSpeed, ok := numberField(source["expertDesiredSpeedMps"])
+	if !ok || !isFiniteFloat64(desiredSpeed) || desiredSpeed < 0 {
+		return leanParkingTelemetry{}, false
+	}
+	stopProbability, ok := numberField(source["expertStopProbability"])
+	if !ok || !isFiniteFloat64(stopProbability) || stopProbability < 0 || stopProbability > 1 {
+		return leanParkingTelemetry{}, false
+	}
+	return leanParkingTelemetry{
+		currentSpeed:                      currentSpeed,
+		expertDesiredWheelSteerNormalized: desiredSteer,
+		expertDesiredSpeedMps:             desiredSpeed,
+		expertStopProbability:             stopProbability,
+	}, true
+}
+
+func leanParkingHistoryItem(telemetry leanParkingTelemetry) GroupedTelemetryItem {
+	return GroupedTelemetryItem{
+		Aux: GroupedTelemetryAux{CurrentSpeed: telemetry.currentSpeed},
+	}
+}
+
+func leanParkingFutureItem(telemetry leanParkingTelemetry) GroupedTelemetryItem {
+	return GroupedTelemetryItem{
+		Control: GroupedTelemetryControl{
+			ExpertDesiredWheelSteerNormalized: telemetry.expertDesiredWheelSteerNormalized,
+			ExpertDesiredSpeedMps:             telemetry.expertDesiredSpeedMps,
+			ExpertStopProbability:             telemetry.expertStopProbability,
+		},
+		Aux: GroupedTelemetryAux{CurrentSpeed: telemetry.currentSpeed},
+	}
+}
+
+func leanParkingLabel(telemetry leanParkingTelemetry) GroupedLabel {
+	return GroupedLabel{
+		Control: GroupedLabelControl{
+			ExpertDesiredWheelSteerNormalized: telemetry.expertDesiredWheelSteerNormalized,
+			ExpertDesiredSpeedMps:             telemetry.expertDesiredSpeedMps,
+			ExpertStopProbability:             telemetry.expertStopProbability,
+		},
+	}
+}
+
+func interpolateFloat64(left float64, right float64, ratio float64) float64 {
+	return left + (right-left)*ratio
+}
+
+func nearlyEqualSeconds(left float64, right float64) bool {
+	return math.Abs(left-right) <= 1e-9
+}
+
+func buildPastOnlyFrameWindow(frames []VideoFrame, anchorIndex int, windowSize int, frameStride int) ([]string, bool) {
+	return buildFrameWindowAtOffsets(frames, anchorIndex, deriveImageOffsets(windowSize, frameStride))
+}
+
+func buildFrameWindowAtOffsets(frames []VideoFrame, anchorPosition int, imageOffsets []int) ([]string, bool) {
+	if len(frames) == 0 || anchorPosition < 0 || anchorPosition >= len(frames) || !validImageOffsets(imageOffsets) {
+		return nil, false
+	}
+	window := make([]string, 0, len(imageOffsets))
+	anchorFrameIndex := frames[anchorPosition].Index
+	for _, offset := range imageOffsets {
+		targetFrameIndex := anchorFrameIndex + offset
+		position := sort.Search(len(frames), func(index int) bool {
+			return frames[index].Index >= targetFrameIndex
+		})
+		if position >= len(frames) || frames[position].Index != targetFrameIndex {
+			return nil, false
+		}
+		window = append(window, frames[position].ImagePath)
 	}
 	return window, true
 }
@@ -1060,6 +1586,30 @@ func defaultTelemetryHistoryOffsets() []int {
 	return []int{-4, -3, -2, -1, 0}
 }
 
+func deriveImageOffsets(windowSize int, frameStride int) []int {
+	if windowSize < 1 || frameStride < 1 {
+		return nil
+	}
+	offsets := make([]int, 0, windowSize)
+	firstOffset := -((windowSize - 1) * frameStride)
+	for index := 0; index < windowSize; index++ {
+		offsets = append(offsets, firstOffset+(index*frameStride))
+	}
+	return offsets
+}
+
+func validImageOffsets(offsets []int) bool {
+	if len(offsets) == 0 || offsets[len(offsets)-1] != 0 {
+		return false
+	}
+	for index, offset := range offsets {
+		if offset > 0 || (index > 0 && offset <= offsets[index-1]) {
+			return false
+		}
+	}
+	return true
+}
+
 func defaultFutureOffsets() []int {
 	offsets := make([]int, defaultFutureTelemetryCount)
 	for index := range offsets {
@@ -1154,6 +1704,18 @@ func groupTelemetryItem(source map[string]any) GroupedTelemetryItem {
 			item.Control.Acceleration = cloned
 		case "brakePressureAvg":
 			item.Control.BrakePressureAvg = cloned
+		case "expertDesiredWheelSteerNormalized":
+			item.Control.ExpertDesiredWheelSteerNormalized = cloned
+		case "expertDesiredSpeedMps":
+			item.Control.ExpertDesiredSpeedMps = cloned
+		case "expertThrottle":
+			item.Control.ExpertThrottle = cloned
+		case "expertBrake":
+			item.Control.ExpertBrake = cloned
+		case "expertStopProbability":
+			item.Control.ExpertStopProbability = cloned
+		case "expertGoProbability":
+			item.Control.ExpertGoProbability = cloned
 		case "currentSpeed":
 			item.Aux.CurrentSpeed = cloned
 		case "yaw":
@@ -1198,6 +1760,16 @@ func groupTelemetryItem(source map[string]any) GroupedTelemetryItem {
 			item.Aux.LeadVehicleHeadingDiff = cloned
 		case "leadVehicleTTC":
 			item.Aux.LeadVehicleTTC = cloned
+		case "stopSignPhase":
+			item.Aux.StopSignPhase = cloned
+		case "stopLineDistanceM":
+			item.Aux.StopLineDistanceM = cloned
+		case "stopSignLongitudinalErrorM":
+			item.Aux.StopSignLongitudinalErrorM = cloned
+		case "stopSignLateralErrorM":
+			item.Aux.StopSignLateralErrorM = cloned
+		case "stopSignHeadingErrorDeg":
+			item.Aux.StopSignHeadingErrorDeg = cloned
 		default:
 			raw[key] = cloned
 		}
@@ -1214,6 +1786,12 @@ func flattenGroupedLabel(label GroupedLabel) map[string]any {
 	if label.Control.Steering != nil {
 		flat["Steering"] = cloneValue(label.Control.Steering)
 	}
+	appendIfPresent(flat, "expertDesiredWheelSteerNormalized", label.Control.ExpertDesiredWheelSteerNormalized)
+	appendIfPresent(flat, "expertDesiredSpeedMps", label.Control.ExpertDesiredSpeedMps)
+	appendIfPresent(flat, "expertThrottle", label.Control.ExpertThrottle)
+	appendIfPresent(flat, "expertBrake", label.Control.ExpertBrake)
+	appendIfPresent(flat, "expertStopProbability", label.Control.ExpertStopProbability)
+	appendIfPresent(flat, "expertGoProbability", label.Control.ExpertGoProbability)
 	appendIfPresent(flat, "future_speed_delta", label.Aux.FutureSpeedDelta)
 	appendIfPresent(flat, "future_speed_delta_target", label.Aux.FutureSpeedDeltaTarget)
 	appendIfPresent(flat, "future_speed", label.Aux.FutureSpeed)
@@ -1222,6 +1800,7 @@ func flattenGroupedLabel(label GroupedLabel) map[string]any {
 	appendIfPresent(flat, "future_horizon_seconds", label.Aux.FutureHorizonSeconds)
 	appendIfPresent(flat, "yaw_rate", label.Aux.YawRate)
 	appendIfPresent(flat, "routeForwardDelta", label.Aux.RouteForwardDelta)
+	appendIfPresent(flat, "stopSignPhase", label.Aux.StopSignPhase)
 	return flat
 }
 
@@ -1230,6 +1809,12 @@ func flattenGroupedTelemetry(item GroupedTelemetryItem) map[string]any {
 	appendIfPresent(flat, "Steering", item.Control.Steering)
 	appendIfPresent(flat, "acceleration", item.Control.Acceleration)
 	appendIfPresent(flat, "brakePressureAvg", item.Control.BrakePressureAvg)
+	appendIfPresent(flat, "expertDesiredWheelSteerNormalized", item.Control.ExpertDesiredWheelSteerNormalized)
+	appendIfPresent(flat, "expertDesiredSpeedMps", item.Control.ExpertDesiredSpeedMps)
+	appendIfPresent(flat, "expertThrottle", item.Control.ExpertThrottle)
+	appendIfPresent(flat, "expertBrake", item.Control.ExpertBrake)
+	appendIfPresent(flat, "expertStopProbability", item.Control.ExpertStopProbability)
+	appendIfPresent(flat, "expertGoProbability", item.Control.ExpertGoProbability)
 	appendIfPresent(flat, "currentSpeed", item.Aux.CurrentSpeed)
 	appendIfPresent(flat, "yaw", item.Aux.Yaw)
 	appendIfPresent(flat, "yawRate", item.Aux.YawRate)
@@ -1252,6 +1837,11 @@ func flattenGroupedTelemetry(item GroupedTelemetryItem) map[string]any {
 	appendIfPresent(flat, "leadVehicleRelativeSpeed", item.Aux.LeadVehicleRelSpeed)
 	appendIfPresent(flat, "leadVehicleHeadingDelta", item.Aux.LeadVehicleHeadingDiff)
 	appendIfPresent(flat, "leadVehicleTTC", item.Aux.LeadVehicleTTC)
+	appendIfPresent(flat, "stopSignPhase", item.Aux.StopSignPhase)
+	appendIfPresent(flat, "stopLineDistanceM", item.Aux.StopLineDistanceM)
+	appendIfPresent(flat, "stopSignLongitudinalErrorM", item.Aux.StopSignLongitudinalErrorM)
+	appendIfPresent(flat, "stopSignLateralErrorM", item.Aux.StopSignLateralErrorM)
+	appendIfPresent(flat, "stopSignHeadingErrorDeg", item.Aux.StopSignHeadingErrorDeg)
 	for key, value := range item.Raw {
 		flat[key] = cloneValue(value)
 	}
@@ -1714,34 +2304,145 @@ func nearestLabelWithIndexRange(
 	return best.label, best.index, true
 }
 
+func pruneUnreferencedJPEGFrames(framesDir string, samples []DatasetSample) (int, error) {
+	referenced := make(map[string]struct{})
+	for _, sample := range samples {
+		for _, framePath := range sample.FramePaths {
+			name, ok := datasetFrameName(framePath)
+			if !ok {
+				return 0, fmt.Errorf("invalid dataset frame path %q", framePath)
+			}
+			referenced[name] = struct{}{}
+		}
+	}
+
+	entries, err := os.ReadDir(framesDir)
+	if err != nil {
+		return 0, fmt.Errorf("read staged frames directory: %w", err)
+	}
+	found := make(map[string]struct{}, len(referenced))
+	for _, entry := range entries {
+		name := entry.Name()
+		if filepath.Ext(name) != ".jpg" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return 0, fmt.Errorf("inspect staged frame %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return 0, fmt.Errorf("staged frame is not a regular file: %s", name)
+		}
+		if _, keep := referenced[name]; !keep {
+			if err := os.Remove(filepath.Join(framesDir, name)); err != nil {
+				return 0, fmt.Errorf("remove unreferenced staged frame %s: %w", name, err)
+			}
+			continue
+		}
+		if info.Size() < 1 {
+			return 0, fmt.Errorf("referenced staged frame is empty: %s", name)
+		}
+		found[name] = struct{}{}
+	}
+	for name := range referenced {
+		if _, ok := found[name]; !ok {
+			return 0, fmt.Errorf("referenced staged frame is missing: %s", name)
+		}
+	}
+	return len(referenced), nil
+}
+
+func datasetFrameName(framePath string) (string, bool) {
+	if strings.Contains(framePath, "\\") || strings.HasPrefix(framePath, "/") {
+		return "", false
+	}
+	parts := strings.Split(framePath, "/")
+	if len(parts) != 2 || parts[0] != "frames" || !validNumberedJPEGName(parts[1]) {
+		return "", false
+	}
+	return parts[1], true
+}
+
+func validNumberedJPEGName(name string) bool {
+	if len(name) != len("000001.jpg") || !strings.HasSuffix(name, ".jpg") {
+		return false
+	}
+	for _, character := range name[:6] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return name[:6] != "000000"
+}
+
 func writeDatasetFile(path string, samples []DatasetSample) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create dataset.jsonl: %w", err)
 	}
-	defer file.Close()
 
 	encoder := json.NewEncoder(file)
 	for _, sample := range samples {
 		if err := encoder.Encode(sample); err != nil {
-			return fmt.Errorf("failed to write dataset.jsonl: %w", err)
+			return errors.Join(fmt.Errorf("failed to write dataset.jsonl: %w", err), file.Close())
 		}
+	}
+	if err := file.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("sync dataset.jsonl: %w", err), file.Close())
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close dataset.jsonl: %w", err)
 	}
 	return nil
 }
 
 func writeStatusFile(path string, status ProcessingStatus) error {
-	body, err := json.MarshalIndent(status, "", "  ")
+	return writeJSONAtomically(path, status)
+}
+
+func writeJSONAtomically(path string, value any) error {
+	body, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 	body = append(body, '\n')
-	return os.WriteFile(path, body, 0o644)
+
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("create atomic JSON temp file: %w", err)
+	}
+	tempPath := temp.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = temp.Close()
+		}
+		_ = os.Remove(tempPath)
+	}()
+	if err := temp.Chmod(0o644); err != nil {
+		return fmt.Errorf("set atomic JSON temp permissions: %w", err)
+	}
+	if _, err := temp.Write(body); err != nil {
+		return fmt.Errorf("write atomic JSON temp file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return fmt.Errorf("sync atomic JSON temp file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		closed = true
+		return fmt.Errorf("close atomic JSON temp file: %w", err)
+	}
+	closed = true
+	if err := replaceFileAtomically(tempPath, path); err != nil {
+		return fmt.Errorf("replace JSON file atomically: %w", err)
+	}
+	return nil
 }
 
 func ReadStatusFile(path string) (ProcessingStatus, error) {
 	var status ProcessingStatus
-	body, err := os.ReadFile(path)
+	body, err := readFileConsistently(path)
 	if err != nil {
 		return status, err
 	}
@@ -1774,48 +2475,463 @@ func resolveTripDir(tripDir string) (string, error) {
 	return cleaned, nil
 }
 
-func filterFramesWithExistingImages(tripDir string, frames []VideoFrame) []VideoFrame {
-	filtered := make([]VideoFrame, 0, len(frames))
-	for _, frame := range frames {
-		if frame.ImagePath == "" {
-			continue
+func validateFrameSet(root string, frames []VideoFrame, expectedWidth int, expectedHeight int) error {
+	if len(frames) == 0 {
+		return errors.New("no probed video frames")
+	}
+	if expectedWidth < 1 || expectedHeight < 1 {
+		return errors.New("expected frame dimensions must be positive")
+	}
+	if !numberedFramesComplete(filepath.Join(root, "frames"), len(frames)) {
+		return fmt.Errorf("frame set is incomplete: expected %d contiguous images", len(frames))
+	}
+	for position, frame := range frames {
+		if frame.Index != position {
+			return fmt.Errorf("frame timeline is non-contiguous at position %d: source index %d", position, frame.Index)
 		}
-		fullPath := filepath.Join(tripDir, filepath.FromSlash(frame.ImagePath))
-		if fileExists(fullPath) {
-			filtered = append(filtered, frame)
+		path := filepath.Join(root, filepath.FromSlash(frame.ImagePath))
+		file, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open frame image %s: %w", path, err)
+		}
+		config, _, decodeErr := image.DecodeConfig(file)
+		closeErr := file.Close()
+		if decodeErr != nil {
+			return errors.Join(fmt.Errorf("decode frame image %s: %w", path, decodeErr), closeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close frame image %s: %w", path, closeErr)
+		}
+		if config.Width != expectedWidth || config.Height != expectedHeight {
+			return fmt.Errorf(
+				"frame dimensions do not match processing config at %s: got %dx%d want %dx%d",
+				path,
+				config.Width,
+				config.Height,
+				expectedWidth,
+				expectedHeight,
+			)
 		}
 	}
-	return filtered
+	return nil
 }
 
-func shouldSkipProcessing(tripDir string) bool {
-	datasetPath := filepath.Join(tripDir, "dataset.jsonl")
-	if fileExists(datasetPath) {
-		return true
-	}
+func (p *Processor) shouldSkipTrip(tripDir string) bool {
+	return p.TripOutputsCurrent(tripDir)
+}
 
-	framesDir := filepath.Join(tripDir, "frames")
+// TripOutputsCurrent reports whether a trip has complete published outputs for
+// this processor's exact configuration. It is intentionally read-only so CLI,
+// HTTP, and UI readiness checks can share the same rule as processing skips.
+func (p *Processor) TripOutputsCurrent(tripDir string) bool {
+	status, err := ReadStatusFile(filepath.Join(tripDir, "processing.json"))
+	if err != nil {
+		return false
+	}
+	if status.State != "completed" && status.State != "skipped" {
+		return false
+	}
+	if status.ConfigFingerprint != p.ConfigFingerprint() {
+		return false
+	}
+	if !p.statusContractMatches(status) {
+		return false
+	}
+	return processingOutputsComplete(tripDir, status)
+}
+
+func (p *Processor) statusContractMatches(status ProcessingStatus) bool {
+	return status.ImageWidth == p.imageWidth &&
+		status.ImageHeight == p.imageHeight &&
+		p.statusTimelineMatches(status)
+}
+
+func (p *Processor) statusTimelineMatches(status ProcessingStatus) bool {
+	return equalIntSlices(status.ImageOffsets, p.imageOffsets) &&
+		equalIntSlices(status.TelemetryOffsets, p.telemetryOffsets) &&
+		equalIntSlices(status.FutureOffsets, p.futureOffsets) &&
+		status.TelemetrySampleIntervalMs == float64(p.telemetrySampleInterval)/float64(time.Millisecond)
+}
+
+func equalIntSlices(left []int, right []int) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func processingOutputsComplete(tripDir string, status ProcessingStatus) bool {
+	if status.FrameCount < 0 || status.SampleCount < 0 {
+		return false
+	}
+	if !processingCountsExplicit(filepath.Join(tripDir, "processing.json")) {
+		return false
+	}
+	datasetPath := filepath.Join(tripDir, "dataset.jsonl")
+	lineCount, referencedFrames, framePathsExplicit, err := readDatasetFrameReferences(datasetPath)
+	if err != nil || lineCount != status.SampleCount {
+		return false
+	}
+	if lineCount == 0 || !framePathsExplicit {
+		return numberedFramesComplete(filepath.Join(tripDir, "frames"), status.FrameCount)
+	}
+	return referencedFramesComplete(filepath.Join(tripDir, "frames"), referencedFrames, status.FrameCount)
+}
+
+func processingCountsExplicit(statusPath string) bool {
+	body, err := readFileConsistently(statusPath)
+	if err != nil {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return false
+	}
+	for _, key := range []string{"frameCount", "sampleCount"} {
+		var value int
+		raw, exists := fields[key]
+		if !exists || json.Unmarshal(raw, &value) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func numberedFramesComplete(framesDir string, expectedCount int) bool {
+	if expectedCount < 0 {
+		return false
+	}
 	entries, err := os.ReadDir(framesDir)
 	if err != nil {
 		return false
 	}
+	regularFileCount := 0
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			return true
+		if entry.Type().IsRegular() {
+			regularFileCount++
 		}
 	}
-	return false
-}
-
-func shouldSkipDatasetOnlyProcessing(tripDir string) bool {
-	return fileExists(filepath.Join(tripDir, "dataset.jsonl"))
-}
-
-func (p *Processor) shouldSkipTrip(tripDir string) bool {
-	if p.datasetOnly {
-		return shouldSkipDatasetOnlyProcessing(tripDir)
+	if regularFileCount != expectedCount {
+		return false
 	}
-	return shouldSkipProcessing(tripDir)
+	if expectedCount == 0 {
+		return true
+	}
+	for index := 1; index <= expectedCount; index++ {
+		info, err := os.Stat(filepath.Join(framesDir, fmt.Sprintf("%06d.jpg", index)))
+		if err != nil || !info.Mode().IsRegular() || info.Size() < 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func referencedFramesComplete(framesDir string, referenced map[string]struct{}, expectedCount int) bool {
+	if expectedCount < 0 || len(referenced) != expectedCount {
+		return false
+	}
+	entries, err := os.ReadDir(framesDir)
+	if err != nil {
+		return false
+	}
+	foundCount := 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".jpg" {
+			continue
+		}
+		if _, ok := referenced[entry.Name()]; !ok {
+			return false
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() < 1 {
+			return false
+		}
+		foundCount++
+	}
+	return foundCount == expectedCount
+}
+
+func readDatasetFrameReferences(path string) (int, map[string]struct{}, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer file.Close()
+
+	lineCount := 0
+	rowsWithFramePaths := 0
+	referenced := make(map[string]struct{})
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 128*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var row struct {
+			FramePaths []string `json:"frame_paths"`
+		}
+		if err := json.Unmarshal(line, &row); err != nil {
+			return 0, nil, false, err
+		}
+		if len(row.FramePaths) > 0 {
+			rowsWithFramePaths++
+			for _, framePath := range row.FramePaths {
+				name, ok := datasetFrameName(framePath)
+				if !ok {
+					return 0, nil, false, fmt.Errorf("invalid dataset frame path %q", framePath)
+				}
+				referenced[name] = struct{}{}
+			}
+		}
+		lineCount++
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, nil, false, err
+	}
+	if rowsWithFramePaths != 0 && rowsWithFramePaths != lineCount {
+		return 0, nil, false, errors.New("dataset mixes rows with and without frame paths")
+	}
+	return lineCount, referenced, lineCount == 0 || rowsWithFramePaths == lineCount, nil
+}
+
+func countValidJSONLines(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 128*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if !json.Valid(line) {
+			return 0, fmt.Errorf("invalid JSON at dataset line %d", count+1)
+		}
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func promoteProcessingWorkspace(tripPath string, workspace processingWorkspace, includeFrames bool) error {
+	return promoteProcessingWorkspaceWithRename(tripPath, workspace, includeFrames, os.Rename)
+}
+
+func promoteProcessingWorkspaceWithRename(
+	tripPath string,
+	workspace processingWorkspace,
+	includeFrames bool,
+	rename func(string, string) error,
+) error {
+	journal := newPromotionJournal(includeFrames)
+	for _, operation := range journal.Operations {
+		paths := resolvePromotionPaths(tripPath, workspace, operation.Name)
+		if !pathExists(paths.source) {
+			return fmt.Errorf("staged processing output is missing: %s", paths.source)
+		}
+	}
+	journal.Phase = "promoting"
+	if err := writePromotionJournal(workspace, journal); err != nil {
+		return err
+	}
+
+	for index := range journal.Operations {
+		operation := &journal.Operations[index]
+		paths := resolvePromotionPaths(tripPath, workspace, operation.Name)
+		if !pathExists(paths.target) {
+			continue
+		}
+		operation.HadPrior = true
+		operation.BackupStarted = true
+		if err := writePromotionJournal(workspace, journal); err != nil {
+			return err
+		}
+		if err := rename(paths.target, paths.backup); err != nil {
+			return fmt.Errorf("backup processing output %s: %w", paths.target, err)
+		}
+		operation.BackupDone = true
+		if err := writePromotionJournal(workspace, journal); err != nil {
+			return err
+		}
+	}
+
+	for index := range journal.Operations {
+		operation := &journal.Operations[index]
+		paths := resolvePromotionPaths(tripPath, workspace, operation.Name)
+		operation.PublishStarted = true
+		if err := writePromotionJournal(workspace, journal); err != nil {
+			return err
+		}
+		if err := rename(paths.source, paths.target); err != nil {
+			return fmt.Errorf("publish processing output %s: %w", paths.target, err)
+		}
+		operation.PublishDone = true
+		if err := writePromotionJournal(workspace, journal); err != nil {
+			return err
+		}
+	}
+	journal.Phase = "published"
+	return writePromotionJournal(workspace, journal)
+}
+
+func rollbackProcessingWorkspace(tripPath string, workspace processingWorkspace) error {
+	return rollbackProcessingWorkspaceWithFS(tripPath, workspace, os.Rename, os.RemoveAll)
+}
+
+func rollbackProcessingWorkspaceWithFS(
+	tripPath string,
+	workspace processingWorkspace,
+	rename func(string, string) error,
+	removeAll func(string) error,
+) error {
+	journal, err := readPromotionJournal(workspace)
+	if err != nil {
+		return err
+	}
+	journal.Phase = "rolling_back"
+	if err := writePromotionJournal(workspace, journal); err != nil {
+		return err
+	}
+
+	for index := len(journal.Operations) - 1; index >= 0; index-- {
+		operation := &journal.Operations[index]
+		paths := resolvePromotionPaths(tripPath, workspace, operation.Name)
+		if operation.RestoreDone || operation.RemoveDone {
+			continue
+		}
+		if operation.RestoreStarted && !pathExists(paths.backup) && pathExists(paths.target) {
+			operation.RestoreDone = true
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				return err
+			}
+			continue
+		}
+		if pathExists(paths.backup) {
+			operation.HadPrior = true
+			operation.RestoreStarted = true
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				return err
+			}
+			if pathExists(paths.target) {
+				if err := removeAll(paths.target); err != nil {
+					return fmt.Errorf("remove partially published output %s: %w", paths.target, err)
+				}
+			}
+			if err := rename(paths.backup, paths.target); err != nil {
+				return fmt.Errorf("restore previous processing output %s: %w", paths.target, err)
+			}
+			operation.RestoreDone = true
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				return err
+			}
+			continue
+		}
+		if operation.HadPrior && operation.BackupDone && !operation.RestoreStarted {
+			return fmt.Errorf("processing backup disappeared before restore: %s", paths.backup)
+		}
+		if !operation.HadPrior && operation.PublishStarted && !pathExists(paths.source) && pathExists(paths.target) {
+			operation.RemoveStarted = true
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				return err
+			}
+			if err := removeAll(paths.target); err != nil {
+				return fmt.Errorf("remove newly published output %s: %w", paths.target, err)
+			}
+			operation.RemoveDone = true
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				return err
+			}
+		}
+	}
+	journal.Phase = "rolled_back"
+	return writePromotionJournal(workspace, journal)
+}
+
+type promotionPaths struct {
+	source string
+	target string
+	backup string
+}
+
+func newPromotionJournal(includeFrames bool) promotionJournal {
+	operations := make([]promotionJournalOperation, 0, 2)
+	if includeFrames {
+		operations = append(operations, promotionJournalOperation{Name: "frames"})
+	}
+	operations = append(operations, promotionJournalOperation{Name: "dataset"})
+	return promotionJournal{
+		Version:       processingJournalVersion,
+		Phase:         "staged",
+		IncludeFrames: includeFrames,
+		Operations:    operations,
+	}
+}
+
+func resolvePromotionPaths(tripPath string, workspace processingWorkspace, name string) promotionPaths {
+	switch name {
+	case "frames":
+		return promotionPaths{
+			source: workspace.framesDir,
+			target: filepath.Join(tripPath, "frames"),
+			backup: filepath.Join(workspace.root, "previous-frames"),
+		}
+	case "dataset":
+		return promotionPaths{
+			source: workspace.datasetPath,
+			target: filepath.Join(tripPath, "dataset.jsonl"),
+			backup: filepath.Join(workspace.root, "previous-dataset.jsonl"),
+		}
+	default:
+		panic(fmt.Sprintf("unknown processing promotion operation %q", name))
+	}
+}
+
+func writePromotionJournal(workspace processingWorkspace, journal promotionJournal) error {
+	if journal.Version != processingJournalVersion {
+		return fmt.Errorf("unsupported processing journal version %d", journal.Version)
+	}
+	if err := writeJSONAtomically(workspace.journalPath, journal); err != nil {
+		return fmt.Errorf("write processing promotion journal: %w", err)
+	}
+	return nil
+}
+
+func readPromotionJournal(workspace processingWorkspace) (promotionJournal, error) {
+	var journal promotionJournal
+	body, err := os.ReadFile(workspace.journalPath)
+	if err != nil {
+		return journal, fmt.Errorf("read processing promotion journal: %w", err)
+	}
+	if err := json.Unmarshal(body, &journal); err != nil {
+		return journal, fmt.Errorf("parse processing promotion journal: %w", err)
+	}
+	if journal.Version != processingJournalVersion || len(journal.Operations) == 0 {
+		return journal, fmt.Errorf("invalid processing promotion journal version=%d operations=%d", journal.Version, len(journal.Operations))
+	}
+	for _, operation := range journal.Operations {
+		if operation.Name != "frames" && operation.Name != "dataset" {
+			return journal, fmt.Errorf("invalid processing promotion operation %q", operation.Name)
+		}
+	}
+	return journal, nil
+}
+
+func pathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 func fileExists(path string) bool {

@@ -26,9 +26,10 @@ check_command() {
     fi
 }
 
-echo "Parking Lab doctor"
+echo "Stop Sign Lab doctor"
 check_command node
 check_command npm
+check_command git
 
 parking_is_wsl=false
 if [[ "$(uname -s)" == "Linux" ]] && uname -r | grep -qi microsoft; then
@@ -63,10 +64,16 @@ else
     warn "Python ML dependencies are unavailable; collection works, but training/inference needs fsd_trainer/requirements.txt"
 fi
 
-if [[ -d "${parking_project_root}/fivem/node_modules" ]]; then
+if [[ -x "${parking_project_root}/fivem/node_modules/.bin/tsc" ]]; then
     pass "FiveM dependencies are installed"
 else
-    fail "FiveM dependencies are missing; run npm --prefix fivem install"
+    fail "FiveM dependencies are missing; run npm run setup"
+fi
+
+if [[ -x "${parking_project_root}/backend/cmd/web/node_modules/.bin/esbuild" ]]; then
+    pass "Stop Sign Lab web dependencies are installed"
+else
+    fail "Stop Sign Lab web dependencies are missing; run npm run setup"
 fi
 
 if [[ -n "${FSD_DATA_ROOT:-}" ]]; then
@@ -82,4 +89,4 @@ if ((parking_failures > 0)); then
     exit 1
 fi
 
-printf '\nReady for Parking Lab development.\n'
+printf '\nReady. Start Stop Sign Lab with: npm start\n'

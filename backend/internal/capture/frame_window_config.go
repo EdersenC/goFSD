@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultDatasetWindowSize                 = 3
+	defaultDatasetWindowSize                 = 5
 	defaultDatasetFrameStride                = 2
 	defaultDatasetSampleStride               = 2
 	defaultTelemetrySampleInterval           = 50 * time.Millisecond
@@ -81,12 +81,12 @@ func DefaultDatasetConfig() DatasetConfig {
 		FrameStride:                  defaultDatasetFrameStride,
 		SampleStride:                 defaultDatasetSampleStride,
 		TelemetrySampleInterval:      defaultTelemetrySampleInterval,
-		ImageOffsets:                 []int{-4, -2, 0},
-		TelemetryOffsets:             []int{-2, -1, 0},
-		FutureOffsets:                []int{1},
-		TelemetryFeatureNames:        []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
-		ControlTargetNames:           []string{"desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"},
-		AuxTargetNames:               []string{"future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"},
+		ImageOffsets:                 []int{-20, -15, -10, -5, 0},
+		TelemetryOffsets:             []int{-20, -15, -10, -5, 0},
+		FutureOffsets:                []int{5, 10, 20, 40, 60, 100},
+		TelemetryFeatureNames:        []string{"current_speed"},
+		ControlTargetNames:           []string{"future_speed_mps", "stop_intent"},
+		AuxTargetNames:               []string{"expert_throttle", "expert_brake", "actual_brake_pressure"},
 		LabelTolerance:               defaultDatasetLabelTolerance,
 		FutureSpeedDeltaClip:         defaultDatasetFutureSpeedDeltaClip,
 		FutureSpeedDeltaNormalize:    defaultDatasetFutureSpeedDeltaNormalize,
@@ -223,6 +223,12 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	if len(cfg.FutureOffsets) < 1 {
 		return fmt.Errorf("%s future_offsets must contain at least one entry", prefix)
 	}
+	if err := validatePastOffsets(prefix+" image_offsets", cfg.ImageOffsets); err != nil {
+		return err
+	}
+	if err := validatePastOffsets(prefix+" telemetry_offsets", cfg.TelemetryOffsets); err != nil {
+		return err
+	}
 	for index, offset := range cfg.FutureOffsets {
 		if offset < 1 {
 			return fmt.Errorf("%s future_offsets must contain positive values", prefix)
@@ -255,9 +261,6 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	if cfg.SyncFlashFrameLimit < 1 {
 		return fmt.Errorf("%s sync_flash_frame_limit must be > 0", prefix)
 	}
-	if cfg.TelemetryOffsets[len(cfg.TelemetryOffsets)-1] != 0 {
-		return fmt.Errorf("%s telemetry_offsets must end at 0", prefix)
-	}
 	if len(cfg.TelemetryFeatureNames) < 1 {
 		return fmt.Errorf("%s telemetry_feature_names must not be empty", prefix)
 	}
@@ -266,6 +269,21 @@ func validateDatasetConfig(prefix string, cfg DatasetConfig) error {
 	}
 	if len(cfg.AuxTargetNames) < 1 {
 		return fmt.Errorf("%s aux_target_names must not be empty", prefix)
+	}
+	return nil
+}
+
+func validatePastOffsets(name string, offsets []int) error {
+	if offsets[len(offsets)-1] != 0 {
+		return fmt.Errorf("%s must end at 0", name)
+	}
+	for index, offset := range offsets {
+		if offset > 0 {
+			return fmt.Errorf("%s must not contain positive values", name)
+		}
+		if index > 0 && offset <= offsets[index-1] {
+			return fmt.Errorf("%s must be strictly increasing", name)
+		}
 	}
 	return nil
 }

@@ -38,6 +38,7 @@ export type ParkingAttemptPlan = {
 export type ParkingGoal = {
     task: "parking"
     maneuver: "forward-bay"
+    visualCueId: string
     target: ParkingPose
     bay: ParkingBay
     tolerances: ParkingTolerances
@@ -48,9 +49,16 @@ export type ParkingGoal = {
     startOffset: ParkingStartOffset
 };
 
+export type ParkingSetup = {
+    target: ParkingTarget
+    startPose: ParkingPose
+    startOffset: ParkingStartOffset
+};
+
 export type ParkingOutcomeStatus =
     | "succeeded"
     | "collision"
+    | "left_straight_corridor"
     | "reversing"
     | "off_ground"
     | "not_upright"
@@ -100,8 +108,21 @@ export type ParkingState = {
     settledDurationMs: number
 };
 
+/**
+ * Labels emitted by the deterministic parking expert for one captured sample.
+ * These are supervision only; the trained model never receives them as inputs.
+ */
+export type ParkingExpertSupervision = {
+    desiredWheelSteerNormalized: number
+    desiredSpeedMps: number
+    stopProbability: number
+};
+
 export type ParkingTelemetry = {
     parkingTargetConfigured: boolean
+    parkingStartConfigured: boolean
+    parkingTargetPose?: ParkingPose
+    parkingStartPose?: ParkingPose
     parkingLongitudinalError: number
     parkingLateralError: number
     parkingHeadingError: number

@@ -10,17 +10,16 @@ import (
 	"awesomeProject/internal/control"
 )
 
-var ErrParkingInferencePrecondition = errors.New("parking inference precondition failed")
-var ErrParkingInferenceComplete = errors.New("parking inference completed successfully")
-var ErrParkingInferenceDeadlineExceeded = errors.New("parking evaluation deadline exceeded")
+var ErrParkingInferencePrecondition = errors.New("stop-sign inference precondition failed")
+var ErrParkingInferenceComplete = errors.New("stop-sign inference completed successfully")
+var ErrParkingInferenceDeadlineExceeded = errors.New("stop-sign evaluation deadline exceeded")
 
-// These bounds mirror the complete forward-bay start distribution produced by
-// fivem/src/parking/curriculum.ts, including its maximum deterministic jitter.
+// These bounds mirror the exact user-calibrated Phase 1 straight corridor.
 const (
-	parkingStartLongitudinalMinM = -17.0
-	parkingStartLongitudinalMaxM = -9.5
-	parkingStartLateralLimitM    = 2.75
-	parkingStartHeadingLimitDeg  = 17.0
+	parkingStartLongitudinalMinM = -250.0
+	parkingStartLongitudinalMaxM = -5.0
+	parkingStartLateralLimitM    = 1.5
+	parkingStartHeadingLimitDeg  = 10.0
 	parkingTargetPositionDriftM  = 0.25
 	parkingTargetHeadingDriftDeg = 1.0
 	parkingMaximumTiltDeg        = 5.0
@@ -63,7 +62,7 @@ func (i *Inferencer) validateInferenceActuatorReady() error {
 	}
 	if !state.ParkingController.Ready {
 		return fmt.Errorf(
-			"%w: parking controller requires a verified vehicle calibration profile",
+			"%w: stop-sign controller requires a verified vehicle calibration profile",
 			ErrInferenceActuatorUnavailable,
 		)
 	}
@@ -118,7 +117,7 @@ func (i *Inferencer) validateActiveParkingInference() error {
 		return ErrParkingInferenceComplete
 	}
 	if safetyTripped {
-		return parkingInferenceError("parking safety interlock is latched; stop and restart inference after restoring the target and start pose")
+		return parkingInferenceError("stop-sign safety interlock is latched; stop and restart inference after restoring the target and start pose")
 	}
 
 	telemetry, err := i.currentParkingInferenceTelemetry()
@@ -126,14 +125,14 @@ func (i *Inferencer) validateActiveParkingInference() error {
 		return err
 	}
 	if expectedTarget == nil {
-		return parkingInferenceError("parking inference session target is unavailable")
+		return parkingInferenceError("stop-sign inference session target is unavailable")
 	}
 	currentTarget, err := parkingTargetFromTelemetry(*telemetry)
 	if err != nil {
 		return err
 	}
 	if !sameParkingInferenceTarget(*expectedTarget, currentTarget) {
-		return parkingInferenceError("parking target changed while inference was active; stop and restart from a valid curriculum pose")
+		return parkingInferenceError("stop-sign target changed while inference was active; stop and restart from a valid approach pose")
 	}
 	if startEnvelopePending {
 		if err := validateParkingStartEnvelope(*telemetry); err != nil {
@@ -164,8 +163,8 @@ func (i *Inferencer) currentParkingInferenceTelemetry() (*control.RuntimeTelemet
 	if err := validateParkingSourceTimestamp("FiveM telemetry", now, float64(telemetry.TimestampMs)/1000.0, i.telemetryStaleAfter); err != nil {
 		return nil, parkingInferenceError("%v", err)
 	}
-	if !telemetry.ParkingTargetConfigured {
-		return nil, parkingInferenceError("parking target is not configured; calibrate a bay before starting inference")
+	if !telemetry.StopSignTargetConfigured || telemetry.StopSignEgoStopPose == nil {
+		return nil, parkingInferenceError("stop-sign target is not configured; mark a sign before starting inference")
 	}
 
 	ego, egoAt := i.telemetry.LatestEgoTelemetrySnapshot()
@@ -210,16 +209,17 @@ func validateParkingSourceTimestamp(label string, now time.Time, timestampS floa
 }
 
 func validateParkingOperatingState(telemetry control.RuntimeTelemetry) error {
-	phase := strings.ToLower(strings.TrimSpace(telemetry.ParkingPhase))
-	if phase == "succeeded" && telemetry.ParkingParked {
+	phase := strings.ToLower(strings.TrimSpace(telemetry.StopSignPhase))
+	if phase == "complete" {
 		return ErrParkingInferenceComplete
 	}
-	evaluationPhase := phase == "ready" || (phase == "settling" && telemetry.ParkingAttemptCount == 0)
-	if !evaluationPhase {
+	allowedPhase := phase == "idle" || phase == "accelerate" || phase == "cruise_approach" ||
+		phase == "decelerate" || phase == "stop_hold" || phase == "release"
+	if !allowedPhase {
 		if phase == "" {
 			phase = "missing"
 		}
-		return parkingInferenceError("parking phase must be ready or evaluation settling for inference; current phase is %s", phase)
+		return parkingInferenceError("stop-sign phase is not safe for inference; current phase is %s", phase)
 	}
 	if telemetry.OnGround == nil {
 		return parkingInferenceError("vehicle ground-contact telemetry is unavailable")
@@ -237,7 +237,7 @@ func validateParkingOperatingState(telemetry control.RuntimeTelemetry) error {
 		return parkingInferenceError("vehicle pitch/roll telemetry is invalid")
 	}
 	if math.Abs(*telemetry.PitchDeg) > parkingMaximumTiltDeg || math.Abs(*telemetry.RollDeg) > parkingMaximumTiltDeg {
-		return parkingInferenceError("vehicle exceeded %.1f degree parking tilt limit", parkingMaximumTiltDeg)
+		return parkingInferenceError("vehicle exceeded %.1f degree stop-sign tilt limit", parkingMaximumTiltDeg)
 	}
 
 	forwardSpeed, err := parkingForwardSpeedMPS(telemetry)
@@ -245,7 +245,7 @@ func validateParkingOperatingState(telemetry control.RuntimeTelemetry) error {
 		return err
 	}
 	if forwardSpeed < parkingReverseSpeedLimitMPS {
-		return parkingInferenceError("reverse motion detected at %.3fm/s during forward-bay inference", forwardSpeed)
+		return parkingInferenceError("reverse motion detected at %.3fm/s during stop-sign inference", forwardSpeed)
 	}
 	return nil
 }
@@ -264,29 +264,29 @@ func parkingForwardSpeedMPS(telemetry control.RuntimeTelemetry) (float64, error)
 }
 
 func validateParkingStartEnvelope(telemetry control.RuntimeTelemetry) error {
-	longitudinal := telemetry.ParkingLongitudinalError
+	longitudinal := telemetry.StopSignLongitudinalErrorM
 	if !finiteParkingValue(longitudinal) || longitudinal < parkingStartLongitudinalMinM || longitudinal > parkingStartLongitudinalMaxM {
 		return parkingInferenceError(
-			"parking start longitudinal offset %.3fm is outside the forward curriculum range [%.1f, %.1f]m",
+			"stop-sign start longitudinal offset %.3fm is outside the approach range [%.1f, %.1f]m",
 			longitudinal,
 			parkingStartLongitudinalMinM,
 			parkingStartLongitudinalMaxM,
 		)
 	}
 
-	lateral := telemetry.ParkingLateralError
+	lateral := telemetry.StopSignLateralErrorM
 	if !finiteParkingValue(lateral) || math.Abs(lateral) > parkingStartLateralLimitM {
 		return parkingInferenceError(
-			"parking start lateral offset %.3fm exceeds the forward curriculum limit +/-%.2fm",
+			"stop-sign start lateral offset %.3fm exceeds the approach limit +/-%.2fm",
 			lateral,
 			parkingStartLateralLimitM,
 		)
 	}
 
-	heading := telemetry.ParkingHeadingError
+	heading := telemetry.StopSignHeadingErrorDeg
 	if !finiteParkingValue(heading) || math.Abs(heading) > parkingStartHeadingLimitDeg {
 		return parkingInferenceError(
-			"parking start heading error %.3fdeg exceeds the forward curriculum limit +/-%.1fdeg",
+			"stop-sign start heading error %.3fdeg exceeds the approach limit +/-%.1fdeg",
 			heading,
 			parkingStartHeadingLimitDeg,
 		)
@@ -301,26 +301,17 @@ type parkingInferenceTarget struct {
 }
 
 func parkingTargetFromTelemetry(telemetry control.RuntimeTelemetry) (parkingInferenceTarget, error) {
-	if telemetry.PositionX == nil || telemetry.PositionY == nil {
-		return parkingInferenceTarget{}, parkingInferenceError("ego position is required to bind the inference session to its calibrated parking target")
+	pose := telemetry.StopSignEgoStopPose
+	if pose == nil {
+		return parkingInferenceTarget{}, parkingInferenceError("ego stop pose is required to bind the inference session")
 	}
-	if !finiteParkingValue(*telemetry.PositionX) || !finiteParkingValue(*telemetry.PositionY) || !finiteParkingValue(telemetry.CurrentYaw) {
-		return parkingInferenceTarget{}, parkingInferenceError("ego pose contains a non-finite value")
-	}
-
-	headingDeg := normalizeParkingHeading(telemetry.CurrentYaw + telemetry.ParkingHeadingError)
-	headingRad := headingDeg * math.Pi / 180
-	forwardX := -math.Sin(headingRad)
-	forwardY := math.Cos(headingRad)
-	rightX := math.Cos(headingRad)
-	rightY := math.Sin(headingRad)
 	target := parkingInferenceTarget{
-		x:          *telemetry.PositionX - (forwardX * telemetry.ParkingLongitudinalError) - (rightX * telemetry.ParkingLateralError),
-		y:          *telemetry.PositionY - (forwardY * telemetry.ParkingLongitudinalError) - (rightY * telemetry.ParkingLateralError),
-		headingDeg: headingDeg,
+		x:          pose.X,
+		y:          pose.Y,
+		headingDeg: normalizeParkingHeading(pose.Heading),
 	}
 	if !finiteParkingValue(target.x) || !finiteParkingValue(target.y) {
-		return parkingInferenceTarget{}, parkingInferenceError("calibrated parking target pose is invalid")
+		return parkingInferenceTarget{}, parkingInferenceError("calibrated stop-sign target pose is invalid")
 	}
 	return target, nil
 }

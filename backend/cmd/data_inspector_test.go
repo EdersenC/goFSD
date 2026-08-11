@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"awesomeProject/internal/capture"
+	datasetproc "awesomeProject/internal/dataset"
 )
 
 func TestDiscoverInspectorRuns(t *testing.T) {
@@ -19,9 +22,11 @@ func TestDiscoverInspectorRuns(t *testing.T) {
 	writeCommandJSONFile(t, filepath.Join(sceneDir, "run.jsonl"), map[string]any{
 		"tripIndex": 0,
 	})
-	writeJSONLinesFile(t, filepath.Join(tripDir, "dataset.jsonl"), nil)
+	config := capture.DefaultDatasetConfig()
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(config)...)
+	writeCurrentProcessingFixture(t, tripDir, config, processor, 1)
 
-	runs, err := discoverInspectorRuns(root)
+	runs, err := discoverInspectorRuns(root, processor)
 	if err != nil {
 		t.Fatalf("discoverInspectorRuns: %v", err)
 	}
@@ -33,6 +38,34 @@ func TestDiscoverInspectorRuns(t *testing.T) {
 	}
 	if len(runs[0].Scenes) != 1 || len(runs[0].Scenes[0].Trips) != 1 {
 		t.Fatalf("unexpected run structure: %+v", runs[0])
+	}
+	trip := runs[0].Scenes[0].Trips[0]
+	if !trip.ProcessedAvailable || trip.ProcessingState != "completed" ||
+		trip.ProcessingConfigFingerprint != processor.ConfigFingerprint() {
+		t.Fatalf("unexpected processing state: %+v", trip)
+	}
+	if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte{}, 0o644); err != nil {
+		t.Fatalf("truncate processed dataset: %v", err)
+	}
+	runs, err = discoverInspectorRuns(root, processor)
+	if err != nil {
+		t.Fatalf("discoverInspectorRuns after truncation: %v", err)
+	}
+	if runs[0].Scenes[0].Trips[0].ProcessedAvailable {
+		t.Fatal("inspector advertised a truncated dataset as processed")
+	}
+}
+
+func TestInspectTripProcessingStatusSurfacesFailure(t *testing.T) {
+	tripDir := t.TempDir()
+	writeCommandJSONFile(t, filepath.Join(tripDir, "processing.json"), map[string]any{
+		"state": "failed",
+		"error": "ffmpeg exited",
+	})
+
+	state, errorText, fingerprint := inspectTripProcessingStatus(tripDir)
+	if state != "failed" || errorText != "ffmpeg exited" || fingerprint != "" {
+		t.Fatalf("unexpected processing status: state=%q error=%q fingerprint=%q", state, errorText, fingerprint)
 	}
 }
 
@@ -159,7 +192,8 @@ func TestDataInspectorHandlers(t *testing.T) {
 	})
 
 	mux := http.NewServeMux()
-	registerDataInspectorHandlers(mux, root)
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(capture.DefaultDatasetConfig())...)
+	registerDataInspectorHandlers(mux, root, processor)
 
 	req := httptest.NewRequest(http.MethodGet, "/data/runs", nil)
 	rec := httptest.NewRecorder()

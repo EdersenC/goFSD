@@ -48,6 +48,8 @@ type Source struct {
 	Height       int    `json:"height,omitempty"`
 	IsFallback   bool   `json:"isFallback"`
 	OutputIndex  int    `json:"-"`
+	ProcessName  string `json:"-"`
+	WindowClass  string `json:"-"`
 }
 
 type StartRequest struct {
@@ -119,12 +121,14 @@ type monitorInfo struct {
 }
 
 type windowInfo struct {
-	Handle string
-	Title  string
-	X      int
-	Y      int
-	Width  int
-	Height int
+	Handle      string
+	Title       string
+	ProcessName string
+	WindowClass string
+	X           int
+	Y           int
+	Width       int
+	Height      int
 }
 
 type WindowBounds struct {
@@ -509,7 +513,7 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 	for _, w := range windows {
 		title := strings.TrimSpace(w.Title)
 		handle := strings.TrimSpace(w.Handle)
-		if title == "" || handle == "" || !isFiveMTitle(title) {
+		if title == "" || handle == "" || !isFiveMGameWindow(w) {
 			continue
 		}
 
@@ -542,6 +546,8 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 			OffsetY:      w.Y,
 			Width:        w.Width,
 			Height:       w.Height,
+			ProcessName:  w.ProcessName,
+			WindowClass:  w.WindowClass,
 		})
 	}
 
@@ -596,6 +602,8 @@ public class Win32 {
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
 }
 "@
 
@@ -615,7 +623,16 @@ $windows = New-Object System.Collections.Generic.List[string]
     $height = $rect.Bottom - $rect.Top
     if ($width -le 0 -or $height -le 0) { return $true }
     $handle = ('0x{0:X}' -f [Int64]$hWnd)
-    $windows.Add("$handle|$title|$($rect.Left)|$($rect.Top)|$width|$height")
+    $processId = [uint32]0
+    [void][Win32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
+    $processName = ""
+    if ($processId -gt 0) {
+      try { $processName = [System.Diagnostics.Process]::GetProcessById([int]$processId).ProcessName } catch {}
+    }
+    $classNameBuilder = New-Object System.Text.StringBuilder(256)
+    [void][Win32]::GetClassName($hWnd, $classNameBuilder, $classNameBuilder.Capacity)
+    $className = $classNameBuilder.ToString()
+    $windows.Add("$handle|$title|$($rect.Left)|$($rect.Top)|$width|$height|$processName|$className")
   }
   return $true
 }, [IntPtr]::Zero) | Out-Null
@@ -638,8 +655,8 @@ func parseWindows(raw string) []windowInfo {
 			continue
 		}
 
-		parts := strings.SplitN(line, "|", 6)
-		if len(parts) != 6 {
+		parts := strings.SplitN(line, "|", 8)
+		if len(parts) != 8 {
 			continue
 		}
 		handle := strings.TrimSpace(parts[0])
@@ -648,17 +665,21 @@ func parseWindows(raw string) []windowInfo {
 		y, errY := strconv.Atoi(strings.TrimSpace(parts[3]))
 		width, errW := strconv.Atoi(strings.TrimSpace(parts[4]))
 		height, errH := strconv.Atoi(strings.TrimSpace(parts[5]))
+		processName := strings.TrimSpace(parts[6])
+		windowClass := strings.TrimSpace(parts[7])
 		if handle == "" || title == "" || errX != nil || errY != nil || errW != nil || errH != nil || width <= 0 || height <= 0 {
 			continue
 		}
 
 		windows = append(windows, windowInfo{
-			Handle: handle,
-			Title:  title,
-			X:      x,
-			Y:      y,
-			Width:  width,
-			Height: height,
+			Handle:      handle,
+			Title:       title,
+			ProcessName: processName,
+			WindowClass: windowClass,
+			X:           x,
+			Y:           y,
+			Width:       width,
+			Height:      height,
 		})
 	}
 	return windows
@@ -958,7 +979,7 @@ func bestMonitorForWindow(sources []Source, window Source) (Source, bool) {
 
 func preferredWindowSource(sources []Source) (Source, bool) {
 	for _, source := range sources {
-		if source.CaptureType == "window" && isPreferredGameWindow(source.Name) {
+		if source.CaptureType == "window" && isPreferredGameSource(source) {
 			return source, true
 		}
 	}
@@ -1071,6 +1092,35 @@ func isPreferredGameWindow(name string) bool {
 		return false
 	}
 	return true
+}
+
+func isPreferredGameSource(source Source) bool {
+	if isFiveMGameProcess(source.ProcessName) || isFiveMGameWindowClass(source.WindowClass) {
+		return isFiveMTitle(source.Name)
+	}
+	return isPreferredGameWindow(source.Name)
+}
+
+func isFiveMGameWindow(window windowInfo) bool {
+	if !isFiveMTitle(window.Title) {
+		return false
+	}
+	if isFiveMGameProcess(window.ProcessName) || isFiveMGameWindowClass(window.WindowClass) {
+		return true
+	}
+	if strings.TrimSpace(window.ProcessName) != "" || strings.TrimSpace(window.WindowClass) != "" {
+		return false
+	}
+	return isPreferredGameWindow(window.Title)
+}
+
+func isFiveMGameProcess(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(n, "fivem") && strings.Contains(n, "gtaprocess")
+}
+
+func isFiveMGameWindowClass(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "grcWindow")
 }
 
 func runPowerShell(ctx context.Context, script string) (string, error) {

@@ -31,7 +31,8 @@ import (
 
 const (
 	defaultInferenceModelServerURL = "http://127.0.0.1:8090"
-	defaultInferenceSourceID       = "monitor-2"
+	autoInferenceSourceID          = "auto"
+	defaultInferenceSourceID       = autoInferenceSourceID
 	defaultInferenceFPS            = 30
 	defaultInferenceWindowSize     = 3
 	defaultInferenceStride         = 2
@@ -45,6 +46,7 @@ const (
 	defaultActuatorConfirmTimeout  = 750 * time.Millisecond
 	defaultActuatorConfirmInterval = 10 * time.Millisecond
 	defaultFrameTimingTimeout      = 500 * time.Millisecond
+	defaultModelStatusSyncTimeout  = 750 * time.Millisecond
 	framePTSCadenceTolerance       = 2 * time.Millisecond
 	framePTSClockLeadTolerance     = 50 * time.Millisecond
 )
@@ -110,27 +112,35 @@ type InferencePrediction struct {
 }
 
 type InferenceStatus struct {
-	State            string               `json:"state"`
-	Active           bool                 `json:"active"`
-	SourceID         string               `json:"sourceId,omitempty"`
-	SourceFPS        int                  `json:"sourceFps"`
-	InferenceHz      int                  `json:"inferenceHz"`
-	WindowSize       int                  `json:"windowSize"`
-	FrameStride      int                  `json:"frameStride"`
-	DispatchStride   int                  `json:"dispatchStride"`
-	FrameWidth       int                  `json:"frameWidth"`
-	FrameHeight      int                  `json:"frameHeight"`
-	ModelServerURL   string               `json:"modelServerUrl,omitempty"`
-	StartedAt        string               `json:"startedAt,omitempty"`
-	StoppedAt        string               `json:"stoppedAt,omitempty"`
-	DebugFramesDir   string               `json:"debugFramesDir,omitempty"`
-	DebugFramesSaved int                  `json:"debugFramesSaved"`
-	DebugFramesLimit int                  `json:"debugFramesLimit"`
-	LastPrediction   *InferencePrediction `json:"lastPrediction,omitempty"`
-	FramesSeen       int                  `json:"framesSeen"`
-	PredictionsSent  int                  `json:"predictionsSent"`
-	PredictionErrors int                  `json:"predictionErrors"`
-	LastError        string               `json:"lastError,omitempty"`
+	State               string               `json:"state"`
+	Active              bool                 `json:"active"`
+	ActuatorReady       bool                 `json:"actuatorReady"`
+	ControllerReady     bool                 `json:"controllerReady"`
+	CalibrationVerified bool                 `json:"calibrationVerified"`
+	CalibrationID       string               `json:"calibrationId,omitempty"`
+	SafetyReady         bool                 `json:"safetyReady"`
+	SafetyBlocker       string               `json:"safetyBlocker,omitempty"`
+	SourceID            string               `json:"sourceId,omitempty"`
+	SourceFPS           int                  `json:"sourceFps"`
+	InferenceHz         int                  `json:"inferenceHz"`
+	WindowSize          int                  `json:"windowSize"`
+	FrameStride         int                  `json:"frameStride"`
+	DispatchStride      int                  `json:"dispatchStride"`
+	FrameWidth          int                  `json:"frameWidth"`
+	FrameHeight         int                  `json:"frameHeight"`
+	ModelServerURL      string               `json:"modelServerUrl,omitempty"`
+	LoadedCheckpoint    string               `json:"loadedCheckpoint,omitempty"`
+	LoadedModelDevice   string               `json:"loadedModelDevice,omitempty"`
+	StartedAt           string               `json:"startedAt,omitempty"`
+	StoppedAt           string               `json:"stoppedAt,omitempty"`
+	DebugFramesDir      string               `json:"debugFramesDir,omitempty"`
+	DebugFramesSaved    int                  `json:"debugFramesSaved"`
+	DebugFramesLimit    int                  `json:"debugFramesLimit"`
+	LastPrediction      *InferencePrediction `json:"lastPrediction,omitempty"`
+	FramesSeen          int                  `json:"framesSeen"`
+	PredictionsSent     int                  `json:"predictionsSent"`
+	PredictionErrors    int                  `json:"predictionErrors"`
+	LastError           string               `json:"lastError,omitempty"`
 }
 
 type inferenceSession struct {
@@ -322,8 +332,52 @@ func NewInferencer(cfg InferenceConfig, _ actuator.Config, telemetry *control.St
 
 func (i *Inferencer) Status() InferenceStatus {
 	i.mu.Lock()
-	defer i.mu.Unlock()
-	return cloneInferenceStatus(i.status)
+	status := cloneInferenceStatus(i.status)
+	status.LoadedCheckpoint = i.loadedCheckpoint
+	status.LoadedModelDevice = i.loadedModelDevice
+	i.mu.Unlock()
+
+	i.populateInferencePreflight(&status)
+	return status
+}
+
+func (i *Inferencer) populateInferencePreflight(status *InferenceStatus) {
+	if status == nil {
+		return
+	}
+
+	if provider, ok := i.actuator.(actuatorStateProvider); ok {
+		state := provider.State()
+		status.ActuatorReady = state.Supported && state.Ready
+		status.ControllerReady = state.ParkingController.Ready
+		status.CalibrationVerified = state.ParkingController.Calibration.Verified
+		status.CalibrationID = strings.TrimSpace(state.ParkingController.Calibration.ProfileID)
+	}
+
+	if status.Active {
+		status.SafetyBlocker = "a self-driving test is already active"
+		return
+	}
+	if err := i.validateParkingInferenceStart(); err != nil {
+		status.SafetyBlocker = inferencePreflightMessage(err)
+		return
+	}
+	if err := i.validateInferenceActuatorReady(); err != nil {
+		status.SafetyBlocker = inferencePreflightMessage(err)
+		return
+	}
+	status.SafetyReady = true
+}
+
+func inferencePreflightMessage(err error) string {
+	message := strings.TrimSpace(err.Error())
+	for _, prefix := range []string{
+		ErrParkingInferencePrecondition.Error() + ":",
+		ErrInferenceActuatorUnavailable.Error() + ":",
+	} {
+		message = strings.TrimSpace(strings.TrimPrefix(message, prefix))
+	}
+	return message
 }
 
 func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (InferenceStatus, error) {
@@ -357,7 +411,7 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		return InferenceStatus{}, err
 	}
 
-	monitor, ok := monitorByID(sources, i.sourceID)
+	monitor, ok := resolveInferenceMonitor(sources, i.sourceID)
 	if !ok {
 		return InferenceStatus{}, ErrSourceNotFound
 	}
@@ -386,6 +440,9 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	if err != nil {
 		return InferenceStatus{}, fmt.Errorf("%w: %w", ErrInferenceStartFailed, err)
 	}
+	if err := inferenceStartRequestError(ctx); err != nil {
+		return InferenceStatus{}, err
+	}
 
 	i.mu.Lock()
 	if i.active != nil {
@@ -393,6 +450,7 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		return InferenceStatus{}, ErrInferenceAlreadyRunning
 	}
 
+	previousStatus := cloneInferenceStatus(i.status)
 	startedAt := i.nowFunc().UTC()
 	status := InferenceStatus{
 		State:            "starting",
@@ -413,6 +471,8 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 
 	spec := monitorCaptureSpec(monitor)
 	loopCtx, cancel := context.WithCancel(context.Background())
+	detachRequestCancellation := context.AfterFunc(ctx, cancel)
+	defer detachRequestCancellation()
 	args := buildInferenceFFmpegArgs(spec, i.config)
 	cmd := i.newCommand(loopCtx, i.ffmpegBin, args...)
 	stdout, err := cmd.StdoutPipe()
@@ -433,6 +493,9 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		i.setInferenceError(err)
 		return InferenceStatus{}, fmt.Errorf("%w: %v", ErrInferenceStartFailed, err)
 	}
+	if err := inferenceStartRequestError(ctx); err != nil {
+		return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, false, err)
+	}
 	if err := i.armActuatorForParkingInference(); err != nil {
 		cancel()
 		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
@@ -441,13 +504,33 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 		i.setInferenceError(err)
 		return InferenceStatus{}, fmt.Errorf("%w: failed to establish parking actuator ownership: %v", ErrInferenceStartFailed, err)
 	}
+	if err := inferenceStartRequestError(ctx); err != nil {
+		return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, true, err)
+	}
 	if err := cmd.Start(); err != nil {
+		if requestErr := inferenceStartRequestError(ctx); requestErr != nil {
+			return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, true, requestErr)
+		}
 		cancel()
 		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
 			err = fmt.Errorf("%w; failed to restore the parking safety hold: %v", err, holdErr)
 		}
 		i.setInferenceError(err)
 		return InferenceStatus{}, fmt.Errorf("%w: %v", ErrInferenceStartFailed, err)
+	}
+	detached := detachRequestCancellation()
+	requestErr := inferenceStartRequestError(ctx)
+	if !detached || requestErr != nil {
+		if requestErr == nil {
+			requestErr = fmt.Errorf("%w: request ended while inference capture was starting", ErrInferenceStartFailed)
+		}
+		cancel()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = stdin.Close()
+		_ = cmd.Wait()
+		return InferenceStatus{}, i.rollbackCanceledInferenceStart(previousStatus, cancel, true, requestErr)
 	}
 
 	frameDump, err := newDebugFrameDump(i.nowFunc())
@@ -501,6 +584,50 @@ func (i *Inferencer) Start(ctx context.Context, req InferenceStartRequest) (Infe
 	return status, nil
 }
 
+func inferenceStartRequestError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: request ended before inference startup committed: %w", ErrInferenceStartFailed, err)
+	}
+	return nil
+}
+
+func (i *Inferencer) rollbackCanceledInferenceStart(previousStatus InferenceStatus, cancel context.CancelFunc, armed bool, cause error) error {
+	cancel()
+	if armed {
+		if holdErr := i.submitParkingSafetyHold(0); holdErr != nil {
+			combined := fmt.Errorf("%w; failed to restore the parking safety hold: %v", cause, holdErr)
+			i.setInferenceError(combined)
+			return combined
+		}
+	}
+
+	i.mu.Lock()
+	if i.active == nil {
+		i.status = cloneInferenceStatus(previousStatus)
+	}
+	i.mu.Unlock()
+	return cause
+}
+
+func resolveInferenceMonitor(sources []Source, configuredSourceID string) (Source, bool) {
+	configuredSourceID = strings.TrimSpace(configuredSourceID)
+	if configuredSourceID != "" && !strings.EqualFold(configuredSourceID, autoInferenceSourceID) {
+		return monitorByID(sources, configuredSourceID)
+	}
+
+	if window, ok := preferredWindowSource(sources); ok {
+		if monitor, found := bestMonitorForWindow(sources, window); found {
+			return monitor, true
+		}
+	}
+	if window, ok := anyWindowSource(sources); ok {
+		if monitor, found := bestMonitorForWindow(sources, window); found {
+			return monitor, true
+		}
+	}
+	return fallbackMonitorSource(sources)
+}
+
 func (i *Inferencer) Models(ctx context.Context, modelServerURL string) ([]InferenceModelOption, error) {
 	modelServerURL = strings.TrimRight(strings.TrimSpace(modelServerURL), "/")
 	if modelServerURL == "" {
@@ -525,6 +652,7 @@ func (i *Inferencer) Models(ctx context.Context, modelServerURL string) ([]Infer
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, err
 	}
+	i.syncRemoteLoadedModel(ctx, modelServerURL)
 	return parsed.Models, nil
 }
 
@@ -558,24 +686,66 @@ func (i *Inferencer) LoadModel(ctx context.Context, req InferenceModelLoadReques
 	}
 	parsed, err := i.postRemoteModelLoad(ctx, modelServerURL, payload)
 	if err != nil {
+		i.clearLoadedModel()
 		return nil, err
 	}
-
-	i.mu.Lock()
-	i.modelServerURL = modelServerURL
-	if checkpoint, ok := parsed["checkpoint"].(string); ok {
-		i.loadedCheckpoint = strings.TrimSpace(checkpoint)
-	} else if checkpoint := strings.TrimSpace(req.Checkpoint); checkpoint != "" {
-		i.loadedCheckpoint = checkpoint
+	modelStatus, err := i.validateLoadedParkingModel(ctx, modelServerURL)
+	if err != nil {
+		i.clearLoadedModel()
+		return nil, fmt.Errorf("loaded checkpoint failed the parking compatibility check: %w", err)
 	}
-	if resolvedDevice, ok := parsed["device"].(string); ok && strings.TrimSpace(resolvedDevice) != "" {
-		i.loadedModelDevice = strings.TrimSpace(resolvedDevice)
-	} else if device != "" {
-		i.loadedModelDevice = device
-	}
-	i.mu.Unlock()
 
+	resolvedDevice := strings.TrimSpace(modelStatus.Device)
+	if resolvedDevice == "" {
+		if value, ok := parsed["device"].(string); ok {
+			resolvedDevice = strings.TrimSpace(value)
+		}
+	}
+	if resolvedDevice == "" {
+		resolvedDevice = device
+	}
+	i.setLoadedModel(modelServerURL, modelStatus.Checkpoint, resolvedDevice)
+	parsed["status"] = "loaded"
+	parsed["checkpoint"] = strings.TrimSpace(modelStatus.Checkpoint)
+	if resolvedDevice != "" {
+		parsed["device"] = resolvedDevice
+	}
 	return parsed, nil
+}
+
+func (i *Inferencer) syncRemoteLoadedModel(ctx context.Context, modelServerURL string) {
+	syncCtx, cancel := context.WithTimeout(ctx, defaultModelStatusSyncTimeout)
+	defer cancel()
+	status, err := i.fetchParkingModelStatus(syncCtx, modelServerURL)
+	if err != nil {
+		return
+	}
+	if err := validateParkingModelStatus(status, i.config); err != nil {
+		i.clearLoadedModel()
+		return
+	}
+	i.setLoadedModel(modelServerURL, status.Checkpoint, status.Device)
+}
+
+func (i *Inferencer) setLoadedModel(modelServerURL string, checkpoint string, device string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.modelServerURL = modelServerURL
+	i.loadedCheckpoint = strings.TrimSpace(checkpoint)
+	i.loadedModelDevice = strings.TrimSpace(device)
+	if i.loadedModelDevice == "" {
+		i.loadedModelDevice = strings.TrimSpace(i.config.ModelDevice)
+	}
+	if i.loadedCheckpoint == "" {
+		i.loadedModelDevice = ""
+	}
+}
+
+func (i *Inferencer) clearLoadedModel() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.loadedCheckpoint = ""
+	i.loadedModelDevice = ""
 }
 
 func (i *Inferencer) Stop(ctx context.Context) (InferenceStatus, error) {
@@ -1078,10 +1248,6 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 		"telemetry_feature_names": i.config.TelemetryFeatureNames,
 		"control_output_names":    i.config.ControlOutputNames,
 	}
-	if len(selection.selectedTelemetry) > 0 {
-		currentTelemetry := selection.selectedTelemetry[len(selection.selectedTelemetry)-1]
-		addCurrentTelemetryInputs(bodyPayload, currentTelemetry)
-	}
 	body, err := json.Marshal(bodyPayload)
 	if err != nil {
 		return nil, err
@@ -1124,33 +1290,6 @@ func (i *Inferencer) requestPrediction(ctx context.Context, modelServerURL strin
 		return nil, err
 	}
 	return prediction, nil
-}
-
-func addCurrentTelemetryInputs(payload map[string]any, telemetry control.RuntimeTelemetry) {
-	payload["currentSpeed"] = telemetry.CurrentSpeed
-	payload["routeForwardDelta"] = telemetry.RouteForwardDelta
-	payload["routeHeadingError"] = telemetry.RouteHeadingError
-	payload["routeDistance"] = telemetry.RouteDistance
-	payload["leadVehicleDistance"] = telemetry.LeadVehicleDistance
-	payload["hasLeadVehicle"] = telemetry.HasLeadVehicle
-	payload["routeDirectionUnknown"] = telemetry.RouteDirectionUnknown
-	payload["routeDirectionKeepStraight"] = telemetry.RouteDirectionKeepStraight
-	payload["routeDirectionTurnLeft"] = telemetry.RouteDirectionTurnLeft
-	payload["routeDirectionTurnRight"] = telemetry.RouteDirectionTurnRight
-	payload["routeDirectionRerouteWrongWay"] = telemetry.RouteDirectionRerouteWrongWay
-	payload["routeDirectionCode"] = telemetry.RouteDirectionCode
-	payload["routeDirectionDistanceM"] = telemetry.RouteDirectionDistanceM
-	payload["parkingTargetConfigured"] = telemetry.ParkingTargetConfigured
-	payload["parkingLongitudinalError"] = telemetry.ParkingLongitudinalError
-	payload["parkingLateralError"] = telemetry.ParkingLateralError
-	payload["parkingHeadingError"] = telemetry.ParkingHeadingError
-	payload["parkingDistance"] = telemetry.ParkingDistance
-	payload["parkingInsideBay"] = telemetry.ParkingInsideBay
-	payload["parkingAligned"] = telemetry.ParkingAligned
-	payload["parkingParked"] = telemetry.ParkingParked
-	payload["parkingAttemptIndex"] = telemetry.ParkingAttemptIndex
-	payload["parkingAttemptCount"] = telemetry.ParkingAttemptCount
-	payload["parkingPhase"] = telemetry.ParkingPhase
 }
 
 func (i *Inferencer) submitActuatorPrediction(prediction *InferencePrediction) error {
@@ -1674,9 +1813,9 @@ func (i *Inferencer) buildPrediction(
 	for index, row := range controls[0] {
 		points = append(points, parkingcontrol.Setpoint{
 			DtMs:                        i.config.ControlHorizonDtMs[index],
-			DesiredWheelSteerNormalized: row[0],
-			DesiredSpeedMPS:             row[1],
-			StopProbability:             row[2],
+			DesiredWheelSteerNormalized: 0,
+			DesiredSpeedMPS:             row[0],
+			StopProbability:             row[1],
 		})
 	}
 	plan := parkingcontrol.Plan{

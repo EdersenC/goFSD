@@ -7,7 +7,7 @@ import math
 import torch
 import torch.nn as nn
 
-from control_contract import apply_parking_control_activations, require_parking_control_target_names
+from control_contract import apply_stop_sign_control_activations, require_stop_sign_control_target_names
 
 
 def scaled_width(base: int, width_multiplier: float) -> int:
@@ -152,7 +152,7 @@ class DrivingCNN(nn.Module):
         if control_dim < 1:
             raise ValueError("control_dim must be > 0")
         if control_target_names is not None:
-            resolved_control_target_names = require_parking_control_target_names(
+            resolved_control_target_names = require_stop_sign_control_target_names(
                 control_target_names,
                 source="DrivingCNN.control_target_names",
             )
@@ -400,7 +400,7 @@ class DrivingCNN(nn.Module):
         decoder_input = torch.cat((context_expanded, horizon_tokens), dim=-1)
         raw_controls = self.control_decoder(decoder_input)
         pred_controls = (
-            apply_parking_control_activations(raw_controls, self.control_target_names)
+            apply_stop_sign_control_activations(raw_controls, self.control_target_names)
             if self.control_target_names is not None
             else raw_controls
         )
@@ -416,6 +416,7 @@ class DrivingCNN(nn.Module):
                 f"expected [B, {self.horizon}, {self.aux_dim}], got {tuple(pred_aux.shape)}"
             )
         return {
+            "pred_motion_plan": pred_controls,
             "pred_controls": pred_controls,
             "pred_control_logits": raw_controls,
             "pred_aux": pred_aux,

@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import {gtaForwardVector, poseBehind, relativeStopLinePose} from "./geometry";
+import {
+    brakingOnsetDistance,
+    classifyStopSignPhase,
+    planStopSignExpert,
+} from "./expert";
+import {parseStopSignJobs} from "./batch";
+
+function testGeometryUsesGtaHeadingConvention() {
+    const north = gtaForwardVector(0);
+    assert(Math.abs(north[0]) < 1e-9 && Math.abs(north[1] - 1) < 1e-9);
+    const west = gtaForwardVector(90);
+    assert(Math.abs(west[0] + 1) < 1e-9 && Math.abs(west[1]) < 1e-9);
+    assert.deepEqual(poseBehind({x: 10, y: 20, z: 3, heading: 0}, 4), {
+        x: 10,
+        y: 16,
+        z: 3,
+        heading: 0,
+    });
+    const relative = relativeStopLinePose(
+        {x: 10, y: 8, z: 3, heading: 0},
+        {x: 10, y: 10, z: 3, heading: 0},
+    );
+    assert.equal(relative.longitudinalM, -2);
+    assert.equal(relative.lateralM, 0);
+}
+
+function testPhaseClassificationIsTemporalButNotSequenceDependent() {
+    assert.equal(classifyStopSignPhase(30, 1, 8), "accelerate");
+    assert.equal(classifyStopSignPhase(30, 8, 8), "cruise_approach");
+    assert.equal(classifyStopSignPhase(brakingOnsetDistance(8) - 0.1, 8, 8), "decelerate");
+}
+
+function testApproachTransitionsFromThrottleToBrake() {
+    const far = planStopSignExpert({
+        phase: "accelerate",
+        remainingDistanceM: 30,
+        measuredSpeedMps: 1,
+        targetSpeedMps: 8,
+        previousDesiredSpeedMps: 1,
+        dtSeconds: 0.05,
+        lateralErrorM: 0,
+        headingErrorDeg: 0,
+    });
+    const near = planStopSignExpert({
+        phase: "decelerate",
+        remainingDistanceM: 0.8,
+        measuredSpeedMps: 5,
+        targetSpeedMps: 8,
+        previousDesiredSpeedMps: 5,
+        dtSeconds: 0.05,
+        lateralErrorM: 0,
+        headingErrorDeg: 0,
+    });
+    assert(far.throttle > 0 && far.brake === 0);
+    assert(near.brake > 0 && near.throttle === 0);
+    assert(near.stopProbability > far.stopProbability);
+}
+
+function testStopAndGoLabelsAreExplicit() {
+    const common = {
+        remainingDistanceM: 0,
+        measuredSpeedMps: 0,
+        targetSpeedMps: 7,
+        previousDesiredSpeedMps: 0,
+        dtSeconds: 0.05,
+        lateralErrorM: 0,
+        headingErrorDeg: 0,
+    };
+    const stop = planStopSignExpert({...common, phase: "stop_hold"});
+    const go = planStopSignExpert({...common, phase: "release"});
+    assert.equal(stop.brake, 1);
+    assert.equal(stop.stopProbability, 1);
+    assert.equal(go.goProbability, 1);
+    assert(go.throttle > 0);
+}
+
+function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
+    const signPose = {x: 100, y: 200, z: 8, heading: 90};
+    const stopDistanceM = 4;
+    const egoCenterOffsetM = 2.5;
+    const startDistanceM = 40;
+    const stopLinePose = poseBehind(signPose, stopDistanceM);
+    const egoStopPose = poseBehind(stopLinePose, egoCenterOffsetM);
+    const startPose = poseBehind(egoStopPose, startDistanceM);
+    const job = {
+        id: "alta:base",
+        entryId: "alta",
+        variationId: "base",
+        signPose,
+        stopLinePose,
+        egoStopPose,
+        startPose,
+        stopDistanceM,
+        egoCenterOffsetM,
+        startDistanceM,
+        targetSpeedMps: 8,
+        dwellMs: 5000,
+        attemptCount: 2,
+        weather: "EXTRASUNNY",
+        time: {hour: 12, minute: 0},
+        vehicle: {model: "sultan"},
+        seed: "fresh:alta:base",
+    };
+    assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
+    assert.throws(
+        () => parseStopSignJobs([{...job, egoStopPose: {...egoStopPose, y: egoStopPose.y + 1}}]),
+        /contradicts the sign-relative distance contract/,
+    );
+}
+
+testGeometryUsesGtaHeadingConvention();
+testPhaseClassificationIsTemporalButNotSequenceDependent();
+testApproachTransitionsFromThrottleToBrake();
+testStopAndGoLabelsAreExplicit();
+testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
+console.log("stop-sign expert tests passed");

@@ -15,6 +15,7 @@ var ErrInvalidInput = errors.New("invalid parking feedback controller input")
 // Config defines the calibrated steering map and closed-loop safety bounds.
 type Config struct {
 	SteeringProfile                 []SteeringCalibrationPoint `json:"steering_profile" toml:"steering_profile"`
+	StraightApproachOnly            bool                       `json:"straight_approach_only" toml:"straight_approach_only"`
 	SteeringFeedbackGain            float64                    `json:"steering_feedback_gain" toml:"steering_feedback_gain"`
 	SteeringKi                      float64                    `json:"steering_ki" toml:"steering_ki"`
 	SteeringIntegralMin             float64                    `json:"steering_integral_min" toml:"steering_integral_min"`
@@ -190,8 +191,12 @@ type steeringControlTrace struct {
 }
 
 func (c *Controller) steeringTarget(input Input, dtSeconds float64) (float64, steeringControlTrace) {
-	err := input.DesiredWheelSteer - input.MeasuredWheelSteer
-	feedForward := c.steeringProfile.commandFor(input.DesiredWheelSteer)
+	desiredWheelSteer := input.DesiredWheelSteer
+	if c.config.StraightApproachOnly {
+		desiredWheelSteer = 0
+	}
+	err := desiredWheelSteer - input.MeasuredWheelSteer
+	feedForward := c.steeringProfile.commandFor(desiredWheelSteer)
 	candidateIntegral := clamp(
 		c.steeringIntegral+err*dtSeconds,
 		c.config.SteeringIntegralMin,

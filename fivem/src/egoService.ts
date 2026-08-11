@@ -9,9 +9,21 @@ import {
     gtaRightVector,
     headingDeltaDegrees,
 } from "./parking/geometry";
-import {ParkingGoal, ParkingOutcome, ParkingTelemetry} from "./parking/types";
+import {
+    ParkingExpertSupervision,
+    ParkingGoal,
+    ParkingOutcome,
+    ParkingTelemetry,
+} from "./parking/types";
 import {EgoControlTelemetry} from "./controlTelemetry";
 import {normalizeVehicleSteering, VehicleSteeringSample} from "./vehicleSteering";
+import {requireManagedEgoDisposed} from "./managed-ego-disposal";
+import {
+    StopSignExpertSupervision,
+    StopSignGoal,
+    StopSignOutcome,
+    StopSignTelemetry,
+} from "./stop-sign/types";
 
 
 export enum DrivingFlag {
@@ -216,6 +228,10 @@ type RecordingContext = {
         goal: ParkingGoal
         outcome?: ParkingOutcome
     }
+    stopSign?: {
+        goal: StopSignGoal
+        outcome?: StopSignOutcome
+    }
 }
 
 const VehicleNodeFlags = {
@@ -225,7 +241,23 @@ const VehicleNodeFlags = {
     TrafficLight: 1 << 8,
 } as const;
 
-export interface VehicleData {
+type TripSummaryTelemetry = {
+    eventCollision?: boolean
+    eventOffroad?: boolean
+    eventWrongWay?: boolean
+    eventReversing?: boolean
+    eventHandbrake?: boolean
+    isInJunction?: boolean
+    isStoppedAtTrafficLights?: boolean
+    hasLeadVehicle?: boolean
+    routeGpsValid?: boolean
+    isOnRoad?: boolean
+    isHighway?: boolean
+    nearbyVehicleCount30m?: number
+    nearbyPedCount20m?: number
+}
+
+export interface GeneralVehicleData extends TripSummaryTelemetry {
     time: number
     currentSpeed: number
     drivingStyle: DrivingStyle
@@ -296,6 +328,7 @@ export interface VehicleData {
     scenarioGoal?: string
     scenarioFactors?: Record<string, unknown>
     parkingTargetConfigured?: boolean
+    parkingStartConfigured?: boolean
     parkingLongitudinalError?: number
     parkingLateralError?: number
     parkingHeadingError?: number
@@ -306,6 +339,76 @@ export interface VehicleData {
     parkingAttemptIndex?: number
     parkingAttemptCount?: number
     parkingPhase?: string
+}
+
+/** The complete per-frame payload allowed for parking training trips. */
+export interface ParkingVehicleData extends TripSummaryTelemetry {
+    time: number
+    currentSpeed: number
+    expertDesiredWheelSteerNormalized: number
+    expertDesiredSpeedMps: number
+    expertStopProbability: number
+}
+
+/** Per-frame supervision for stop-sign temporal clips. Geometry fields are labels only. */
+export interface StopSignVehicleData extends TripSummaryTelemetry {
+    time: number
+    currentSpeed: number
+    acceleration: number
+    brakePressureAvg: number
+    wheelAngle: number
+    wheelSteeringFullLock: number
+    stopSignPhase: string
+    stopLineDistanceM: number
+    expertDistanceToStopLineM: number
+    stopSignLongitudinalErrorM: number
+    stopSignLateralErrorM: number
+    stopSignHeadingErrorDeg: number
+    expertDesiredWheelSteerNormalized: number
+    expertDesiredSpeedMps: number
+    expertThrottle: number
+    expertBrake: number
+    expertStopProbability: number
+    expertGoProbability: number
+}
+
+export type VehicleData = GeneralVehicleData | ParkingVehicleData | StopSignVehicleData
+
+export function buildParkingVehicleData(
+    time: number,
+    currentSpeed: number,
+    supervision: ParkingExpertSupervision
+): ParkingVehicleData {
+    requireFiniteAtLeast(time, "time", 0);
+    requireFiniteAtLeast(currentSpeed, "currentSpeed", 0);
+    requireFiniteInRange(
+        supervision.desiredWheelSteerNormalized,
+        "desiredWheelSteerNormalized",
+        -1,
+        1
+    );
+    requireFiniteAtLeast(supervision.desiredSpeedMps, "desiredSpeedMps", 0);
+    requireFiniteInRange(supervision.stopProbability, "stopProbability", 0, 1);
+
+    return {
+        time,
+        currentSpeed,
+        expertDesiredWheelSteerNormalized: supervision.desiredWheelSteerNormalized,
+        expertDesiredSpeedMps: supervision.desiredSpeedMps,
+        expertStopProbability: supervision.stopProbability,
+    };
+}
+
+function requireFiniteAtLeast(value: number, name: string, minimum: number) {
+    if (!Number.isFinite(value) || value < minimum) {
+        throw new RangeError(`${name} must be finite and at least ${minimum}`);
+    }
+}
+
+function requireFiniteInRange(value: number, name: string, minimum: number, maximum: number) {
+    if (!Number.isFinite(value) || value < minimum || value > maximum) {
+        throw new RangeError(`${name} must be finite and within [${minimum}, ${maximum}]`);
+    }
 }
 
 type RouteDirectionTelemetry = {
@@ -343,6 +446,8 @@ export interface WaypointCompleted {
     scenarioGoal?: string
     parkingGoal?: ParkingGoal
     parkingOutcome?: ParkingOutcome
+    stopSignGoal?: StopSignGoal
+    stopSignOutcome?: StopSignOutcome
 }
 
 export const SceneStoppedErrorCode = "SCENE_STOPPED";
@@ -367,13 +472,26 @@ export class EgoService {
     // @ts-ignore
     private activeAbortController: AbortControllerCompat | null = null;
 
-    public async execute(ego: Ego, sceneName: string, runId?: string, baseEnvironment?: Environment) {
-        await this.executeEgo(ego, sceneName, runId, baseEnvironment);
-        await this.routeEgo(ego)
+    public async execute(
+        ego: Ego,
+        sceneName: string,
+        isCanceled: () => boolean,
+        runId?: string,
+        baseEnvironment?: Environment,
+    ) {
+        await this.executeEgo(ego, sceneName, isCanceled, runId, baseEnvironment);
+        this.throwIfSceneCanceled(isCanceled);
+        await this.routeEgo(ego, isCanceled)
         return
     }
 
-    public async executeEgo(ego: Ego, sceneName: string, runId?: string, baseEnvironment?: Environment) {
+    public async executeEgo(
+        ego: Ego,
+        sceneName: string,
+        isCanceled: () => boolean,
+        runId?: string,
+        baseEnvironment?: Environment,
+    ) {
         ego.vehicle.VehicleData = []
         this.SceneName = sceneName
         this.RunId = runId && runId.trim() !== "" ? runId : this.createRunId()
@@ -390,11 +508,14 @@ export class EgoService {
         }
         this.oldEgo = ego;
         ClearPedTasksImmediately(PlayerPedId());
-        await this.setVehicle(ego);
+        await this.setVehicle(ego, undefined, undefined, isCanceled);
+        if (isCanceled() || this.oldEgo !== ego) {
+            this.cleanUp(ego);
+            throw new Error("Ego vehicle initialization was canceled by a safety stop");
+        }
         if (!isValidEntity(ego.vehicle.id)) {
             throw new Error("failed to initialize ego vehicle");
         }
-        SetPlayerInvincible(PlayerId(), true);
         SetVehRadioStation(ego.vehicle.id, "OFF");
         SetVehicleEngineOn(ego.vehicle.id, true, true, false);
         SetVehicleUndriveable(ego.vehicle.id, false);
@@ -406,7 +527,13 @@ export class EgoService {
         return
     }
 
-    public async executeEgoAt(ego: Ego, spawn: SpawnPoint, sceneName: string, runId: string) {
+    public async executeEgoAt(
+        ego: Ego,
+        spawn: SpawnPoint,
+        sceneName: string,
+        runId: string,
+        isCanceled: () => boolean = () => false,
+    ) {
         ego.vehicle.VehicleData = [];
         this.SceneName = sceneName;
         this.RunId = runId;
@@ -424,12 +551,15 @@ export class EgoService {
         this.oldEgo = ego;
         ClearPedTasksImmediately(PlayerPedId());
 
-        const vehicleReady = await this.setEgoVehicleAt(ego, spawn);
+        const vehicleReady = await this.setEgoVehicleAt(ego, spawn, undefined, undefined, isCanceled);
+        if (isCanceled() || this.oldEgo !== ego) {
+            this.cleanUp(ego);
+            throw new Error("Ego spawn was canceled by a safety stop");
+        }
         if (!vehicleReady || !isValidEntity(ego.vehicle.id)) {
             throw new Error("failed to initialize ego vehicle at requested spawn");
         }
 
-        SetPlayerInvincible(PlayerId(), true);
         SetVehRadioStation(ego.vehicle.id, "OFF");
         SetVehicleEngineOn(ego.vehicle.id, true, true, false);
         SetVehicleUndriveable(ego.vehicle.id, false);
@@ -578,6 +708,52 @@ export class EgoService {
         this.activeTripContext = null;
     }
 
+    public beginStopSignAttemptRecording(
+        ego: Ego,
+        context: {
+            runId: string
+            sceneId: string
+            sceneVariant: string
+            tripIndex: number
+            syncTime: number
+            fromDestination: Vector3
+            toDestination: Vector3
+            tripProfile: TripProfileSnapshot
+            goal: StopSignGoal
+        },
+    ) {
+        this.RunId = context.runId;
+        this.SceneName = `${context.sceneId}:${context.sceneVariant}`;
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
+        ego.vehicle.VehicleData = [];
+        this.activeTripContext = {
+            recordingType: "trip",
+            sceneId: context.sceneId,
+            sceneVariant: context.sceneVariant,
+            tripIndex: context.tripIndex,
+            syncTime: context.syncTime,
+            chunkStartTime: context.syncTime,
+            fromDestination: context.fromDestination,
+            toDestination: context.toDestination,
+            tripProfile: context.tripProfile,
+            stopSign: {goal: context.goal},
+        };
+    }
+
+    public finishStopSignAttemptRecording(
+        ego: Ego,
+        outcome: StopSignOutcome,
+        endTime = GetGameTimer(),
+    ) {
+        if (!this.activeTripContext?.stopSign) {
+            throw new Error("stop-sign recording finalization requires an active stop-sign context");
+        }
+        this.activeTripContext.stopSign.outcome = outcome;
+        this.emitTripChunk(ego, endTime, true);
+        this.activeTripContext = null;
+    }
+
     public clearRecordingContext() {
         this.activeTripContext = null;
         this.tripChunkIndex = 0;
@@ -595,6 +771,7 @@ export class EgoService {
     public disposeCurrentEgo() {
         this.stopRequested = true;
         this.stopReason = "ego disposed";
+        this.holdCurrentEgo();
         if (this.activeAbortController && !(this.activeAbortController as any).signal?.aborted) {
             this.activeAbortController.abort();
         }
@@ -608,8 +785,69 @@ export class EgoService {
         this.parkingRouteTarget = null;
         this.tripChunkIndex = 0;
         this.tripDataPointIndex = 0;
-        SetPlayerInvincible(PlayerId(), false);
         this.makePlayerUnaware(PlayerPedId(), false);
+    }
+
+    public forceSafeStopAndDisposeCurrentEgo(reason: string) {
+        this.requestStop(reason);
+        const ego = this.oldEgo;
+        this.disposeCurrentEgo();
+        requireManagedEgoDisposed(ego, isValidEntity, (failedEgo) => {
+            this.oldEgo = failedEgo;
+        });
+    }
+
+    private holdCurrentEgo() {
+        const ego = this.oldEgo;
+        if (!ego) {
+            return;
+        }
+        this.holdEgo(ego);
+    }
+
+    private holdEgo(ego: Ego) {
+        const vehicle = ego.vehicle.id;
+        if (!isValidEntity(vehicle)) {
+            return;
+        }
+        const playerPed = PlayerPedId();
+        if (IsPedInVehicle(playerPed, vehicle, false) || GetPedInVehicleSeat(vehicle, -1) === playerPed) {
+            ClearPedTasksImmediately(playerPed);
+        }
+        SetVehicleForwardSpeed(vehicle, 0);
+        SetVehicleSteerBias(vehicle, 0);
+        SetVehicleHandbrake(vehicle, true);
+        SetVehicleUndriveable(vehicle, true);
+        FreezeEntityPosition(vehicle, true);
+    }
+
+    /** Ends managed capture/control while preserving the current car for manual parking setup. */
+    public releaseCurrentEgoForManualControl(): boolean {
+        this.resetEgoControlRuntime();
+        this.activeTripContext = null;
+        this.parkingRouteTarget = null;
+        this.tripChunkIndex = 0;
+        this.tripDataPointIndex = 0;
+        this.stopRequested = false;
+        this.stopReason = "";
+        this.makePlayerUnaware(PlayerPedId(), false);
+
+        const ego = this.oldEgo;
+        if (!ego || !isValidEntity(ego.vehicle.id)) {
+            this.oldEgo = null;
+            return false;
+        }
+        SetVehicleForwardSpeed(ego.vehicle.id, 0);
+        SetVehicleSteerBias(ego.vehicle.id, 0);
+        SetVehicleHandbrake(ego.vehicle.id, false);
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        FreezeEntityPosition(ego.vehicle.id, false);
+        return true;
+    }
+
+    public hasCurrentEgo(): boolean {
+        return Boolean(this.oldEgo && isValidEntity(this.oldEgo.vehicle.id));
     }
 
     public currentSpeed(): number | null {
@@ -715,6 +953,7 @@ export class EgoService {
     public requestStop(reason = "scene stop requested") {
         this.stopRequested = true;
         this.stopReason = reason;
+        this.holdCurrentEgo();
 
         if (this.activeAbortController && !(this.activeAbortController as any).signal?.aborted) {
             this.activeAbortController.abort();
@@ -757,7 +996,7 @@ export class EgoService {
         return abortController.signal;
     }
 
-    private async routeEgo(ego: Ego) {
+    private async routeEgo(ego: Ego, isCanceled: () => boolean) {
         if (!ego.waypoints || ego.waypoints.length === 0){
             console.log('No waypoints defined for ego, skipping routing.');
             return
@@ -765,9 +1004,7 @@ export class EgoService {
         const sceneInfo = this.parseSceneName(this.SceneName);
         let previousDestination = GetEntityCoords(ego.vehicle.id, false) as [number, number, number];
         for (const [tripIndex, waypoint] of ego.waypoints.entries()) {
-            if (this.stopRequested) {
-                throw new Error(SceneStoppedErrorCode);
-            }
+            this.throwIfSceneCanceled(isCanceled);
             let captureStarted = false;
             let tripCaptureClosed = false;
 
@@ -781,8 +1018,10 @@ export class EgoService {
                     tripIndex,
                     this.baseEnvironment ?? undefined
                 );
-                await this.prepareTripRuntime(ego, tripProfile);
+                await this.prepareTripRuntime(ego, tripProfile, isCanceled);
+                this.throwIfSceneCanceled(isCanceled);
                 await wait(1000)
+                this.throwIfSceneCanceled(isCanceled);
 
                 try {
                     await requestCapture("start", {
@@ -793,13 +1032,16 @@ export class EgoService {
                         sceneName: this.SceneName
                     });
                     captureStarted = true;
+                    this.throwIfSceneCanceled(isCanceled);
                 } catch (error) {
                     console.error(`[ego] failed to start capture for trip ${tripIndex} run ${this.RunId}: ${error}`);
                     throw error;
                 }
 
                 await wait(1000)
+                this.throwIfSceneCanceled(isCanceled);
                 const syncTime = await syncFlash(1000);
+                this.throwIfSceneCanceled(isCanceled);
                 console.log('Routing to waypoint:', waypoint.destination);
                 this.activeTripContext = {
                     recordingType: "trip",
@@ -815,6 +1057,7 @@ export class EgoService {
                 const [x, y, z] = this.configureRoute(waypoint, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle).destination;
                 SetNewWaypoint(x,y);
                 await wait(1000)
+                this.throwIfSceneCanceled(isCanceled);
                 const blip = GetFirstBlipInfoId(8)
                 this.driveToWaypoint(PlayerPedId(), ego.vehicle.id, blip, ego.vehicle.drivingStyle, ego.vehicle.maxSpeed);
                 const signal = await this.watchDog( await this.drivingLoop(ego,[x,y,z]), 10*60_000);
@@ -835,7 +1078,7 @@ export class EgoService {
                     throw new Error(SceneStoppedErrorCode);
                 }
             } catch (error: any) {
-                if (this.stopRequested || error?.message === SceneStoppedErrorCode) {
+                if (this.stopRequested || isCanceled() || error?.message === SceneStoppedErrorCode) {
                     this.activeTripContext = null;
                     ego.vehicle.VehicleData = [];
                     ClearGpsPlayerWaypoint();
@@ -851,11 +1094,15 @@ export class EgoService {
             }
         }
 
-        if (this.stopRequested) {
-            ClearGpsPlayerWaypoint()
-            throw new Error(SceneStoppedErrorCode);
+        this.throwIfSceneCanceled(isCanceled);
+    }
+
+    private throwIfSceneCanceled(isCanceled: () => boolean) {
+        if (!this.stopRequested && !isCanceled()) {
+            return;
         }
-        TaskVehicleDriveWander(PlayerPedId(), ego.vehicle.id, ego.vehicle.maxSpeed, ego.vehicle.drivingStyle);
+        ClearGpsPlayerWaypoint();
+        throw new Error(SceneStoppedErrorCode);
     }
 
     private async enterHardFailureState(
@@ -1000,6 +1247,8 @@ export class EgoService {
             scenarioGoal: this.activeTripContext.scenario?.goal,
             parkingGoal: this.activeTripContext.parking?.goal,
             parkingOutcome: this.activeTripContext.parking?.outcome,
+            stopSignGoal: this.activeTripContext.stopSign?.goal,
+            stopSignOutcome: this.activeTripContext.stopSign?.outcome,
         };
 
         console.log(
@@ -1086,7 +1335,11 @@ export class EgoService {
         };
     }
 
-    private async prepareTripRuntime(ego: Ego, tripProfile: TripProfileSnapshot) {
+    private async prepareTripRuntime(
+        ego: Ego,
+        tripProfile: TripProfileSnapshot,
+        isCanceled: () => boolean,
+    ) {
         if (this.baseEnvironment) {
             this.environmentService.execute({
                 weatherType: {
@@ -1101,7 +1354,11 @@ export class EgoService {
             this.cleanUp(this.oldEgo);
         }
 
-        await this.setVehicle(ego, tripProfile.vehicleModel, tripProfile.vehicleColor);
+        await this.setVehicle(ego, tripProfile.vehicleModel, tripProfile.vehicleColor, isCanceled);
+        if (isCanceled() || this.oldEgo !== ego) {
+            this.cleanUp(ego);
+            throw new Error("Trip vehicle initialization was canceled by a safety stop");
+        }
         if (!isValidEntity(ego.vehicle.id)) {
             throw new Error("failed to initialize trip vehicle");
         }
@@ -1151,15 +1408,31 @@ export class EgoService {
 
 
 
-    public collectEgoData(ego: Ego, parkingTelemetry?: ParkingTelemetry) {
+    public collectEgoData(
+        ego: Ego,
+        parkingTelemetry?: ParkingTelemetry,
+        parkingExpertSupervision?: ParkingExpertSupervision
+    ) {
         const id = ego.vehicle.id;
         const currentSpeed = GetEntitySpeed(ego.vehicle.id);
+        const time = GetGameTimer();
+
+        if (this.activeTripContext?.parking) {
+            if (!parkingExpertSupervision) {
+                throw new Error("active parking recording requires explicit expert supervision");
+            }
+            this.appendVehicleData(
+                ego,
+                buildParkingVehicleData(time, currentSpeed, parkingExpertSupervision)
+            );
+            return;
+        }
+
         const isStopped :boolean | number = IsVehicleStopped(id)
         const acceleration = GetVehicleCurrentAcceleration(id);
         const brakePressureAvg = this.averageBrakePressure(id);
         const steering = this.readVehicleSteering(id);
         const yaw = GetEntityHeading(id)
-        const time = GetGameTimer();
         const coords = this.toVector3(GetEntityCoords(id, false)) ?? [0, 0, 0];
         const [gpsRouteFound, gpsRouteCoords] = GetPosAlongGpsTypeRoute(true, 1, 0);
         const gps = this.toVector3(gpsRouteCoords) ?? [0, 0, 0];
@@ -1254,6 +1527,7 @@ export class EgoService {
             scenarioGoal: this.activeTripContext?.scenario?.goal,
             scenarioFactors: this.activeTripContext?.scenario?.factors,
             parkingTargetConfigured: parkingTelemetry?.parkingTargetConfigured,
+            parkingStartConfigured: parkingTelemetry?.parkingStartConfigured,
             parkingLongitudinalError: parkingTelemetry?.parkingLongitudinalError,
             parkingLateralError: parkingTelemetry?.parkingLateralError,
             parkingHeadingError: parkingTelemetry?.parkingHeadingError,
@@ -1266,10 +1540,53 @@ export class EgoService {
             parkingPhase: parkingTelemetry?.parkingPhase,
         };
 
+        this.appendVehicleData(ego, data);
+    }
+
+    public collectStopSignData(
+        ego: Ego,
+        telemetry: StopSignTelemetry,
+        supervision: StopSignExpertSupervision,
+    ) {
+        if (!this.activeTripContext?.stopSign) {
+            throw new Error("stop-sign supervision requires an active stop-sign recording");
+        }
+        const id = ego.vehicle.id;
+        if (!isValidEntity(id)) {
+            throw new Error("cannot collect stop-sign supervision from an invalid vehicle");
+        }
+        const steering = this.readVehicleSteering(id);
+        const data: StopSignVehicleData = {
+            time: GetGameTimer(),
+            currentSpeed: GetEntitySpeed(id),
+            acceleration: GetVehicleCurrentAcceleration(id),
+            brakePressureAvg: this.averageBrakePressure(id),
+            wheelAngle: steering.wheelAngleRadians,
+            wheelSteeringFullLock: steering.fullLockRadians,
+            stopSignPhase: supervision.phase,
+            stopLineDistanceM: telemetry.stopLineDistanceM,
+            expertDistanceToStopLineM: supervision.distanceToStopLineM,
+            stopSignLongitudinalErrorM: telemetry.stopSignLongitudinalErrorM,
+            stopSignLateralErrorM: telemetry.stopSignLateralErrorM,
+            stopSignHeadingErrorDeg: telemetry.stopSignHeadingErrorDeg,
+            expertDesiredWheelSteerNormalized: supervision.desiredWheelSteerNormalized,
+            expertDesiredSpeedMps: supervision.desiredSpeedMps,
+            expertThrottle: supervision.throttle,
+            expertBrake: supervision.brake,
+            expertStopProbability: supervision.stopProbability,
+            expertGoProbability: supervision.goProbability,
+            eventCollision: HasEntityCollidedWithAnything(id),
+            eventReversing: (this.toVector3(GetEntitySpeedVector(id, true))?.[1] ?? 0) < -0.25,
+            eventHandbrake: GetVehicleHandbrake(id),
+        };
+        this.appendVehicleData(ego, data);
+    }
+
+    private appendVehicleData(ego: Ego, data: VehicleData) {
         if (!ego.vehicle.VehicleData) {
             ego.vehicle.VehicleData = [];
         }
-        ego.vehicle.VehicleData.push(data)
+        ego.vehicle.VehicleData.push(data);
         this.tripDataPointIndex += 1;
 
         if (ego.vehicle.VehicleData.length >= EgoService.MAX_TRIP_VEHICLE_DATA_POINTS) {
@@ -1647,12 +1964,21 @@ export class EgoService {
         this.cameraTickId = null;
     }
 
-    public async setVehicle(ego: Ego, modelOverride?: string, colorOverride?: VehicleColor){
+    public async setVehicle(
+        ego: Ego,
+        modelOverride?: string,
+        colorOverride?: VehicleColor,
+        isCanceled: () => boolean = () => false,
+    ){
         const resolvedModel = modelOverride ?? this.resolveVehicleModel(ego.vehicle.model);
         const resolvedColor = colorOverride ?? this.resolveVehicleColor(ego.vehicle.color);
 
         const vehicleModel = GetHashKey(resolvedModel);
         const vehicleOk = await ensureModelLoaded(vehicleModel);
+        if (isCanceled()) {
+            SetModelAsNoLongerNeeded(vehicleModel);
+            throw new Error("Ego vehicle initialization was canceled while loading its model");
+        }
         if (!vehicleOk) {
             console.log('Failed to load vehicle or driver model.');
             return;
@@ -1664,11 +1990,23 @@ export class EgoService {
             console.log(`Failed to spawn vehicle model: ${resolvedModel}`);
             return;
         }
+        SetVehicleUndriveable(newVehicle, true);
+        FreezeEntityPosition(newVehicle, true);
+        if (isCanceled()) {
+            SetEntityAsMissionEntity(newVehicle, true, true);
+            DeleteVehicle(newVehicle);
+            throw new Error("Ego vehicle initialization was canceled before seating the player");
+        }
         const incontrol = NetworkRequestControlOfEntity(newVehicle);
         console.log(`Requested control of vehicle ${newVehicle}, in control: ${incontrol}`);
         SetVehicleNumberPlateText(newVehicle, "EGO");
         SetVehicleOnGroundProperly(newVehicle);
         const seated = await this.addPedToVehicle(PlayerPedId(), newVehicle);
+        if (isCanceled()) {
+            SetEntityAsMissionEntity(newVehicle, true, true);
+            DeleteVehicle(newVehicle);
+            throw new Error("Ego vehicle initialization was canceled while seating the player");
+        }
         if (!seated) {
             SetEntityAsMissionEntity(newVehicle, true, true);
             DeleteVehicle(newVehicle);
@@ -1687,17 +2025,28 @@ export class EgoService {
         ego: Ego,
         spawn: SpawnPoint,
         modelOverride?: string,
-        colorOverride?: VehicleColor
+        colorOverride?: VehicleColor,
+        isCanceled: () => boolean = () => false,
     ): Promise<boolean> {
         const resolvedModel = modelOverride ?? this.resolveVehicleModel(ego.vehicle.model);
         const resolvedColor = colorOverride ?? this.resolveVehicleColor(ego.vehicle.color);
-        const vehicle = await this.spawnVehicleAt(resolvedModel, resolvedColor, spawn);
+        const vehicle = await this.spawnVehicleAt(resolvedModel, resolvedColor, spawn, isCanceled);
         if (!isValidEntity(vehicle)) {
             return false;
+        }
+        if (isCanceled()) {
+            SetEntityAsMissionEntity(vehicle, true, true);
+            DeleteVehicle(vehicle);
+            throw new Error("Ego spawn was canceled before seating the player");
         }
 
         SetVehicleNumberPlateText(vehicle, "EGO");
         const seated = await this.addPedToVehicle(PlayerPedId(), vehicle);
+        if (isCanceled()) {
+            SetEntityAsMissionEntity(vehicle, true, true);
+            DeleteVehicle(vehicle);
+            throw new Error("Ego spawn was canceled while seating the player");
+        }
         if (!seated) {
             SetEntityAsMissionEntity(vehicle, true, true);
             DeleteVehicle(vehicle);
@@ -1717,12 +2066,18 @@ export class EgoService {
     public async spawnVehicleAt(
         modelName: VehicleModel | string,
         color: VehicleColor,
-        spawn: SpawnPoint
+        spawn: SpawnPoint,
+        isCanceled: () => boolean = () => false,
     ): Promise<number> {
         const resolvedModel = this.resolveVehicleModel(modelName);
         const resolvedColor = this.resolveVehicleColor(color);
         const vehicleModel = GetHashKey(resolvedModel);
-        if (!await ensureModelLoaded(vehicleModel)) {
+        const modelReady = await ensureModelLoaded(vehicleModel);
+        if (isCanceled()) {
+            SetModelAsNoLongerNeeded(vehicleModel);
+            throw new Error("Vehicle spawn was canceled while loading its model");
+        }
+        if (!modelReady) {
             console.log(`Failed to load vehicle model: ${resolvedModel}`);
             return 0;
         }
@@ -1743,8 +2098,12 @@ export class EgoService {
         SetEntityHeading(vehicle, spawn.heading);
         SetVehicleOnGroundProperly(vehicle);
         await wait(75);
+        if (isCanceled()) {
+            SetEntityAsMissionEntity(vehicle, true, true);
+            DeleteVehicle(vehicle);
+            throw new Error("Vehicle spawn was canceled while settling on the ground");
+        }
         SetVehicleOnGroundProperly(vehicle);
-        FreezeEntityPosition(vehicle, false);
         SetVehRadioStation(vehicle, "OFF");
         return vehicle;
     }
@@ -1821,6 +2180,7 @@ export class EgoService {
             return;
         }
 
+        this.holdEgo(ego);
         SetEntityAsMissionEntity(ego.vehicle.id, true, true);
         DeleteVehicle(ego.vehicle.id);
         console.log('Cleaned up old vehicle with ID:', ego.vehicle.id);

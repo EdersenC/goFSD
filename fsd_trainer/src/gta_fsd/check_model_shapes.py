@@ -195,12 +195,13 @@ def main() -> None:
         image_offsets=config.dataset.image_offsets,
         telemetry_offsets=config.dataset.telemetry_offsets,
         future_offsets=config.dataset.future_offsets,
+        telemetry_sample_interval_ms=config.dataset.telemetry_sample_interval_ms,
         telemetry_feature_names=config.dataset.telemetry_feature_names,
         control_target_names=config.dataset.control_target_names,
         aux_target_names=config.dataset.aux_target_names,
         target_transforms=config.dataset.target_transforms,
         state_input_config=config.state_inputs,
-        include_failed_or_nonparking_trips=config.dataset.include_failed_or_nonparking_trips,
+        include_failed_or_non_stop_sign_trips=config.dataset.include_failed_or_non_stop_sign_trips,
     )
     if len(dataset) <= 0:
         raise ValueError(f"Dataset is empty for run_path={run_path}")

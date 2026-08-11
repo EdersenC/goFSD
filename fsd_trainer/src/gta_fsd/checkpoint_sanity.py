@@ -24,6 +24,7 @@ from inference import (
     load_config as load_inference_config,
     resolve_checkpoint_frame_count,
     resolve_checkpoint_frame_stride,
+    require_checkpoint_image_size,
     resolve_checkpoint_target_names,
     resolve_checkpoint_target_transform_registry,
     resolve_existing_path,
@@ -281,6 +282,7 @@ def evaluate_dataset_samples(
     image_offsets: tuple[int, ...],
     telemetry_offsets: tuple[int, ...],
     future_offsets: tuple[int, ...],
+    telemetry_sample_interval_ms: int,
     telemetry_feature_names: tuple[str, ...],
     control_target_names: tuple[str, ...],
     aux_target_names: tuple[str, ...],
@@ -294,6 +296,7 @@ def evaluate_dataset_samples(
         image_offsets=image_offsets,
         telemetry_offsets=telemetry_offsets,
         future_offsets=future_offsets,
+        telemetry_sample_interval_ms=telemetry_sample_interval_ms,
         telemetry_feature_names=telemetry_feature_names,
         control_target_names=control_target_names,
         aux_target_names=aux_target_names,
@@ -484,6 +487,10 @@ def main() -> None:
     _require_temporal_checkpoint(checkpoint)
     frame_count = resolve_checkpoint_frame_count(checkpoint, inference_config)
     _ = resolve_checkpoint_frame_stride(checkpoint, inference_config)
+    image_size = require_checkpoint_image_size(
+        checkpoint,
+        (train_config.dataset.image_width, train_config.dataset.image_height),
+    )
     image_offsets = tuple(int(value) for value in (checkpoint.get("image_offsets") or train_config.dataset.image_offsets))
     telemetry_offsets = tuple(int(value) for value in (checkpoint.get("telemetry_offsets") or train_config.dataset.telemetry_offsets))
     future_offsets = tuple(int(value) for value in (checkpoint.get("future_offsets") or train_config.dataset.future_offsets))
@@ -509,7 +516,7 @@ def main() -> None:
         model,
         device,
         data_root=data_root,
-        image_size=(train_config.dataset.image_width, train_config.dataset.image_height),
+        image_size=image_size,
         expected_window_size=frame_count,
         run_id=run_id,
         sample_start=sample_start,
@@ -517,6 +524,7 @@ def main() -> None:
         image_offsets=image_offsets,
         telemetry_offsets=telemetry_offsets,
         future_offsets=future_offsets,
+        telemetry_sample_interval_ms=int(checkpoint["telemetry_sample_interval_ms"]),
         telemetry_feature_names=telemetry_feature_names,
         control_target_names=control_target_names,
         aux_target_names=aux_target_names,

@@ -64,6 +64,17 @@ from target_transforms import (
 GENERIC_CONTROL_TARGET_NAMES = ("steering", "acceleration", "brakePressureAvg")
 
 
+def stop_sign_goal(*, x: float = 10.0) -> dict[str, object]:
+    return {
+        "task": "stop-sign",
+        "contract": "stop-sign-goal.v1",
+        "signPose": {"x": x, "y": 20.0, "z": 30.0, "heading": 90.0},
+        "stopLinePose": {"x": x - 2.0, "y": 20.0, "z": 30.0, "heading": 90.0},
+        "egoStopPose": {"x": x - 4.5, "y": 20.0, "z": 30.0, "heading": 90.0},
+        "startPose": {"x": x - 20.0, "y": 20.0, "z": 30.0, "heading": 90.0},
+    }
+
+
 def write_jpeg(path: Path, *, image_size: tuple[int, int]) -> None:
     width, height = image_size
     image = Image.new("RGB", (width, height), color=(120, 160, 200))
@@ -78,7 +89,7 @@ def telemetry_point(
     steering: float,
     acceleration: float,
     brake_pressure_avg: float = 0.0,
-    parking_phase: str = "parking",
+    parking_phase: str = "accelerate",
     parking_parked: bool = False,
 ) -> dict[str, object]:
     return {
@@ -94,11 +105,10 @@ def telemetry_point(
         },
         "raw": {
             "time": speed * 10.0,
-            "wheelSteeringFullLock": 0.733038306,
-            "parkingPhase": parking_phase,
-            "parkingParked": parking_parked,
-            "parkingInsideBay": False,
-            "parkingAligned": False,
+            "expertDesiredWheelSteerNormalized": steering,
+            "expertDesiredSpeedMps": 0.0 if parking_parked else 2.22,
+            "expertStopProbability": 1.0 if parking_parked else 0.0,
+            "stopSignPhase": "stop_hold" if parking_parked else parking_phase,
         },
     }
 
@@ -111,16 +121,17 @@ def create_temporal_trip_fixture(
     include_invalid_sample: bool = False,
     image_size: tuple[int, int] = (32, 32),
     metadata_overrides: dict[str, object] | None = None,
+    frame_numbers: tuple[int, ...] | None = None,
 ) -> None:
-    trip_dir = root / "runs" / run_name / "inner-city-driving_default" / trip_name
+    trip_dir = root / "runs" / run_name / "stop-sign_temporal-v1" / trip_name
     trip_dir.mkdir(parents=True, exist_ok=True)
     metadata: dict[str, object] = {
         "runId": run_name,
-        "sceneId": "inner-city-driving",
-        "sceneVariant": "default",
+        "sceneId": "stop-sign",
+        "sceneVariant": "temporal-v1",
         "tripIndex": int(trip_name.split("-")[-1]),
-        "parkingGoal": {"task": "parking", "maneuver": "forward-bay"},
-        "parkingOutcome": {"success": True, "status": "succeeded"},
+        "stopSignGoal": stop_sign_goal(x=10.0 + float(sum(map(ord, run_name)) % 100)),
+        "stopSignOutcome": {"success": True, "status": "succeeded"},
     }
     if metadata_overrides:
         metadata.update(metadata_overrides)
@@ -128,7 +139,10 @@ def create_temporal_trip_fixture(
 
     frames_dir = trip_dir / "frames"
     frames_dir.mkdir(exist_ok=True)
-    frame_paths = [f"frames/{index:06d}.jpg" for index in range(len(DEFAULT_IMAGE_OFFSETS))]
+    resolved_frame_numbers = frame_numbers or tuple(range(1, len(DEFAULT_IMAGE_OFFSETS) + 1))
+    if len(resolved_frame_numbers) != len(DEFAULT_IMAGE_OFFSETS):
+        raise ValueError("frame_numbers must match the configured image offset count")
+    frame_paths = [f"frames/{index:06d}.jpg" for index in resolved_frame_numbers]
     for frame_path in frame_paths:
         write_jpeg(trip_dir / frame_path, image_size=image_size)
 
@@ -165,6 +179,21 @@ def create_temporal_trip_fixture(
 
     (trip_dir / "dataset.jsonl").write_text(
         "\n".join(json.dumps(sample) for sample in samples) + "\n",
+        encoding="utf-8",
+    )
+    (trip_dir / "processing.json").write_text(
+        json.dumps({
+            "state": "completed",
+            "configFingerprint": "sha256:" + ("0" * 64),
+            "imageWidth": image_size[0],
+            "imageHeight": image_size[1],
+            "imageOffsets": list(DEFAULT_IMAGE_OFFSETS),
+            "telemetryOffsets": list(DEFAULT_TELEMETRY_OFFSETS),
+            "futureOffsets": list(DEFAULT_FUTURE_OFFSETS),
+            "telemetrySampleIntervalMs": 50,
+            "frameCount": len(frame_paths),
+            "sampleCount": len(samples),
+        }),
         encoding="utf-8",
     )
 
@@ -207,17 +236,17 @@ checkpoint = ''
             self.assertEqual(resolved.checkpoint, "fresh-parking-model.pt")
             self.assertIsNone(resolved.run_id)
 
-    def test_dataset_requires_successful_complete_parking_attempts_by_default(self) -> None:
+    def test_dataset_requires_successful_complete_stop_sign_attempts_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            parking_goal = {"task": "parking", "maneuver": "forward-bay"}
+            goal = stop_sign_goal()
             create_temporal_trip_fixture(
                 root,
                 run_name="run-a",
                 trip_name="trip-000",
                 metadata_overrides={
-                    "parkingGoal": parking_goal,
-                    "parkingOutcome": {"success": True, "status": "succeeded"},
+                    "stopSignGoal": goal,
+                    "stopSignOutcome": {"success": True, "status": "succeeded"},
                 },
             )
             create_temporal_trip_fixture(
@@ -225,8 +254,8 @@ checkpoint = ''
                 run_name="run-a",
                 trip_name="trip-001",
                 metadata_overrides={
-                    "parkingGoal": parking_goal,
-                    "parkingOutcome": {"success": False, "status": "collision"},
+                    "stopSignGoal": goal,
+                    "stopSignOutcome": {"success": False, "status": "collision"},
                 },
             )
             create_temporal_trip_fixture(
@@ -234,23 +263,44 @@ checkpoint = ''
                 run_name="run-a",
                 trip_name="trip-002",
                 metadata_overrides={
-                    "parkingGoal": None,
-                    "parkingOutcome": {"success": True, "status": "incomplete-metadata"},
+                    "stopSignGoal": None,
+                    "stopSignOutcome": {"success": True, "status": "incomplete-metadata"},
                 },
             )
             create_temporal_trip_fixture(
                 root,
                 run_name="run-a",
                 trip_name="trip-003",
-                metadata_overrides={"parkingGoal": None, "parkingOutcome": None},
+                metadata_overrides={"stopSignGoal": None, "stopSignOutcome": None},
             )
             create_temporal_trip_fixture(
                 root,
                 run_name="run-a",
                 trip_name="trip-004",
                 metadata_overrides={
-                    "parkingGoal": {"task": "parking", "maneuver": "reverse-bay"},
-                    "parkingOutcome": {"success": True, "status": "succeeded"},
+                    "stopSignGoal": {"task": "parking"},
+                    "stopSignOutcome": {"success": True, "status": "succeeded"},
+                },
+            )
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-005",
+                metadata_overrides={
+                    "sceneVariant": "temporal-v0",
+                    "stopSignGoal": goal,
+                    "stopSignOutcome": {"success": True, "status": "succeeded"},
+                },
+            )
+            incomplete_goal = stop_sign_goal()
+            incomplete_goal.pop("egoStopPose")
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-006",
+                metadata_overrides={
+                    "stopSignGoal": incomplete_goal,
+                    "stopSignOutcome": {"success": True, "status": "succeeded"},
                 },
             )
 
@@ -261,13 +311,231 @@ checkpoint = ''
             with_failures = FsdDataset(
                 run_paths=[root / "runs" / "run-a"],
                 image_size=(32, 32),
-                include_failed_or_nonparking_trips=True,
+                include_failed_or_non_stop_sign_trips=True,
             )
 
             self.assertEqual(successful_only.trip_count, 1)
-            self.assertEqual(successful_only.excluded_failed_or_nonparking_trip_count, 4)
-            self.assertEqual(with_failures.trip_count, 5)
-            self.assertEqual(with_failures.excluded_failed_or_nonparking_trip_count, 0)
+            self.assertEqual(successful_only.excluded_failed_or_non_stop_sign_trip_count, 6)
+            self.assertEqual(with_failures.trip_count, 7)
+            self.assertEqual(with_failures.excluded_failed_or_non_stop_sign_trip_count, 0)
+
+    def test_dataset_rejects_stale_processed_timeline_contract(self) -> None:
+        cases = (
+            ("imageOffsets", [-10, -6, -4, -2, 0], "imageOffsets mismatch"),
+            ("telemetrySampleIntervalMs", 40, "telemetrySampleIntervalMs mismatch"),
+            ("imageWidth", 64, "imageWidth mismatch"),
+        )
+        for key, value, message in cases:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+                processing_path = (
+                    root
+                    / "runs"
+                    / "run-a"
+                    / "stop-sign_temporal-v1"
+                    / "trip-000"
+                    / "processing.json"
+                )
+                status = json.loads(processing_path.read_text(encoding="utf-8"))
+                status[key] = value
+                processing_path.write_text(json.dumps(status), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, message):
+                    FsdDataset(
+                        run_paths=[root / "runs" / "run-a"],
+                        image_size=(32, 32),
+                    )
+
+    def test_dataset_rejects_incomplete_published_outputs(self) -> None:
+        cases = (
+            (
+                "truncated valid dataset",
+                lambda trip_dir, status: (trip_dir / "dataset.jsonl").write_text("", encoding="utf-8"),
+                "sampleCount mismatch",
+            ),
+            (
+                "invalid dataset row",
+                lambda trip_dir, status: (trip_dir / "dataset.jsonl").write_text("not-json\n", encoding="utf-8"),
+                "invalid JSON",
+            ),
+            (
+                "gapped frame set",
+                lambda trip_dir, status: (trip_dir / "frames" / "000001.jpg").rename(
+                    trip_dir / "frames" / "000006.jpg"
+                ),
+                "exactly the dataset-referenced JPEG files",
+            ),
+            (
+                "zero byte frame",
+                lambda trip_dir, status: (trip_dir / "frames" / "000001.jpg").write_bytes(b""),
+                "only non-empty regular dataset-referenced JPEG files",
+            ),
+            (
+                "missing sample count",
+                lambda trip_dir, status: status.pop("sampleCount"),
+                "sampleCount must be an integer",
+            ),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+                trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+                processing_path = trip_dir / "processing.json"
+                status = json.loads(processing_path.read_text(encoding="utf-8"))
+                mutate(trip_dir, status)
+                processing_path.write_text(json.dumps(status), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, message):
+                    FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+
+    def test_dataset_accepts_sparse_processor_referenced_frame_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame_numbers = (77, 79, 81, 83, 85)
+            create_temporal_trip_fixture(
+                root,
+                run_name="run-a",
+                trip_name="trip-000",
+                frame_numbers=frame_numbers,
+            )
+
+            dataset = FsdDataset(
+                run_paths=[root / "runs" / "run-a"],
+                image_size=(32, 32),
+            )
+
+            self.assertEqual(len(dataset), 1)
+            sample = dataset._load_sample(0)
+            self.assertEqual(
+                [path.name for path in sample["frame_paths"]],
+                [f"{frame_number:06d}.jpg" for frame_number in frame_numbers],
+            )
+
+    def test_dataset_rejects_missing_and_extra_sparse_referenced_frames(self) -> None:
+        cases = (
+            (
+                "missing",
+                lambda trip_dir: (trip_dir / "frames" / "000081.jpg").unlink(),
+                "missing=\\['000081.jpg'\\]",
+            ),
+            (
+                "extra",
+                lambda trip_dir: write_jpeg(
+                    trip_dir / "frames" / "000999.jpg",
+                    image_size=(32, 32),
+                ),
+                "extra=\\['000999.jpg'\\]",
+            ),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                create_temporal_trip_fixture(
+                    root,
+                    run_name="run-a",
+                    trip_name="trip-000",
+                    frame_numbers=(77, 79, 81, 83, 85),
+                )
+                trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+                mutate(trip_dir)
+
+                with self.assertRaisesRegex(ValueError, message):
+                    FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+
+    def test_dataset_rejects_missing_or_malformed_frame_references(self) -> None:
+        cases = (
+            ("missing", None, "missing non-empty frame_paths"),
+            ("not a list", "frames/000001.jpg", "missing non-empty frame_paths"),
+            ("parent traversal", ["frames/../000001.jpg"], "invalid frame path"),
+            ("windows separator", [r"frames\\000001.jpg"], "invalid frame path"),
+            ("zero index", ["frames/000000.jpg"], "invalid frame path"),
+            ("non-string", [1], "must contain strings"),
+        )
+        for name, frame_paths, message in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+                trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+                dataset_path = trip_dir / "dataset.jsonl"
+                row = json.loads(dataset_path.read_text(encoding="utf-8"))
+                if frame_paths is None:
+                    row.pop("frame_paths")
+                else:
+                    row["frame_paths"] = frame_paths
+                dataset_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, message):
+                    FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+
+    def test_zero_sample_dataset_keeps_contiguous_or_empty_frame_rule(self) -> None:
+        cases = (
+            ("empty", 0, (), False),
+            ("contiguous", len(DEFAULT_IMAGE_OFFSETS), tuple(range(1, len(DEFAULT_IMAGE_OFFSETS) + 1)), False),
+            ("sparse rejected", len(DEFAULT_IMAGE_OFFSETS), (77, 79, 81, 83, 85), True),
+        )
+        for name, frame_count, frame_numbers, should_fail in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+                trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+                frames_dir = trip_dir / "frames"
+                for frame_path in frames_dir.iterdir():
+                    frame_path.unlink()
+                for frame_number in frame_numbers:
+                    write_jpeg(frames_dir / f"{frame_number:06d}.jpg", image_size=(32, 32))
+                (trip_dir / "dataset.jsonl").write_text("", encoding="utf-8")
+                processing_path = trip_dir / "processing.json"
+                status = json.loads(processing_path.read_text(encoding="utf-8"))
+                status["sampleCount"] = 0
+                status["frameCount"] = frame_count
+                processing_path.write_text(json.dumps(status), encoding="utf-8")
+
+                if should_fail:
+                    with self.assertRaisesRegex(ValueError, "exactly the contiguous numbered files"):
+                        FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+                    continue
+                dataset = FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+                self.assertEqual(len(dataset), 0)
+                self.assertEqual(dataset.trip_count, 1)
+
+    def test_dataset_rejects_missing_processed_outputs_in_selected_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+            trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+            (trip_dir / "dataset.jsonl").unlink()
+
+            with self.assertRaisesRegex(ValueError, "processed dataset is missing"):
+                FsdDataset(run_paths=[root / "runs" / "run-a"], image_size=(32, 32))
+
+    def test_dataset_filters_samples_without_dense_sparse_offset_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            create_temporal_trip_fixture(root, run_name="run-a", trip_name="trip-000")
+            trip_dir = root / "runs" / "run-a" / "stop-sign_temporal-v1" / "trip-000"
+            dataset_path = trip_dir / "dataset.jsonl"
+            sample = json.loads(dataset_path.read_text(encoding="utf-8"))
+            sample["telemetry_history"] = sample["telemetry_history"][:2]
+            sample["telemetry_future"] = sample["telemetry_future"][:2]
+            dataset_path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
+            processing_path = trip_dir / "processing.json"
+            status = json.loads(processing_path.read_text(encoding="utf-8"))
+            status["telemetryOffsets"] = [-8, 0]
+            status["futureOffsets"] = [1, 6]
+            processing_path.write_text(json.dumps(status), encoding="utf-8")
+
+            dataset = FsdDataset(
+                run_paths=[root / "runs" / "run-a"],
+                image_size=(32, 32),
+                telemetry_offsets=(-8, 0),
+                future_offsets=(1, 6),
+            )
+
+            self.assertEqual(len(dataset), 0)
+            self.assertEqual(dataset.rejected_sample_summary["bad_telemetry_history"], 1)
+            self.assertEqual(dataset.rejected_sample_summary["bad_telemetry_future"], 1)
 
     def test_parse_temporal_dataset_config_reads_explicit_sequence_fields(self) -> None:
         raw = {
@@ -341,16 +609,15 @@ checkpoint = ''
             self.assertEqual(images.dtype, torch.uint8)
             self.assertEqual(tuple(telemetry.shape), (9, 6))
             self.assertEqual(tuple(state_inputs.shape), (0,))
-            self.assertEqual(tuple(target_controls.shape), (6, 3))
+            self.assertEqual(tuple(target_controls.shape), (6, 2))
             self.assertEqual(tuple(target_aux.shape), (6, 4))
 
             first_history = telemetry[0]
             self.assertAlmostEqual(float(first_history[0].item()), 5.0, places=6)
             self.assertAlmostEqual(float(first_history[1].item()), 0.173648, places=5)
             self.assertAlmostEqual(float(first_history[2].item()), 0.984807, places=5)
-            self.assertAlmostEqual(float(target_controls[0, 0].item()), 0.5, places=6)
-            self.assertAlmostEqual(float(target_controls[0, 1].item()), 1.0, places=6)
-            self.assertAlmostEqual(float(target_controls[0, 2].item()), 0.0, places=6)
+            self.assertAlmostEqual(float(target_controls[0, 0].item()), 2.22 / 8.0, places=6)
+            self.assertAlmostEqual(float(target_controls[0, 1].item()), 0.0, places=6)
 
             aux_transform_names = dataset.aux_target_names
             expected_aux = torch.tensor([14.0, 1.0, 2.0, 1.0], dtype=torch.float32)
@@ -697,7 +964,7 @@ checkpoint = ''
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             create_temporal_trip_fixture(root, run_name="train-a", trip_name="trip-000")
-            trip_dir = root / "runs" / "val-a" / "inner-city-driving_default" / "trip-000"
+            trip_dir = root / "runs" / "val-a" / "stop-sign_temporal-v1" / "trip-000"
             trip_dir.mkdir(parents=True, exist_ok=True)
             (trip_dir / "metadata.json").write_text(json.dumps({
                 "runId": "val-a",
@@ -826,6 +1093,10 @@ checkpoint = ''
                 "planner_format_version": PLANNER_FORMAT_VERSION,
                 "control_contract": control_contract_metadata(),
                 "control_target_names": list(PARKING_CONTROL_TARGET_NAMES),
+                "frame_window_size": len(DEFAULT_IMAGE_OFFSETS),
+                "image_size": {"width": DEFAULT_IMAGE_WIDTH, "height": DEFAULT_IMAGE_HEIGHT},
+                "image_offsets": list(DEFAULT_IMAGE_OFFSETS),
+                "telemetry_offsets": list(DEFAULT_TELEMETRY_OFFSETS),
                 "future_offsets": future_offsets,
                 "telemetry_sample_interval_ms": 50,
                 "control_horizon_dt_ms": list(derive_control_horizon_dt_ms(future_offsets, 50)),

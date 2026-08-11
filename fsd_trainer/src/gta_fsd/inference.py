@@ -21,7 +21,7 @@ from control_contract import (
     PLANNER_FORMAT,
     PLANNER_FORMAT_VERSION,
     control_contract_metadata,
-    require_parking_control_target_names,
+    require_stop_sign_control_target_names,
     resolve_checkpoint_control_horizon_dt_ms,
     validate_checkpoint_control_contract,
 )
@@ -33,12 +33,13 @@ from state_inputs import (
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
+from stop_sign_contract import release_policy_metadata
 from target_transforms import (
     TargetTransform,
     denormalize_target_tensor,
     target_transform_metadata,
     resolve_checkpoint_target_transforms,
-    validate_parking_control_target_transforms,
+    validate_stop_sign_control_target_transforms,
 )
 
 
@@ -64,6 +65,121 @@ class InferenceConfig:
     window_size: int
     frame_stride: int
     sample_stride: int
+
+
+@dataclass(frozen=True)
+class CheckpointTimeline:
+    image_offsets: tuple[int, ...]
+    telemetry_offsets: tuple[int, ...]
+    future_offsets: tuple[int, ...]
+    telemetry_sample_interval_ms: int
+
+
+def resolve_checkpoint_image_size(checkpoint: Mapping[str, Any]) -> tuple[int, int]:
+    raw_image_size = checkpoint.get("image_size")
+    if not isinstance(raw_image_size, Mapping):
+        raise ValueError("stop-sign checkpoint must include image_size")
+
+    dimensions: list[int] = []
+    for name in ("width", "height"):
+        value = raw_image_size.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"checkpoint image_size.{name} must be a positive integer")
+        dimensions.append(value)
+    return dimensions[0], dimensions[1]
+
+
+def require_checkpoint_image_size(
+    checkpoint: Mapping[str, Any],
+    expected_image_size: tuple[int, int],
+) -> tuple[int, int]:
+    checkpoint_image_size = resolve_checkpoint_image_size(checkpoint)
+    if checkpoint_image_size != expected_image_size:
+        raise ValueError(
+            "Config/checkpoint image-size mismatch: "
+            f"config={expected_image_size[0]}x{expected_image_size[1]}, "
+            f"checkpoint={checkpoint_image_size[0]}x{checkpoint_image_size[1]}"
+        )
+    return checkpoint_image_size
+
+
+def _checkpoint_offsets(
+    checkpoint: Mapping[str, Any],
+    key: str,
+    *,
+    allow_negative: bool,
+    allow_zero: bool,
+) -> tuple[int, ...]:
+    raw_offsets = checkpoint.get(key)
+    if not isinstance(raw_offsets, list) or not raw_offsets:
+        raise ValueError(f"stop-sign checkpoint must include non-empty {key}")
+
+    offsets: list[int] = []
+    for index, value in enumerate(raw_offsets):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key}[{index}] must be an integer")
+        offsets.append(value)
+
+    result = tuple(offsets)
+    if tuple(sorted(result)) != result or len(set(result)) != len(result):
+        raise ValueError(f"{key} must be strictly increasing")
+    if not allow_negative and any(value < 0 for value in result):
+        raise ValueError(f"{key} must not contain negative offsets")
+    if not allow_zero and any(value == 0 for value in result):
+        raise ValueError(f"{key} must not contain zero")
+    if allow_negative and any(value > 0 for value in result):
+        raise ValueError(f"{key} must not contain positive offsets")
+    return result
+
+
+def resolve_checkpoint_timeline(checkpoint: Mapping[str, Any]) -> CheckpointTimeline:
+    image_offsets = _checkpoint_offsets(
+        checkpoint,
+        "image_offsets",
+        allow_negative=True,
+        allow_zero=True,
+    )
+    telemetry_offsets = _checkpoint_offsets(
+        checkpoint,
+        "telemetry_offsets",
+        allow_negative=True,
+        allow_zero=True,
+    )
+    future_offsets = _checkpoint_offsets(
+        checkpoint,
+        "future_offsets",
+        allow_negative=False,
+        allow_zero=False,
+    )
+    if image_offsets[-1] != 0:
+        raise ValueError("image_offsets must end at 0")
+    if telemetry_offsets[-1] != 0:
+        raise ValueError("telemetry_offsets must end at 0")
+
+    raw_interval = checkpoint.get("telemetry_sample_interval_ms")
+    if isinstance(raw_interval, bool) or not isinstance(raw_interval, int) or raw_interval <= 0:
+        raise ValueError("telemetry_sample_interval_ms must be a positive integer")
+
+    checkpoint_frame_count = checkpoint.get("frame_window_size")
+    if checkpoint_frame_count is not None:
+        if (
+            isinstance(checkpoint_frame_count, bool)
+            or not isinstance(checkpoint_frame_count, int)
+            or checkpoint_frame_count <= 0
+        ):
+            raise ValueError("frame_window_size must be a positive integer")
+        if checkpoint_frame_count != len(image_offsets):
+            raise ValueError(
+                "checkpoint frame_window_size must match image_offsets: "
+                f"frame_window_size={checkpoint_frame_count} image_offsets={len(image_offsets)}"
+            )
+
+    return CheckpointTimeline(
+        image_offsets=image_offsets,
+        telemetry_offsets=telemetry_offsets,
+        future_offsets=future_offsets,
+        telemetry_sample_interval_ms=raw_interval,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -229,7 +345,9 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, An
         raise KeyError(f"Checkpoint is missing model_state_dict: {checkpoint_path}")
     try:
         validate_checkpoint_control_contract(checkpoint)
-        validate_parking_control_target_transforms(
+        resolve_checkpoint_image_size(checkpoint)
+        resolve_checkpoint_timeline(checkpoint)
+        validate_stop_sign_control_target_transforms(
             resolve_checkpoint_target_transform_registry(checkpoint)
         )
     except ValueError as exc:
@@ -342,12 +460,18 @@ def resolve_checkpoint_target_transform_registry(checkpoint: dict[str, Any]) -> 
     control_target_names, aux_target_names = resolve_checkpoint_target_names(checkpoint, future_steps=future_steps)
     target_names = tuple(control_target_names) + tuple(aux_target_names)
     transforms = resolve_checkpoint_target_transforms(checkpoint, target_names)
-    validate_parking_control_target_transforms(transforms)
+    validate_stop_sign_control_target_transforms(transforms)
     return transforms
 
 
 def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: int) -> DrivingCNN:
     validate_checkpoint_control_contract(checkpoint)
+    timeline = resolve_checkpoint_timeline(checkpoint)
+    if frame_count != len(timeline.image_offsets):
+        raise ValueError(
+            "model frame_count must match checkpoint image_offsets: "
+            f"frame_count={frame_count} image_offsets={len(timeline.image_offsets)}"
+        )
     planner_format = str(checkpoint.get("planner_format", "")).strip()
     width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
     if planner_format == PLANNER_FORMAT:
@@ -359,12 +483,13 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
             "steering",
             "acceleration",
         ]
-        control_target_names = resolve_checkpoint_control_target_names(checkpoint, future_steps=len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]))
-        telemetry_offsets = checkpoint.get("telemetry_offsets") or [-8, -7, -6, -5, -4, -3, -2, -1, 0]
-        future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+        control_target_names = resolve_checkpoint_control_target_names(
+            checkpoint,
+            future_steps=len(timeline.future_offsets),
+        )
         aux_target_names = resolve_checkpoint_aux_target_names(
             checkpoint,
-            future_steps=len(future_offsets),
+            future_steps=len(timeline.future_offsets),
         )
         state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
         model_metadata = checkpoint.get("model", {})
@@ -378,8 +503,8 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
             frame_count=frame_count,
             telemetry_feature_dim=len(telemetry_feature_names),
             telemetry_hidden_dim=telemetry_hidden_dim,
-            telemetry_sequence_length=len(telemetry_offsets),
-            horizon=len(future_offsets),
+            telemetry_sequence_length=len(timeline.telemetry_offsets),
+            horizon=len(timeline.future_offsets),
             control_dim=len(control_target_names),
             control_target_names=tuple(control_target_names),
             aux_dim=len(aux_target_names),
@@ -409,25 +534,24 @@ def build_model(checkpoint: dict[str, Any], device: torch.device, frame_count: i
 def resolve_checkpoint_control_target_names(checkpoint: dict[str, Any], *, future_steps: int) -> list[str]:
     names = checkpoint.get("control_target_names")
     if not isinstance(names, list):
-        raise ValueError("parking checkpoint must include control_target_names")
-    return list(require_parking_control_target_names(
+        raise ValueError("stop-sign checkpoint must include control_target_names")
+    return list(require_stop_sign_control_target_names(
         names,
         source="checkpoint control_target_names",
     ))
 
 
 def resolve_checkpoint_frame_count(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
+    timeline_frame_count = len(resolve_checkpoint_timeline(checkpoint).image_offsets)
     checkpoint_frame_count = checkpoint.get("frame_window_size")
-    if checkpoint_frame_count is not None:
-        expected = int(checkpoint_frame_count)
-        if expected != config.window_size:
-            raise ValueError(
-                "Config/checkpoint frame-window mismatch: "
-                f"config dataset.window_size={config.window_size}, "
-                f"checkpoint frame_window_size={expected}"
-            )
-        return expected
-    return config.window_size
+    expected = timeline_frame_count if checkpoint_frame_count is None else int(checkpoint_frame_count)
+    if expected != config.window_size:
+        raise ValueError(
+            "Config/checkpoint frame-window mismatch: "
+            f"config dataset.window_size={config.window_size}, "
+            f"checkpoint frame_window_size={expected}"
+        )
+    return expected
 
 
 def resolve_checkpoint_frame_stride(checkpoint: dict[str, Any], config: InferenceConfig) -> int:
@@ -457,6 +581,7 @@ def run_sample_inference(
     sample_index: int,
     image_size: tuple[int, int],
     expected_window_size: int,
+    timeline: CheckpointTimeline,
     control_target_names: tuple[str, ...],
     aux_target_names: tuple[str, ...],
     target_transforms: dict[str, TargetTransform] | None,
@@ -466,6 +591,10 @@ def run_sample_inference(
         data_root=data_root,
         image_size=image_size,
         expected_window_size=expected_window_size,
+        image_offsets=timeline.image_offsets,
+        telemetry_offsets=timeline.telemetry_offsets,
+        future_offsets=timeline.future_offsets,
+        telemetry_sample_interval_ms=timeline.telemetry_sample_interval_ms,
         control_target_names=control_target_names,
         aux_target_names=aux_target_names,
         target_transforms=target_transforms,
@@ -513,6 +642,11 @@ def run_sample_inference(
             for definition in [state_input_definition(key)]
         },
         "pred_controls": pred_controls.detach().cpu().tolist(),
+        "motion_plan": {
+            "future_speed_mps": pred_controls[..., 0].detach().cpu().tolist(),
+            "stop_intent": pred_controls[..., 1].detach().cpu().tolist(),
+            "release_policy": release_policy_metadata(),
+        },
         "pred_aux": pred_aux.detach().cpu().tolist(),
         "target_controls": denorm_target_controls.detach().cpu().tolist(),
         "target_aux": denorm_target_aux.detach().cpu().tolist(),
@@ -531,10 +665,11 @@ def build_output(
     device: torch.device,
     sample_result: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    future_offsets = checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6]
+    timeline = resolve_checkpoint_timeline(checkpoint)
+    checkpoint_image_size = resolve_checkpoint_image_size(checkpoint)
     control_target_names, aux_target_names = resolve_checkpoint_target_names(
         checkpoint,
-        future_steps=len(future_offsets),
+        future_steps=len(timeline.future_offsets),
     )
     target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
     output: dict[str, Any] = {
@@ -544,10 +679,15 @@ def build_output(
         "planner_format": PLANNER_FORMAT,
         "planner_format_version": PLANNER_FORMAT_VERSION,
         "control_contract": control_contract_metadata(),
+        "release_policy": release_policy_metadata(),
         "frame_window_size": int(checkpoint.get("frame_window_size", 0) or 0),
         "frame_stride": int(checkpoint.get("frame_stride", checkpoint.get("frame_window_stride", 0)) or 0),
         "sample_stride": checkpoint_sample_stride(checkpoint),
         "input_channels": int(checkpoint.get("input_channels", 0) or 0),
+        "image_size": {
+            "width": checkpoint_image_size[0],
+            "height": checkpoint_image_size[1],
+        },
         "model": {
             "width_multiplier": resolve_checkpoint_width_multiplier(checkpoint),
             "dropout": resolve_checkpoint_dropout(checkpoint),
@@ -556,8 +696,10 @@ def build_output(
         },
         "target_transforms": target_transform_metadata(target_transforms),
         "state_inputs": checkpoint.get("state_inputs", state_inputs_metadata(state_input_config_from_metadata(None))),
-        "future_offsets": list(future_offsets),
-        "telemetry_sample_interval_ms": int(checkpoint["telemetry_sample_interval_ms"]),
+        "image_offsets": list(timeline.image_offsets),
+        "telemetry_offsets": list(timeline.telemetry_offsets),
+        "future_offsets": list(timeline.future_offsets),
+        "telemetry_sample_interval_ms": timeline.telemetry_sample_interval_ms,
         "control_horizon_dt_ms": list(resolve_checkpoint_control_horizon_dt_ms(checkpoint)),
         "telemetry_feature_names": list(checkpoint.get("telemetry_feature_names", [])),
         "control_target_names": list(control_target_names),
@@ -650,13 +792,17 @@ def main() -> None:
     device = select_device(config.device)
     checkpoint_path = resolve_existing_path(config.checkpoint, args.config)
     checkpoint = load_checkpoint(checkpoint_path, device)
+    timeline = resolve_checkpoint_timeline(checkpoint)
+    image_size = require_checkpoint_image_size(
+        checkpoint,
+        (config.image_width, config.image_height),
+    )
     frame_count = resolve_checkpoint_frame_count(checkpoint, config)
     _ = resolve_checkpoint_frame_stride(checkpoint, config)
     model = build_model(checkpoint, device, frame_count)
-    target_names_future_steps = len(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
     control_target_names, aux_target_names = resolve_checkpoint_target_names(
         checkpoint,
-        future_steps=target_names_future_steps,
+        future_steps=len(timeline.future_offsets),
     )
     target_transforms = resolve_checkpoint_target_transform_registry(checkpoint)
 
@@ -670,8 +816,9 @@ def main() -> None:
             data_root=config.data_root,
             run_id=config.run_id,
             sample_index=config.sample_index,
-            image_size=(config.image_width, config.image_height),
-            expected_window_size=config.window_size,
+            image_size=image_size,
+            expected_window_size=frame_count,
+            timeline=timeline,
             control_target_names=control_target_names,
             aux_target_names=aux_target_names,
             target_transforms=target_transforms,

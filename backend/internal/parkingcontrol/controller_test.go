@@ -63,6 +63,32 @@ func TestControllerComposesSteeringFeedforwardFeedbackAndDTSlew(t *testing.T) {
 	}
 }
 
+func TestStraightApproachModeIgnoresModelTurnsAndCentersMeasuredSteering(t *testing.T) {
+	config := testConfig()
+	config.StraightApproachOnly = true
+	controller, err := New(config)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	output, err := controller.Step(Input{
+		DesiredWheelSteer:  0.9,
+		MeasuredWheelSteer: 0.2,
+		DesiredSpeedMPS:    1,
+		CurrentSpeedMPS:    1,
+		DT:                 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Step returned error: %v", err)
+	}
+	if math.Abs(output.Steering-(-0.1)) > 1e-9 {
+		t.Fatalf("expected straight-mode feedback to center the wheel, got=%+v", output)
+	}
+	if output.SteeringFeedForward != 0 || math.Abs(output.SteeringError-(-0.2)) > 1e-9 {
+		t.Fatalf("model steering must not feed forward in straight mode, got=%+v", output)
+	}
+}
+
 func TestControllerUsesOneSignedMutuallyExclusiveLongitudinalEffort(t *testing.T) {
 	controller, err := New(testConfig())
 	if err != nil {
@@ -355,6 +381,7 @@ func TestControllerConfigUsesSnakeCaseJSONAndTOMLNames(t *testing.T) {
 		name   string
 	}{
 		{typeOf: reflect.TypeOf(Config{}), field: "SteeringProfile", name: "steering_profile"},
+		{typeOf: reflect.TypeOf(Config{}), field: "StraightApproachOnly", name: "straight_approach_only"},
 		{typeOf: reflect.TypeOf(Config{}), field: "StopProbabilityReleaseThreshold", name: "stop_probability_release_threshold"},
 		{typeOf: reflect.TypeOf(SteeringCalibrationPoint{}), field: "WheelSteer", name: "wheel_steer"},
 		{typeOf: reflect.TypeOf(SteeringCalibrationPoint{}), field: "Command", name: "command"},

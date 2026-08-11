@@ -6,8 +6,8 @@ from typing import Any
 
 from control_contract import (
     DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
-    PARKING_CONTROL_TARGET_NAMES,
-    require_parking_control_target_names,
+    STOP_SIGN_CONTROL_TARGET_NAMES,
+    require_stop_sign_control_target_names,
 )
 
 DEFAULT_IMAGE_WIDTH = 480
@@ -27,7 +27,7 @@ DEFAULT_TELEMETRY_FEATURE_NAMES = (
     "steering",
     "acceleration",
 )
-DEFAULT_CONTROL_TARGET_NAMES = PARKING_CONTROL_TARGET_NAMES
+DEFAULT_CONTROL_TARGET_NAMES = STOP_SIGN_CONTROL_TARGET_NAMES
 DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate")
 DEFAULT_AUX_LOSS_WEIGHT = 0.3
 DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
@@ -181,7 +181,7 @@ def parse_temporal_dataset_config(
         dataset_raw.get("control_target_names", list(DEFAULT_CONTROL_TARGET_NAMES)),
         key="dataset.control_target_names",
     )
-    require_parking_control_target_names(
+    require_stop_sign_control_target_names(
         control_target_names,
         source="dataset.control_target_names",
     )

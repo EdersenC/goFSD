@@ -1,7 +1,7 @@
 {
   "folders": [
     {
-      "name": "GTA Parking Lab",
+      "name": "GTA Stop Sign Lab",
       "path": "."
     }
   ],
@@ -19,10 +19,49 @@
     "version": "2.0.0",
     "tasks": [
       {
-        "label": "Parking Lab: Doctor",
+        "label": "Stop Sign Lab: First-time setup",
+        "type": "shell",
+        "command": "npm",
+        "args": ["run", "setup"],
+        "detail": "Install the locked FiveM and embedded web dependencies.",
+        "problemMatcher": []
+      },
+      {
+        "label": "Stop Sign Lab: Start",
+        "type": "shell",
+        "command": "npm",
+        "args": ["start"],
+        "windows": {
+          "command": "powershell.exe",
+          "args": [
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "${workspaceFolder}\\scripts\\start-parking-lab.ps1"
+          ]
+        },
+        "detail": "Start missing services, wait for the backend, and open the Stop Sign Lab workbench.",
+        "presentation": {
+          "reveal": "always",
+          "panel": "dedicated",
+          "clear": true
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "Stop Sign Lab: Doctor",
         "type": "shell",
         "command": "bash",
         "args": ["scripts/doctor.sh"],
+        "problemMatcher": []
+      },
+      {
+        "label": "Stop Sign Lab: Resume / Status",
+        "type": "shell",
+        "command": "npm",
+        "args": ["run", "resume"],
         "problemMatcher": []
       },
       {
@@ -109,7 +148,7 @@
         "problemMatcher": []
       },
       {
-        "label": "Parking Lab: Validate",
+        "label": "Stop Sign Lab: Validate",
         "type": "shell",
         "command": "bash",
         "args": ["scripts/validate.sh"],
@@ -125,7 +164,7 @@
         "id": "fivemResourceDir",
         "type": "promptString",
         "description": "Absolute path to the existing FiveM FSD resource directory",
-        "default": "/home/eddy/Fivem/data/cfx-server-data/resources/FSD"
+        "default": ""
       }
     ]
   }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,25 +23,27 @@ import (
 	datasetproc "awesomeProject/internal/dataset"
 )
 
-//go:embed web/index.html web/app.ts
-var webAssets embed.FS
-
 func main() {
-	const backendBuildID = "2026-08-04-parking-lab-v1"
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "process-runs":
-			if err := runProcessRuns(os.Args[2:]); err != nil {
-				log.Fatal(err)
-			}
-			return
-		case "report-runs":
-			if err := runReportRuns(os.Args[2:]); err != nil {
-				log.Fatal(err)
-			}
-			return
-		}
+	if err := runBackend(os.Args[1:], os.Stdout); err != nil {
+		log.Fatal(err)
 	}
+}
+
+func runBackend(args []string, output io.Writer) error {
+	const backendBuildID = "2026-08-09-safety-barrier-v9"
+	handled, err := dispatchBackendCommand(args, output)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
+	addr := backendListenAddress(os.Getenv("HOST"), os.Getenv("PORT"))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind capture API on %s: %w", addr, err)
+	}
+	defer listener.Close()
 
 	configPath, err := capture.ResolveInferenceConfigPath("")
 	if err != nil {
@@ -50,7 +51,7 @@ func main() {
 	}
 	inferenceConfig, err := capture.LoadInferenceConfig(configPath)
 	if err != nil {
-		log.Fatalf("failed to load backend inference config: %v", err)
+		return fmt.Errorf("failed to load backend inference config: %w", err)
 	}
 	if inferenceConfig.ConfigPath != "" {
 		log.Printf("loaded backend inference config from %s", inferenceConfig.ConfigPath)
@@ -58,11 +59,11 @@ func main() {
 	log.Printf("backend build=%s capture_stop_output_validation=enabled", backendBuildID)
 	actuatorConfig, err := actuator.LoadConfig(configPath)
 	if err != nil {
-		log.Fatalf("failed to load backend actuator config: %v", err)
+		return fmt.Errorf("failed to load backend actuator config: %w", err)
 	}
 	datasetConfig, err := capture.LoadDatasetConfig(configPath)
 	if err != nil {
-		log.Fatalf("failed to load dataset frame-window config: %v", err)
+		return fmt.Errorf("failed to load dataset frame-window config: %w", err)
 	}
 
 	svc := capture.NewService()
@@ -79,46 +80,43 @@ func main() {
 			log.Printf("failed to close virtual controller actuator: %v", err)
 		}
 	}()
-	processor := datasetproc.NewProcessor(
-		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
-		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
-		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
-		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
-		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
-		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
+	runsRoot := filepath.Join(defaultBackendDataRoot(), "runs")
+	processingService, err := newDatasetProcessingService(datasetConfig, runsRoot)
+	if err != nil {
+		return fmt.Errorf("failed to configure dataset processing service: %w", err)
+	}
+	processingContext, cancelProcessing := context.WithCancel(context.Background())
+	defer cancelProcessing()
+	if err := processingService.Start(processingContext); err != nil {
+		return fmt.Errorf("failed to start dataset processing service: %w", err)
+	}
+	defer func() {
+		if err := processingService.Close(); err != nil {
+			log.Printf("failed to close dataset processing service: %v", err)
+		}
+	}()
+	processingSnapshot := processingService.Snapshot()
+	log.Printf(
+		"dataset processing workers=%d queue_capacity=%d recovered=%d",
+		processingSnapshot.WorkerCount,
+		processingSnapshot.QueueCapacity,
+		processingSnapshot.Recovered,
 	)
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeEmbeddedFile(w, "web/index.html", "text/html; charset=utf-8")
-	})
-
-	mux.HandleFunc("/app.ts", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		writeEmbeddedFile(w, "web/app.ts", "text/javascript; charset=utf-8")
-	})
-
-	registerDataInspectorHandlers(mux, filepath.Join(defaultBackendDataRoot(), "runs"))
+	datasetProcessor := datasetproc.NewProcessor(datasetProcessorOptions(datasetConfig)...)
+	registerWebHandlers(mux)
+	registerProcessingHandlers(mux, processingService, datasetProcessor, runsRoot)
+	registerDataInspectorHandlers(mux, runsRoot, datasetProcessor)
+	registerParkingBatchHandlers(mux, controlStore)
+	registerStopSignBatchHandlers(mux, controlStore)
+	registerControlDispatchHandlers(mux, controlStore)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, backendHealthResponse())
 	})
 
 	mux.HandleFunc("/capture/sources", func(w http.ResponseWriter, r *http.Request) {
@@ -367,12 +365,7 @@ func main() {
 
 		command, err := controlStore.Enqueue(req)
 		if err != nil {
-			switch {
-			case errors.Is(err, control.ErrInvalidCommand):
-				writeError(w, http.StatusBadRequest, err.Error())
-			default:
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+			writeControlCommandError(w, err)
 			return
 		}
 
@@ -431,9 +424,11 @@ func main() {
 			return
 		}
 
+		reset := controlStore.ResetConsumerSessionWithSafetyEpoch()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "reset",
-			"sessionId": controlStore.ResetConsumerSession(),
+			"status":      "reset",
+			"sessionId":   reset.SessionID,
+			"safetyEpoch": reset.SafetyEpoch,
 		})
 	})
 
@@ -591,21 +586,14 @@ func main() {
 		if req.AbortOnly {
 			postProcessStatus = "aborted"
 			postProcessError = "capture aborted after hard failure; post-processing skipped"
-		} else if _, err := processor.Queue(tripDir); err != nil {
+		} else if accepted, enqueueErr := processingService.Enqueue(tripDir); enqueueErr != nil {
 			postProcessStatus = "failed"
-			postProcessError = err.Error()
+			postProcessError = enqueueErr.Error()
+			log.Printf("post-processing enqueue failed for %s: %v", tripDir, enqueueErr)
 		} else {
-			go func(targetTripDir string) {
-				readinessCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-				defer cancel()
-				if err := datasetproc.WaitForTripReadiness(readinessCtx, targetTripDir, 500*time.Millisecond); err != nil {
-					log.Printf("post-processing readiness failed for %s: %v", targetTripDir, err)
-					return
-				}
-				if err := processor.ProcessTrip(context.Background(), targetTripDir); err != nil {
-					log.Printf("post-processing failed for %s: %v", targetTripDir, err)
-				}
-			}(tripDir)
+			if !accepted {
+				log.Printf("post-processing already queued or active for %s", tripDir)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -620,8 +608,7 @@ func main() {
 		})
 	})
 
-	addr := backendListenAddress(os.Getenv("HOST"), os.Getenv("PORT"))
-	log.Printf("capture API listening on %s", addr)
+	log.Printf("capture API listening on %s", listener.Addr())
 	server := &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -643,14 +630,23 @@ func main() {
 		}
 	}()
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("capture API stopped unexpectedly: %w", err)
 	}
 	<-shutdownDone
+	return nil
+}
+
+func backendHealthResponse() map[string]string {
+	return map[string]string{
+		"status":  "ok",
+		"service": "stop-sign-lab-backend",
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
@@ -664,30 +660,35 @@ func decodeJSONBody(r *http.Request, dest any) error {
 	return nil
 }
 
-func writeEmbeddedFile(w http.ResponseWriter, name string, contentType string) {
-	body, err := webAssets.ReadFile(name)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read asset")
-		return
-	}
-
-	w.Header().Set("Content-Type", contentType)
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
-}
-
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeControlCommandError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, control.ErrSafetyEpochRequired):
+		status = http.StatusPreconditionRequired
+	case errors.Is(err, control.ErrSafetyEpochMismatch):
+		status = http.StatusConflict
+	case errors.Is(err, control.ErrInvalidCommand):
+		status = http.StatusBadRequest
+	}
+	writeError(w, status, err.Error())
 }
 
 func runProcessRuns(args []string) error {
 	fs := flag.NewFlagSet("process-runs", flag.ContinueOnError)
 	root := fs.String("root", filepath.Join(defaultBackendDataRoot(), "runs"), "root directory to scan for trip folders")
 	workers := fs.Int("workers", 4, "number of parallel workers")
-	force := fs.Bool("force", false, "reprocess trips even if frames/ or dataset.jsonl already exist")
+	force := fs.Bool("force", false, "reprocess trips even when their fingerprint and published outputs are complete")
 	datasetOnly := fs.Bool("dataset-only", false, "reuse existing frames/ and regenerate only dataset.jsonl")
+	stopSignOnly := fs.Bool("stop-sign-only", false, "process only stop-sign temporal-v1 scenes; reports retain every scene in affected runs")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *workers < 1 {
+		return fmt.Errorf("workers must be at least 1")
 	}
 
 	datasetConfig, err := loadDatasetConfigForCLI()
@@ -699,22 +700,38 @@ func runProcessRuns(args []string) error {
 	if err != nil {
 		return err
 	}
+	reportTripDirs := tripDirs
+	if *stopSignOnly {
+		tripDirs = filterStopSignTripDirs(tripDirs)
+		var collectErr error
+		reportTripDirs, collectErr = collectTripDirsForSelectedRuns(tripDirs)
+		if collectErr != nil {
+			return collectErr
+		}
+	}
 	if len(tripDirs) == 0 {
-		fmt.Println("No trip folders found.")
+		if *stopSignOnly {
+			fmt.Println("No stop-sign trip folders found.")
+		} else {
+			fmt.Println("No trip folders found.")
+		}
 		return nil
 	}
 
 	fmt.Printf(
-		"Processing %d trip folders from %s with workers=%d force=%t dataset_only=%t image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
+		"Processing %d trip folders from %s with workers=%d stop_sign_only=%t force=%t dataset_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
 		len(tripDirs),
 		*root,
 		*workers,
+		*stopSignOnly,
 		*force,
 		*datasetOnly,
 		datasetConfig.ImageWidth,
 		datasetConfig.ImageHeight,
-		datasetConfig.WindowSize,
-		datasetConfig.FrameStride,
+		datasetConfig.ImageOffsets,
+		datasetConfig.TelemetryOffsets,
+		datasetConfig.FutureOffsets,
+		datasetConfig.TelemetrySampleInterval,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
 		datasetConfig.FutureSpeedDeltaClip,
@@ -727,8 +744,15 @@ func runProcessRuns(args []string) error {
 	var processed int
 	var active int
 
+	processingContext, cancelProcessing := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelProcessing()
+	processorOptions := append(
+		datasetProcessorOptions(datasetConfig),
+		datasetproc.WithForce(*force),
+		datasetproc.WithDatasetOnly(*datasetOnly),
+	)
 	results := datasetproc.ProcessTripDirsWithCallback(
-		context.Background(),
+		processingContext,
 		tripDirs,
 		*workers,
 		func(result datasetproc.TripProcessResult) {
@@ -792,14 +816,7 @@ func runProcessRuns(args []string) error {
 				failed,
 			)
 		},
-		datasetproc.WithForce(*force),
-		datasetproc.WithDatasetOnly(*datasetOnly),
-		datasetproc.WithImageSize(datasetConfig.ImageWidth, datasetConfig.ImageHeight),
-		datasetproc.WithSamplingConfig(datasetConfig.WindowSize, datasetConfig.FrameStride, datasetConfig.SampleStride),
-		datasetproc.WithLabelTolerance(datasetConfig.LabelTolerance),
-		datasetproc.WithTelemetryTimelineConfig(datasetConfig.TelemetryOffsets, datasetConfig.FutureOffsets, datasetConfig.TelemetrySampleInterval),
-		datasetproc.WithFutureSpeedDeltaTargetConfig(datasetConfig.FutureSpeedDeltaClip, datasetConfig.FutureSpeedDeltaNormalize),
-		datasetproc.WithSyncFlashDetection(datasetConfig.SyncFlashBrightnessThreshold, datasetConfig.SyncFlashFrameLimit),
+		processorOptions...,
 	)
 
 	if processed != len(results) {
@@ -822,14 +839,21 @@ func runProcessRuns(args []string) error {
 		}
 	}
 
-	fmt.Printf("Summary: completed=%d skipped=%d failed=%d total=%d\n", completed, skipped, failed, len(results))
+	fmt.Printf(
+		"Summary: completed=%d skipped=%d failed=%d finished=%d discovered=%d\n",
+		completed,
+		skipped,
+		failed,
+		len(results),
+		len(tripDirs),
+	)
 
-	reports, reportErr := datasetproc.WriteRunDatasetReports(tripDirs, buildDatasetReportConfig(datasetConfig))
-	printRunDatasetReportSummaries(reports)
-
-	var processErr error
-	if failed > 0 {
-		processErr = fmt.Errorf("processing failed for %d trip(s)", failed)
+	processErr := processRunError(len(tripDirs), len(results), failed, processingContext.Err())
+	var reportErr error
+	if processingContext.Err() == nil {
+		var reports []datasetproc.GeneratedRunDatasetReport
+		reports, reportErr = datasetproc.WriteRunDatasetReports(reportTripDirs, buildDatasetReportConfig(datasetConfig))
+		printRunDatasetReportSummaries(reports)
 	}
 	if reportErr != nil {
 		reportErr = fmt.Errorf("dataset report generation failed: %w", reportErr)
@@ -837,9 +861,23 @@ func runProcessRuns(args []string) error {
 	return errors.Join(processErr, reportErr)
 }
 
+func processRunError(discovered int, finished int, failed int, contextErr error) error {
+	if contextErr != nil {
+		return fmt.Errorf("processing interrupted after %d of %d trip(s): %w", finished, discovered, contextErr)
+	}
+	if finished != discovered {
+		return fmt.Errorf("processing ended after %d of %d trip(s)", finished, discovered)
+	}
+	if failed > 0 {
+		return fmt.Errorf("processing failed for %d trip(s)", failed)
+	}
+	return nil
+}
+
 func runReportRuns(args []string) error {
 	fs := flag.NewFlagSet("report-runs", flag.ContinueOnError)
 	root := fs.String("root", filepath.Join(defaultBackendDataRoot(), "runs"), "root directory to scan for trip folders")
+	stopSignOnly := fs.Bool("stop-sign-only", false, "report runs containing stop-sign temporal-v1 scenes, retaining every scene in those runs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -853,19 +891,34 @@ func runReportRuns(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *stopSignOnly {
+		stopSignTripDirs := filterStopSignTripDirs(tripDirs)
+		var collectErr error
+		tripDirs, collectErr = collectTripDirsForSelectedRuns(stopSignTripDirs)
+		if collectErr != nil {
+			return collectErr
+		}
+	}
 	if len(tripDirs) == 0 {
-		fmt.Println("No trip folders found.")
+		if *stopSignOnly {
+			fmt.Println("No stop-sign trip folders found.")
+		} else {
+			fmt.Println("No trip folders found.")
+		}
 		return nil
 	}
 
 	fmt.Printf(
-		"Reporting %d trip folders from %s image_size=%dx%d window_size=%d frame_stride=%d sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
+		"Reporting %d trip folders from %s stop_sign_only=%t image_size=%dx%d image_offsets=%v telemetry_offsets=%v future_offsets=%v telemetry_interval=%s sample_stride=%d label_tolerance=%s future_speed_delta_clip=%.3f future_speed_delta_normalize=%t\n",
 		len(tripDirs),
 		*root,
+		*stopSignOnly,
 		datasetConfig.ImageWidth,
 		datasetConfig.ImageHeight,
-		datasetConfig.WindowSize,
-		datasetConfig.FrameStride,
+		datasetConfig.ImageOffsets,
+		datasetConfig.TelemetryOffsets,
+		datasetConfig.FutureOffsets,
+		datasetConfig.TelemetrySampleInterval,
 		datasetConfig.SampleStride,
 		datasetConfig.LabelTolerance,
 		datasetConfig.FutureSpeedDeltaClip,
@@ -884,6 +937,8 @@ func loadDatasetConfigForCLI() (capture.DatasetConfig, error) {
 	configPath, err := capture.ResolveInferenceConfigPath("")
 	if err != nil {
 		log.Printf("backend config path not resolved, using default dataset frame window: %v", err)
+	} else {
+		log.Printf("loaded dataset config from %s", configPath)
 	}
 	return capture.LoadDatasetConfig(configPath)
 }
@@ -894,6 +949,10 @@ func buildDatasetReportConfig(datasetConfig capture.DatasetConfig) datasetproc.D
 		ImageHeight:               datasetConfig.ImageHeight,
 		WindowSize:                datasetConfig.WindowSize,
 		FrameStride:               datasetConfig.FrameStride,
+		ImageOffsets:              append([]int(nil), datasetConfig.ImageOffsets...),
+		TelemetryOffsets:          append([]int(nil), datasetConfig.TelemetryOffsets...),
+		FutureOffsets:             append([]int(nil), datasetConfig.FutureOffsets...),
+		TelemetrySampleIntervalMs: int(datasetConfig.TelemetrySampleInterval / time.Millisecond),
 		SampleStride:              datasetConfig.SampleStride,
 		LabelTolerance:            datasetConfig.LabelTolerance.String(),
 		FutureSpeedDeltaClip:      datasetConfig.FutureSpeedDeltaClip,

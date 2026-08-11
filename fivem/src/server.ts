@@ -6,8 +6,21 @@ import {defaultScene, defaultSceneId, getLocalScene} from "./datasets";
 import {normalizeScenePayload, SceneType} from "./sceneManger";
 import {WaypointCompleted} from "./egoService";
 import {isActuatorStateNeutral, isInferenceCleanupComplete} from "./expertNeutral";
+import {RECONNECT_CAPTURE_STOP_REQUEST} from "./captureLifecycle";
+import {StopSignJob, StopSignPose} from "./stop-sign/types";
+import {
+    ControlSessionFrontier,
+    matchesControlSafetySyncAck,
+} from "./control-session-frontier";
+import {
+    ControlPollSingleFlight,
+    dispatchConfirmationAdvancesCursor,
+    parseControlDispatchConfirmation,
+    runWithAbortTimeout,
+} from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-04-forward-parking-v1";
+const SERVER_BUILD_ID = "2026-08-10-stop-sign-temporal-v1";
+const PARKING_CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
 type AggregatedTrip = Omit<WaypointCompleted, "vehicleData" | "chunkIndex" | "isTripComplete"> & {
@@ -116,17 +129,34 @@ type ControlCommandType =
     | "endScene"
     | "endAllScenes"
     | "setParkingTarget"
+    | "setParkingStart"
     | "clearParkingTarget"
     | "prepareParkingEvaluation"
-    | "startParkingRun";
+    | "startParkingRun"
+    | "startParkingBatch"
+    | "setStopSignTarget"
+    | "clearStopSignTarget"
+    | "startStopSignBatch";
 type InferenceCommandType = "startEgo" | "stopEgo";
 
 type ControlCommand = {
     id: string
     type: ControlCommandType | InferenceCommandType
+    safetyEpoch: number
     sceneName?: string
     attemptCount?: number
     seed?: string
+    parkingBatchId?: string
+    planFingerprint?: string
+    parkingJobs?: Array<{
+        id: string
+        parkDest: {x: number, y: number, z: number, heading: number}
+        startDest: {x: number, y: number, z: number, heading: number}
+        collectionAmount: number
+        seed: string
+    }>
+    stopSignBatchId?: string
+    stopSignJobs?: StopSignJob[]
     createdAt?: string
 }
 
@@ -134,6 +164,45 @@ type ControlStatusUpdate = {
     status: "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error"
     activeSceneName?: string
     lastError?: string
+    appliedSafetyEpoch: number
+    inFlightSafetyStarts: number
+    safetyStatusSequence: number
+    parkingBatch?: {
+        batchId: string
+        planFingerprint: string
+        state: "running" | "completed" | "stopped" | "failed"
+        jobId?: string
+        jobIndex: number
+        jobCount: number
+        completedJobs: number
+        startedAtMs: number
+        updatedAtMs: number
+    }
+    stopSignBatch?: {
+        batchId: string
+        planFingerprint: string
+        state: "running" | "completed" | "stopped" | "failed"
+        jobId?: string
+        jobIndex: number
+        jobCount: number
+        completedJobs: number
+        attemptIndex: number
+        attemptCount: number
+        phase: string
+        startedAtMs: number
+        updatedAtMs: number
+    }
+}
+
+type ControlSafetyEpochSyncAck = {
+    requestId: string
+    sessionId: string
+    safetyEpoch: number
+}
+
+type ControlSessionResetResponse = {
+    sessionId: string
+    safetyEpoch: number
 }
 
 type ControlTelemetryUpdate = {
@@ -173,6 +242,9 @@ type ControlTelemetryUpdate = {
     leadVehicleDistance: number
     hasLeadVehicle: boolean
     parkingTargetConfigured: boolean
+    parkingStartConfigured: boolean
+    parkingTargetPose?: {coords: [number, number, number], heading: number}
+    parkingStartPose?: {coords: [number, number, number], heading: number}
     parkingLongitudinalError: number
     parkingLateralError: number
     parkingHeadingError: number
@@ -183,6 +255,21 @@ type ControlTelemetryUpdate = {
     parkingAttemptIndex: number
     parkingAttemptCount: number
     parkingPhase: string
+    stopSignTargetConfigured: boolean
+    stopSignPose?: StopSignPose
+    stopLinePose?: StopSignPose
+    stopSignEgoStopPose?: StopSignPose
+    stopSignDistanceM: number
+    stopLineDistanceM: number
+    stopSignLongitudinalErrorM: number
+    stopSignLateralErrorM: number
+    stopSignHeadingErrorDeg: number
+    stopSignPhase: string
+    stopSignDwellElapsedMs: number
+    stopSignDwellTargetMs: number
+    stopSignStopped: boolean
+    stopSignAttemptIndex: number
+    stopSignAttemptCount: number
     timestampMs?: number
     gameTimeMs?: number
 }
@@ -200,12 +287,23 @@ const finalizeInFlightTrips = new Map<string, Promise<TripFinalizeResponse>>();
 const flushedTripRetentionMs = 10 * 60_000;
 const tripFinalizeWaitMs = 15_000;
 const tripTelemetryPollMs = 50;
-let controlPollInFlight = false;
-let lastSeenControlCommandId = "";
+const controlSafetySyncTimeoutMs = 15_000;
+const controlDispatchRequestTimeoutMs = 2_000;
+const controlReconnectRequestTimeoutMs = 2_000;
+const controlSessionFrontier = new ControlSessionFrontier();
+const controlPollSingleFlight = new ControlPollSingleFlight();
 let availableScenesSyncInFlight = false;
 let sceneListRequestInFlight = false;
-let activeControlPlayerSource: number | null = null;
-let controlConnectInFlight = false;
+let controlConnectTask: Promise<void> | null = null;
+let controlSafetySyncSequence = 0;
+let pendingControlSafetySync: {
+    requestId: string
+    sessionId: string
+    safetyEpoch: number
+    playerSource: number
+    timer: ReturnType<typeof setTimeout>
+    resolve: (acknowledged: boolean) => void
+} | null = null;
 let lastControlTelemetryDebugAt = 0;
 
 class ApiRequestError extends Error {
@@ -228,7 +326,6 @@ function formatParkingAttemptProgress(attemptIndex: unknown, attemptCount: unkno
 
 onNet("capture:startRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
-    rememberControlPlayerSource(playerSource);
     const response: CaptureResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -247,8 +344,8 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
         const tripStorage = buildTripStoragePaths(resolveDataRoot(), runStorage, validated.tripIndex);
 
         const result = await captureApiRequest("/capture/start", {
-            sourceId: "monitor-2",
             cropToWindow: false,
+            sourceId: PARKING_CAPTURE_SOURCE_ID,
             outputFile: tripStorage.videoFileRelative
         });
 
@@ -265,7 +362,6 @@ onNet("capture:startRequest", async (request: CaptureRequest) => {
 
 onNet("expert:neutralizeRequest", async (request: ExpertNeutralizeRequest) => {
     const playerSource = (global as any).source;
-    rememberControlPlayerSource(playerSource);
     const response: ExpertNeutralizeResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false,
@@ -285,7 +381,6 @@ onNet("expert:neutralizeRequest", async (request: ExpertNeutralizeRequest) => {
 
 onNet("capture:stopRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
-    rememberControlPlayerSource(playerSource);
     const response: CaptureResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -327,7 +422,6 @@ onNet("capture:stopRequest", async (request: CaptureRequest) => {
 
 onNet("capture:abortRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
-    rememberControlPlayerSource(playerSource);
     const response: CaptureResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -366,7 +460,6 @@ onNet("capture:abortRequest", async (request: CaptureRequest) => {
 
 onNet("capture:finalizeTripRequest", async (request: CaptureRequest) => {
     const playerSource = (global as any).source;
-    rememberControlPlayerSource(playerSource);
     const response: TripFinalizeResponse = {
         requestId: String(request?.requestId ?? ""),
         success: false
@@ -410,20 +503,45 @@ onNet("capture:finalizeTripRequest", async (request: CaptureRequest) => {
 });
 
 onNet("control:statusUpdate", async (update: ControlStatusUpdate) => {
-    rememberControlPlayerSource((global as any).source);
+    if (!controlSessionFrontier.isRequestedPlayerSource(parseControlPlayerSource((global as any).source))) {
+        return;
+    }
     try {
-        await apiRequest("/control/status", "POST", {
+        const appliedSafetyEpoch = update?.appliedSafetyEpoch ?? 0;
+        const response = await apiRequest("/control/status", "POST", {
             status: update?.status ?? "idle",
             activeSceneName: update?.activeSceneName ?? "",
-            lastError: update?.lastError ?? ""
+            lastError: update?.lastError ?? "",
+            parkingBatch: update?.parkingBatch,
+            stopSignBatch: update?.stopSignBatch,
+            appliedSafetyEpoch,
+            inFlightSafetyStarts: update?.inFlightSafetyStarts ?? 0,
+            safetyStatusSequence: update?.safetyStatusSequence ?? 0,
         });
+        const backendAppliedSafetyEpoch = Number(response?.appliedSafetyEpoch);
+        if (
+            Number.isSafeInteger(appliedSafetyEpoch)
+            && appliedSafetyEpoch > 0
+            && Number.isSafeInteger(backendAppliedSafetyEpoch)
+            && backendAppliedSafetyEpoch !== appliedSafetyEpoch
+            && controlSessionFrontier.requestBackendReconnect()
+        ) {
+            cancelPendingControlSafetySync();
+            console.warn(
+                `[control] backend safety epoch reset detected `
+                + `client=${appliedSafetyEpoch} backend=${backendAppliedSafetyEpoch}; reconnecting`,
+            );
+            void connectControlSession();
+        }
     } catch (err: any) {
         console.error(`[control] failed to push status update: ${err?.message ?? err}`);
     }
 });
 
 onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
-    rememberControlPlayerSource((global as any).source);
+    if (!controlSessionFrontier.isRequestedPlayerSource(parseControlPlayerSource((global as any).source))) {
+        return;
+    }
     const now = Date.now();
     if (now - lastControlTelemetryDebugAt >= 2000) {
         lastControlTelemetryDebugAt = now;
@@ -443,8 +561,8 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             `routeDistance=${Number(update?.routeDistance ?? 0).toFixed(2)} ` +
             `hasLead=${String(Boolean(update?.hasLeadVehicle))} ` +
             `leadDistance=${Number(update?.leadVehicleDistance ?? 0).toFixed(2)} ` +
-            `parking=${String(update?.parkingPhase ?? "idle")} ` +
-            `attempt=${formatParkingAttemptProgress(update?.parkingAttemptIndex, update?.parkingAttemptCount)}`
+            `stopSign=${String(update?.stopSignPhase ?? "idle")} ` +
+            `attempt=${formatParkingAttemptProgress(update?.stopSignAttemptIndex, update?.stopSignAttemptCount)}`
         );
     }
     try {
@@ -485,6 +603,9 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             leadVehicleDistance: update?.leadVehicleDistance ?? 0,
             hasLeadVehicle: Boolean(update?.hasLeadVehicle),
             parkingTargetConfigured: Boolean(update?.parkingTargetConfigured),
+            parkingStartConfigured: Boolean(update?.parkingStartConfigured),
+            parkingTargetPose: apiParkingPose(update?.parkingTargetPose),
+            parkingStartPose: apiParkingPose(update?.parkingStartPose),
             parkingLongitudinalError: update?.parkingLongitudinalError ?? 0,
             parkingLateralError: update?.parkingLateralError ?? 0,
             parkingHeadingError: update?.parkingHeadingError ?? 0,
@@ -495,6 +616,21 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
             parkingAttemptIndex: update?.parkingAttemptIndex ?? 0,
             parkingAttemptCount: update?.parkingAttemptCount ?? 0,
             parkingPhase: update?.parkingPhase ?? "idle",
+            stopSignTargetConfigured: Boolean(update?.stopSignTargetConfigured),
+            stopSignPose: apiStopSignPose(update?.stopSignPose),
+            stopLinePose: apiStopSignPose(update?.stopLinePose),
+            stopSignEgoStopPose: apiStopSignPose(update?.stopSignEgoStopPose),
+            stopSignDistanceM: update?.stopSignDistanceM ?? 0,
+            stopLineDistanceM: update?.stopLineDistanceM ?? 0,
+            stopSignLongitudinalErrorM: update?.stopSignLongitudinalErrorM ?? 0,
+            stopSignLateralErrorM: update?.stopSignLateralErrorM ?? 0,
+            stopSignHeadingErrorDeg: update?.stopSignHeadingErrorDeg ?? 0,
+            stopSignPhase: update?.stopSignPhase ?? "idle",
+            stopSignDwellElapsedMs: update?.stopSignDwellElapsedMs ?? 0,
+            stopSignDwellTargetMs: update?.stopSignDwellTargetMs ?? 0,
+            stopSignStopped: Boolean(update?.stopSignStopped),
+            stopSignAttemptIndex: update?.stopSignAttemptIndex ?? 0,
+            stopSignAttemptCount: update?.stopSignAttemptCount ?? 0,
             timestampMs: update?.timestampMs ?? 0,
             gameTimeMs: update?.gameTimeMs ?? 0
         });
@@ -503,8 +639,29 @@ onNet("control:telemetryUpdate", async (update: ControlTelemetryUpdate) => {
     }
 });
 
+function apiParkingPose(pose: ControlTelemetryUpdate["parkingTargetPose"]) {
+    if (!pose || !Array.isArray(pose.coords) || pose.coords.length !== 3) {
+        return undefined;
+    }
+    const [x, y, z] = pose.coords.map(Number);
+    const heading = Number(pose.heading);
+    if (![x, y, z, heading].every(Number.isFinite)) {
+        return undefined;
+    }
+    return {x, y, z, heading};
+}
+
+function apiStopSignPose(pose: StopSignPose | undefined) {
+    if (!pose || ![pose.x, pose.y, pose.z, pose.heading].every(Number.isFinite)) {
+        return undefined;
+    }
+    return {...pose};
+}
+
 onNet("control:availableScenesResponse", async (scenes: AvailableScene[]) => {
-    rememberControlPlayerSource((global as any).source);
+    if (!controlSessionFrontier.isRequestedPlayerSource(parseControlPlayerSource((global as any).source))) {
+        return;
+    }
     try {
         sceneListRequestInFlight = false;
         await syncAvailableScenes(Array.isArray(scenes) ? scenes : []);
@@ -514,16 +671,61 @@ onNet("control:availableScenesResponse", async (scenes: AvailableScene[]) => {
 });
 
 onNet("control:registerClient", async () => {
-    rememberControlPlayerSource((global as any).source);
-    lastSeenControlCommandId = "";
-    console.log(`[control] register client source=${String((global as any).source ?? "unknown")} build=${SERVER_BUILD_ID}`);
+    const playerSource = parseControlPlayerSource((global as any).source);
+    if (playerSource === null) {
+        console.error("[control] rejected registration without a valid player source");
+        return;
+    }
+    const claim = controlSessionFrontier.beginReconnect(playerSource);
+    if (claim.kind === "rejected") {
+        console.warn(
+            `[control] rejected client source=${playerSource}; `
+            + `source=${claim.ownerPlayerSource} already owns the control session`,
+        );
+        return;
+    }
+    const generation = claim.generation;
+    cancelPendingControlSafetySync();
+    console.log(`[control] register client source=${String(playerSource ?? "unknown")} generation=${generation} build=${SERVER_BUILD_ID}`);
     await stopCaptureOnReconnect();
     await connectControlSession();
     requestAvailableScenesFromClient();
 });
 
 onNet("control:clientHeartbeat", () => {
-    rememberControlPlayerSource((global as any).source);
+    const playerSource = parseControlPlayerSource((global as any).source);
+    if (!controlSessionFrontier.noteOwnerHeartbeat(playerSource)) {
+        return;
+    }
+    if (controlSessionFrontier.needsConnect()) {
+        void connectControlSession();
+    }
+});
+
+onNet("control:safetyEpochSyncAck", (ack: ControlSafetyEpochSyncAck) => {
+    const playerSource = parseControlPlayerSource((global as any).source);
+    const pending = pendingControlSafetySync;
+    if (
+        pending === null
+        || !matchesControlSafetySyncAck(pending, playerSource, ack)
+    ) {
+        console.warn(`[control] ignored unmatched safety epoch sync acknowledgement from source=${String(playerSource ?? "unknown")}`);
+        return;
+    }
+
+    settlePendingControlSafetySync(true);
+});
+
+on("playerDropped", () => {
+    const playerSource = parseControlPlayerSource((global as any).source);
+    if (!controlSessionFrontier.releaseOwner(playerSource)) {
+        return;
+    }
+
+    cancelPendingControlSafetySync();
+    sceneListRequestInFlight = false;
+    console.warn(`[control] released dropped owner source=${String(playerSource)}; polling is paused`);
+    void stopCaptureOnReconnect();
 });
 
 onNet("ego:vehicleData", async (data: WaypointCompleted) => {
@@ -609,6 +811,8 @@ onNet("ego:vehicleData", async (data: WaypointCompleted) => {
         existingTrip.chunkDurationMs = Math.max(0, data.endTime - existingTrip.syncTime);
         existingTrip.parkingGoal = data.parkingGoal ?? existingTrip.parkingGoal;
         existingTrip.parkingOutcome = data.parkingOutcome ?? existingTrip.parkingOutcome;
+        existingTrip.stopSignGoal = data.stopSignGoal ?? existingTrip.stopSignGoal;
+        existingTrip.stopSignOutcome = data.stopSignOutcome ?? existingTrip.stopSignOutcome;
     } else {
         const {vehicleData, chunkIndex: _chunkIndex, isTripComplete: _isTripComplete, ...tripMetadata} = data;
         pendingTrips.set(tripKey, {
@@ -770,14 +974,12 @@ function sanitizePathSegment(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-function rememberControlPlayerSource(value: unknown) {
+function parseControlPlayerSource(value: unknown): number | null {
     const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > 0) {
-        if (activeControlPlayerSource !== parsed) {
-            console.log(`[control] active player source set to ${parsed}`);
-        }
-        activeControlPlayerSource = parsed;
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        return null;
     }
+    return parsed;
 }
 
 function resolveDataRoot(): string {
@@ -926,19 +1128,26 @@ async function captureApiRequest(endpoint: string, body: any): Promise<any> {
     return apiRequest(endpoint, "POST", body);
 }
 
-async function apiRequest(endpoint: string, method: "GET" | "POST", body?: any): Promise<any> {
+async function apiRequest(
+    endpoint: string,
+    method: "GET" | "POST",
+    body?: any,
+    signal?: AbortSignal,
+): Promise<any> {
     const baseUrl = (process.env.CAPTURE_API_URL || "http://127.0.0.1:8080").replace(/\/+$/, "");
     const url = `${baseUrl}${endpoint}`;
     const response = await fetch(url, method === "GET"
         ? {
-            method
+            method,
+            signal,
         }
         : {
             method,
             headers: {
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify(body ?? {})
+            body: JSON.stringify(body ?? {}),
+            signal,
         });
 
     const text = await response.text();
@@ -957,6 +1166,22 @@ async function apiRequest(endpoint: string, method: "GET" | "POST", body?: any):
     }
 
     return parsed;
+}
+
+function controlDispatchApiRequest(endpoint: string, method: "GET" | "POST", body?: any): Promise<any> {
+    return runWithAbortTimeout(
+        `control dispatch ${method} ${endpoint}`,
+        controlDispatchRequestTimeoutMs,
+        (signal) => apiRequest(endpoint, method, body, signal),
+    );
+}
+
+function controlReconnectApiRequest(endpoint: string, method: "GET" | "POST", body?: any): Promise<any> {
+    return runWithAbortTimeout(
+        `control reconnect ${method} ${endpoint}`,
+        controlReconnectRequestTimeoutMs,
+        (signal) => apiRequest(endpoint, method, body, signal),
+    );
 }
 
 async function neutralizeExpertBackendInputs() {
@@ -1065,26 +1290,147 @@ async function syncAvailableScenes(scenes: AvailableScene[]) {
 }
 
 async function connectControlSession() {
-    if (controlConnectInFlight) {
+    if (controlConnectTask !== null) {
+        await controlConnectTask;
         return;
     }
 
-    controlConnectInFlight = true;
+    const task = runControlConnectLoop();
+    controlConnectTask = task;
     try {
-        const result = await apiRequest("/control/connect", "POST", {});
-        lastSeenControlCommandId = "";
-        console.log(`[control] connected to session ${result?.sessionId ?? "unknown"} build=${SERVER_BUILD_ID}`);
-    } catch (err: any) {
-        console.error(`[control] failed to reset control session: ${err?.message ?? err}`);
+        await task;
     } finally {
-        controlConnectInFlight = false;
+        if (controlConnectTask === task) {
+            controlConnectTask = null;
+        }
     }
+}
+
+async function runControlConnectLoop() {
+    while (controlSessionFrontier.needsConnect()) {
+        const lease = controlSessionFrontier.beginConnect();
+        if (!lease) {
+            return;
+        }
+
+        let result: ControlSessionResetResponse;
+        try {
+            result = validateControlSessionResetResponse(
+                await controlReconnectApiRequest("/control/connect", "POST", {}),
+            );
+        } catch (err: any) {
+            controlSessionFrontier.failConnect(lease);
+            console.error(`[control] failed to reset control session: ${err?.message ?? err}`);
+            return;
+        }
+
+        const completion = controlSessionFrontier.completeConnect(lease);
+        if (completion.kind === "stale") {
+            console.warn(`[control] discarded superseded connect response session=${result.sessionId} generation=${lease.generation}`);
+            continue;
+        }
+
+        const playerSource = completion.playerSource;
+
+        let acknowledged = false;
+        try {
+            acknowledged = await requestControlSafetyEpochSync(
+                completion.generation,
+                result,
+                playerSource,
+            );
+        } catch (err: any) {
+            cancelPendingControlSafetySync();
+            controlSessionFrontier.failSafetySync(completion.generation);
+            console.error(`[control] failed to send safety epoch sync: ${err?.message ?? err}`);
+            return;
+        }
+        if (!acknowledged) {
+            const superseded = !controlSessionFrontier.isCurrentGeneration(completion.generation);
+            controlSessionFrontier.failSafetySync(completion.generation);
+            if (superseded) {
+                continue;
+            }
+            console.error(`[control] safety epoch sync was not acknowledged; command polling remains paused`);
+            return;
+        }
+        if (!controlSessionFrontier.completeSafetySync(completion.generation, playerSource)) {
+            console.warn(`[control] discarded superseded safety epoch sync session=${result.sessionId} generation=${completion.generation}`);
+            continue;
+        }
+
+        console.log(
+            `[control] connected to session ${result.sessionId} safetyEpoch=${result.safetyEpoch} `
+            + `generation=${completion.generation} build=${SERVER_BUILD_ID}`,
+        );
+    }
+}
+
+function validateControlSessionResetResponse(value: any): ControlSessionResetResponse {
+    const sessionId = String(value?.sessionId ?? "").trim();
+    const safetyEpoch = Number(value?.safetyEpoch);
+    if (!sessionId) {
+        throw new Error("control connect response is missing sessionId");
+    }
+    if (!Number.isSafeInteger(safetyEpoch) || safetyEpoch < 1) {
+        throw new Error(`control connect response has invalid safetyEpoch ${String(value?.safetyEpoch)}`);
+    }
+    return {sessionId, safetyEpoch};
+}
+
+function requestControlSafetyEpochSync(
+    generation: number,
+    reset: ControlSessionResetResponse,
+    playerSource: number,
+): Promise<boolean> {
+    cancelPendingControlSafetySync();
+    const requestId = `${reset.sessionId}:sync-${generation}-${++controlSafetySyncSequence}`;
+
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            if (pendingControlSafetySync?.requestId !== requestId) {
+                return;
+            }
+            console.error(
+                `[control] timed out synchronizing safetyEpoch=${reset.safetyEpoch} `
+                + `session=${reset.sessionId} source=${playerSource}`,
+            );
+            settlePendingControlSafetySync(false);
+        }, controlSafetySyncTimeoutMs);
+        pendingControlSafetySync = {
+            requestId,
+            sessionId: reset.sessionId,
+            safetyEpoch: reset.safetyEpoch,
+            playerSource,
+            timer,
+            resolve,
+        };
+        emitNet("control:safetyEpochSync", playerSource, {
+            requestId,
+            sessionId: reset.sessionId,
+            safetyEpoch: reset.safetyEpoch,
+        });
+    });
+}
+
+function cancelPendingControlSafetySync() {
+    settlePendingControlSafetySync(false);
+}
+
+function settlePendingControlSafetySync(acknowledged: boolean) {
+    const pending = pendingControlSafetySync;
+    if (pending === null) {
+        return;
+    }
+    pendingControlSafetySync = null;
+    clearTimeout(pending.timer);
+    pending.resolve(acknowledged);
 }
 
 async function stopCaptureOnReconnect() {
     try {
-        await captureApiRequest("/capture/stop", {});
-        console.log("[control] stopped active capture during reconnect");
+        await controlReconnectApiRequest("/capture/stop", "POST", RECONNECT_CAPTURE_STOP_REQUEST);
+        console.log("[control] aborted active capture during reconnect");
     } catch (err: any) {
         const message = String(err?.message ?? err ?? "");
         if (message.toLowerCase().includes("capture is not running")) {
@@ -1099,7 +1445,7 @@ function requestAvailableScenesFromClient() {
         return;
     }
 
-    const playerSource = activeControlPlayerSource;
+    const playerSource = controlSessionFrontier.getReadyPlayerSource();
     if (playerSource === null) {
         return;
     }
@@ -1112,35 +1458,60 @@ function requestAvailableScenesFromClient() {
 }
 
 async function pollControlCommands() {
-    if (controlPollInFlight) {
-        return;
-    }
-
-    controlPollInFlight = true;
-    try {
-        const query = lastSeenControlCommandId
-            ? `?lastSeenCommandId=${encodeURIComponent(lastSeenControlCommandId)}`
-            : "";
-        const result = await apiRequest(`/control/poll${query}`, "GET");
-        const command = result?.command as ControlCommand | undefined;
-        if (!command?.id) {
+    await controlPollSingleFlight.run(async () => {
+        const lease = controlSessionFrontier.beginPoll();
+        if (!lease) {
             return;
         }
 
-        const playerSource = activeControlPlayerSource;
-        if (playerSource === null) {
-            console.warn("[control] command available but no active control player is registered");
-            return;
-        }
+        try {
+            const query = lease.lastSeenCommandId
+                ? `?lastSeenCommandId=${encodeURIComponent(lease.lastSeenCommandId)}`
+                : "";
+            const result = await controlDispatchApiRequest(`/control/poll${query}`, "GET");
+            const command = result?.command as ControlCommand | undefined;
+            if (!command?.id) {
+                controlSessionFrontier.acceptPoll(lease);
+                return;
+            }
 
-        console.log(`[control] dispatching command id=${command.id} type=${command.type} scene=${command.sceneName ?? ""} to source=${playerSource}`);
-        emitNet("control:executeCommand", playerSource, command);
-        lastSeenControlCommandId = command.id;
-    } catch (err: any) {
-        console.error(`[control] poll failed: ${err?.message ?? err}`);
-    } finally {
-        controlPollInFlight = false;
-    }
+            if (!controlSessionFrontier.isPollCurrent(lease)) {
+                console.warn(`[control] discarded command id=${command.id} from a superseded poll generation=${lease.generation}`);
+                return;
+            }
+
+            const confirmation = parseControlDispatchConfirmation(
+                await controlDispatchApiRequest("/control/dispatch/confirm", "POST", {commandId: command.id}),
+                command.id,
+            );
+            if (!controlSessionFrontier.isPollCurrent(lease)) {
+                console.warn(`[control] discarded confirmation id=${command.id} from a superseded poll generation=${lease.generation}`);
+                return;
+            }
+            if (!dispatchConfirmationAdvancesCursor(confirmation)) {
+                console.warn(`[control] command id=${command.id} disappeared before confirmation; retrying from the prior cursor`);
+                return;
+            }
+            if (!confirmation.confirmed) {
+                if (!controlSessionFrontier.acceptDispatchConfirmation(lease, command.id)) {
+                    console.warn(`[control] discarded rejection id=${command.id} from an inactive poll generation=${lease.generation}`);
+                    return;
+                }
+                console.warn(`[control] skipped command id=${command.id} after backend rejection reason=${confirmation.reason}`);
+                return;
+            }
+
+            const confirmedCommand = confirmation.command as ControlCommand;
+            if (!controlSessionFrontier.dispatchConfirmedCommand(lease, confirmedCommand.id, () => {
+                console.log(`[control] dispatching command id=${confirmedCommand.id} type=${confirmedCommand.type} scene=${confirmedCommand.sceneName ?? ""} to source=${lease.playerSource}`);
+                emitNet("control:executeCommand", lease.playerSource, confirmedCommand);
+            })) {
+                console.warn(`[control] discarded confirmed command id=${command.id} from an inactive poll generation=${lease.generation}`);
+            }
+        } catch (err: any) {
+            console.error(`[control] poll failed: ${err?.message ?? err}`);
+        }
+    });
 }
 
 setImmediate(() => {
@@ -1258,10 +1629,12 @@ function flushTrip(
         tripProfile: trip.tripProfile ?? null,
         parkingGoal: trip.parkingGoal ?? null,
         parkingOutcome: trip.parkingOutcome ?? null,
+        stopSignGoal: trip.stopSignGoal ?? null,
+        stopSignOutcome: trip.stopSignOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 3,
+        telemetrySchemaVersion: 4,
         telemetrySummary,
         videoFile: tripStorage.videoFile,
         logFile: tripStorage.logFile
@@ -1293,10 +1666,12 @@ function flushTrip(
         tripProfile: trip.tripProfile ?? null,
         parkingGoal: trip.parkingGoal ?? null,
         parkingOutcome: trip.parkingOutcome ?? null,
+        stopSignGoal: trip.stopSignGoal ?? null,
+        stopSignOutcome: trip.stopSignOutcome ?? null,
         fromDestination: trip.fromDestination,
         toDestination: trip.toDestination,
         vehicleDataPoints: trip.vehicleData.length,
-        telemetrySchemaVersion: 3,
+        telemetrySchemaVersion: 4,
         telemetrySummary,
         file: runFile,
         tripDir: tripStorage.tripDir,

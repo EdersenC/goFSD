@@ -6,8 +6,11 @@ import {
     mkdir,
     readFile,
     realpath,
+    rename,
+    unlink,
 } from "node:fs/promises";
 import path from "node:path";
+import {homedir} from "node:os";
 import {fileURLToPath} from "node:url";
 import {build, context} from "esbuild";
 
@@ -94,8 +97,53 @@ async function deployArtifacts() {
     await validateDeploymentDestinations(deployments);
 
     for (const deployment of deployments) {
-        await copyFile(deployment.source, deployment.destination);
+        await replaceDeploymentFile(deployment.source, deployment.destination);
         console.log(`Deployed ${deployment.label} to ${deployment.destination}`);
+    }
+}
+
+async function replaceDeploymentFile(source, destination) {
+    const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const stagingPath = path.join(path.dirname(destination), `.${path.basename(destination)}.${suffix}.staging`);
+    const backupPath = path.join(path.dirname(destination), `.${path.basename(destination)}.${suffix}.backup`);
+    const destinationExists = await optionalLstat(destination) !== null;
+    let backupCreated = false;
+
+    await copyFile(source, stagingPath);
+    try {
+        if (destinationExists) {
+            await rename(destination, backupPath);
+            backupCreated = true;
+        }
+        try {
+            await rename(stagingPath, destination);
+        } catch (error) {
+            if (backupCreated) {
+                await rename(backupPath, destination);
+                backupCreated = false;
+            }
+            throw error;
+        }
+        if (backupCreated) {
+            await unlink(backupPath);
+            backupCreated = false;
+        }
+    } finally {
+        await unlinkIfPresent(stagingPath);
+        if (backupCreated && await optionalLstat(destination) === null) {
+            await rename(backupPath, destination);
+            backupCreated = false;
+        }
+    }
+}
+
+async function unlinkIfPresent(targetPath) {
+    try {
+        await unlink(targetPath);
+    } catch (error) {
+        if (error?.code !== "ENOENT") {
+            throw error;
+        }
     }
 }
 
@@ -145,12 +193,14 @@ async function watchAndDeploy() {
 }
 
 async function resolveResourceDirectory(value, sourceProjectDir) {
-    const configuredPath = value?.trim();
-    if (!configuredPath) {
-        throw new Error(
-            "FIVEM_RESOURCE_DIR must be set to the existing FiveM FSD resource directory"
-        );
-    }
+    const configuredPath = value?.trim() || path.join(
+        homedir(),
+        "Fivem",
+        "data",
+        "cfx-server-data",
+        "resources",
+        "FSD"
+    );
     if (!path.isAbsolute(configuredPath)) {
         throw new Error("FIVEM_RESOURCE_DIR must be an absolute path");
     }
@@ -160,7 +210,10 @@ async function resolveResourceDirectory(value, sourceProjectDir) {
         throw new Error("FIVEM_RESOURCE_DIR cannot be a filesystem root");
     }
 
-    const configuredStats = await requiredLstat(configuredDir, "FIVEM_RESOURCE_DIR");
+    const configuredStats = await requiredLstat(
+        configuredDir,
+        value?.trim() ? "FIVEM_RESOURCE_DIR" : "auto-detected FiveM FSD resource directory"
+    );
     if (configuredStats.isSymbolicLink() || !configuredStats.isDirectory()) {
         throw new Error("FIVEM_RESOURCE_DIR must be a real directory, not a file or symbolic link");
     }

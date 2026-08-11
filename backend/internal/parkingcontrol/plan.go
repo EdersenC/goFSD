@@ -7,11 +7,16 @@ import (
 )
 
 const (
-	// ParkingSetpointContractV1 is the only model-output schema accepted by the
-	// forward-bay parking controller.
-	ParkingSetpointContractV1  = "parking_setpoint_v1"
-	ParkingDirectionForward    = "forward"
-	ParkingSetpointMaxSpeedMPS = 2.22
+	// StopSignMotionPlanContractV1 keeps learned desired motion separate from
+	// deterministic, feedback-controlled game actuation.
+	StopSignMotionPlanContractV1  = "stop_sign_motion_plan_v1"
+	StopSignDirectionForward      = "forward"
+	StopSignMotionPlanMaxSpeedMPS = 8.0
+
+	// Transitional aliases keep the internal controller migration source-compatible.
+	ParkingSetpointContractV1  = StopSignMotionPlanContractV1
+	ParkingDirectionForward    = StopSignDirectionForward
+	ParkingSetpointMaxSpeedMPS = StopSignMotionPlanMaxSpeedMPS
 )
 
 var ErrInvalidPlan = errors.New("invalid parking setpoint plan")

@@ -8,10 +8,22 @@ import {
     ParkingState,
     VehicleFootprint,
 } from "./types";
+import {
+    MAX_STRAIGHT_APPROACH_HEADING_ERROR_DEG,
+    MAX_STRAIGHT_APPROACH_LATERAL_ERROR_M,
+    MAX_STRAIGHT_TRACKING_HEADING_ERROR_DEG,
+    MAX_STRAIGHT_TRACKING_LATERAL_ERROR_M,
+} from "./constraints";
 
 export const DEFAULT_PARKING_TIMEOUT_MS = 45_000;
 export const MAX_PARKING_TILT_DEG = 5;
 export const PARKING_EVALUATION_ARMING_SPEED_MPS = 0.05;
+export {
+    MAX_STRAIGHT_APPROACH_HEADING_ERROR_DEG,
+    MAX_STRAIGHT_APPROACH_LATERAL_ERROR_M,
+    MAX_STRAIGHT_TRACKING_HEADING_ERROR_DEG,
+    MAX_STRAIGHT_TRACKING_LATERAL_ERROR_M,
+} from "./constraints";
 
 export type ParkingObservation = {
     nowMs: number
@@ -142,6 +154,16 @@ export class ParkingOutcomeTracker {
                 "not_upright",
                 observation,
                 `vehicle exceeded ${MAX_PARKING_TILT_DEG} degree parking tilt limit`
+            );
+        }
+        if (
+            Math.abs(this.lastState.lateralError) > MAX_STRAIGHT_TRACKING_LATERAL_ERROR_M
+            || Math.abs(this.lastState.headingError) > MAX_STRAIGHT_TRACKING_HEADING_ERROR_DEG
+        ) {
+            return this.finish(
+                "left_straight_corridor",
+                observation,
+                "vehicle left the centered straight-approach corridor"
             );
         }
         if (observation.stopRequested) {

@@ -16,6 +16,7 @@ pnpm-debug.log*
 .yarn/
 .cache/
 coverage/
+**/.test/
 
 # Python environments and bytecode
 .venv/

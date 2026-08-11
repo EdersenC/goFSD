@@ -83,8 +83,9 @@ type configFile struct {
 }
 
 type backendSection struct {
-	Actuator          actuatorSection          `toml:"actuator"`
-	ParkingController parkingControllerSection `toml:"parking_controller"`
+	Actuator           actuatorSection          `toml:"actuator"`
+	ParkingController  parkingControllerSection `toml:"parking_controller"`
+	StopSignController parkingControllerSection `toml:"stop_sign_controller"`
 }
 
 type parkingControllerSection struct {
@@ -95,6 +96,7 @@ type parkingControllerSection struct {
 	AdapterVersion                  string                                    `toml:"adapter_version"`
 	SteeringConvention              string                                    `toml:"steering_convention"`
 	SteeringProfile                 []parkingcontrol.SteeringCalibrationPoint `toml:"steering_profile"`
+	StraightApproachOnly            *bool                                     `toml:"straight_approach_only"`
 	SteeringFeedbackGain            *float64                                  `toml:"steering_feedback_gain"`
 	SteeringKi                      *float64                                  `toml:"steering_ki"`
 	SteeringIntegralMin             *float64                                  `toml:"steering_integral_min"`
@@ -163,6 +165,7 @@ func defaultParkingControllerConfig() parkingcontrol.Config {
 			{WheelSteer: 0, Command: 0},
 			{WheelSteer: 1, Command: 1},
 		},
+		StraightApproachOnly:            true,
 		SteeringFeedbackGain:            0.35,
 		SteeringKi:                      0.10,
 		SteeringIntegralMin:             -0.5,
@@ -251,6 +254,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := applyParkingControllerSection(&cfg, parsed.Backend.ParkingController); err != nil {
 		return Config{}, err
 	}
+	if err := applyParkingControllerSection(&cfg, parsed.Backend.StopSignController); err != nil {
+		return Config{}, err
+	}
 
 	if cfg.TickHz < 1 {
 		return Config{}, fmt.Errorf("backend actuator tick_hz must be > 0")
@@ -293,6 +299,9 @@ func applyParkingControllerSection(cfg *Config, section parkingControllerSection
 	}
 	if len(section.SteeringProfile) > 0 {
 		controller.SteeringProfile = append([]parkingcontrol.SteeringCalibrationPoint(nil), section.SteeringProfile...)
+	}
+	if section.StraightApproachOnly != nil {
+		controller.StraightApproachOnly = *section.StraightApproachOnly
 	}
 	assignFloat := func(destination *float64, value *float64) {
 		if value != nil {
