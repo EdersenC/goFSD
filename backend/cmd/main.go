@@ -138,6 +138,37 @@ func runBackend(args []string, output io.Writer) error {
 		writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
 	})
 
+	mux.HandleFunc("/capture/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req capture.SnapshotRequest
+		if r.ContentLength > 0 {
+			if err := decodeJSONBody(r, &req); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		result, err := svc.Snapshot(r.Context(), req)
+		if err != nil {
+			switch {
+			case errors.Is(err, capture.ErrUnsupportedPlatform):
+				writeError(w, http.StatusNotImplemented, "windows-only in v1")
+			case errors.Is(err, capture.ErrUnsupportedFFmpeg):
+				writeError(w, http.StatusFailedDependency, err.Error())
+			case errors.Is(err, capture.ErrAlreadyRunning):
+				writeError(w, http.StatusConflict, err.Error())
+			case errors.Is(err, capture.ErrInvalidRequest), errors.Is(err, capture.ErrSourceNotFound):
+				writeError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	})
+
 	mux.HandleFunc("/inference/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

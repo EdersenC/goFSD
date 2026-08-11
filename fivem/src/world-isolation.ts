@@ -45,6 +45,8 @@ export class WorldIsolation {
     private center: WorldPosition | null = null;
     private nextSweepAtMs = 0;
 
+    constructor(private readonly managedVehicleId: () => number = () => 0) {}
+
     public start(): WorldIsolationSweepResult {
         if (this.tickId === null) {
             this.tickId = setTick(() => this.enforce());
@@ -75,7 +77,7 @@ export class WorldIsolation {
             return {removedVehicles: 0, removedPeds: 0};
         }
         this.nextSweepAtMs = nowMs + WORLD_ISOLATION_SWEEP_INTERVAL_MS;
-        return sweepWorldIsolation(center);
+        return sweepWorldIsolation(center, [this.managedVehicleId()]);
     }
 
     private syncScenarioBlockingArea(center: WorldPosition) {
@@ -143,10 +145,13 @@ export function enforceWorldIsolationThisFrame(center: WorldPosition) {
     );
 }
 
-/** Removes ambient actors while protecting players and project-owned EGO vehicles. */
-export function sweepWorldIsolation(center: WorldPosition): WorldIsolationSweepResult {
+/** Removes ambient actors while protecting player vehicles and the active managed EGO. */
+export function sweepWorldIsolation(
+    center: WorldPosition,
+    explicitlyProtectedVehicles: readonly number[] = [],
+): WorldIsolationSweepResult {
     const playerPed = PlayerPedId();
-    const protectedVehicles = collectProtectedVehicles(playerPed);
+    const protectedVehicles = collectProtectedVehicles(playerPed, explicitlyProtectedVehicles);
     removeVehiclesFromGenerators(center);
 
     let removedVehicles = 0;
@@ -177,8 +182,16 @@ export function sweepWorldIsolation(center: WorldPosition): WorldIsolationSweepR
     return {removedVehicles, removedPeds};
 }
 
-function collectProtectedVehicles(playerPed: number): Set<number> {
+function collectProtectedVehicles(
+    playerPed: number,
+    explicitlyProtectedVehicles: readonly number[],
+): Set<number> {
     const protectedVehicles = new Set<number>();
+    for (const vehicle of explicitlyProtectedVehicles) {
+        if (isValidEntity(vehicle)) {
+            protectedVehicles.add(vehicle);
+        }
+    }
     if (IsPedInAnyVehicle(playerPed, false)) {
         const currentVehicle = GetVehiclePedIsIn(playerPed, false);
         if (isValidEntity(currentVehicle)) {
@@ -192,11 +205,6 @@ function collectProtectedVehicles(playerPed: number): Set<number> {
         const playerVehicle = GetVehiclePedIsIn(ped, false);
         if (isValidEntity(playerVehicle)) {
             protectedVehicles.add(playerVehicle);
-        }
-    }
-    for (const vehicle of gamePool("CVehicle")) {
-        if (isValidEntity(vehicle) && normalizedPlate(vehicle) === "EGO") {
-            protectedVehicles.add(vehicle);
         }
     }
     return protectedVehicles;
@@ -234,10 +242,6 @@ function playerPosition(): WorldPosition | null {
     return Array.isArray(coords) && coords.length >= 3 && coords.every(Number.isFinite)
         ? [coords[0], coords[1], coords[2]]
         : null;
-}
-
-function normalizedPlate(vehicle: number): string {
-    return String(GetVehicleNumberPlateText(vehicle) ?? "").trim().toUpperCase();
 }
 
 function gamePool(poolName: "CVehicle" | "CPed"): number[] {

@@ -1848,9 +1848,13 @@ export class EgoService {
         if (!isValidEntity(vehicle)) {
             return false;
         }
+        // Publish the handle immediately so world isolation protects this managed car
+        // during the brief spawn-to-driver-seat transition.
+        ego.vehicle.id = vehicle;
         if (isCanceled()) {
             SetEntityAsMissionEntity(vehicle, true, true);
             DeleteVehicle(vehicle);
+            ego.vehicle.id = 0;
             throw new Error("Ego spawn was canceled before seating the player");
         }
 
@@ -1859,11 +1863,13 @@ export class EgoService {
         if (isCanceled()) {
             SetEntityAsMissionEntity(vehicle, true, true);
             DeleteVehicle(vehicle);
+            ego.vehicle.id = 0;
             throw new Error("Ego spawn was canceled while seating the player");
         }
         if (!seated) {
             SetEntityAsMissionEntity(vehicle, true, true);
             DeleteVehicle(vehicle);
+            ego.vehicle.id = 0;
             return false;
         }
 

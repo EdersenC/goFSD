@@ -41,7 +41,7 @@ function testConfirmedResponseReturnsCanonicalCommand() {
 }
 
 function testStopSignCommandsAreCanonical() {
-    for (const type of ["setStopSignTarget", "clearStopSignTarget", "setStopSignCatalogWaypoint", "startStopSignBatch"] as const) {
+    for (const type of ["setStopSignTarget", "clearStopSignTarget", "setStopSignCatalogWaypoint", "probeStopSignTarget", "startStopSignBatch"] as const) {
         const confirmation = parseControlDispatchConfirmation({
             commandId: `cmd-${type}`,
             confirmed: true,

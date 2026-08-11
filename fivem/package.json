@@ -19,8 +19,9 @@
     "test:player-setup": "esbuild src/player-setup.test.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/tests/player-setup.test.cjs && node dist/tests/player-setup.test.cjs",
     "test:waypoint-teleport": "esbuild src/waypoint-teleport.test.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/tests/waypoint-teleport.test.cjs && node dist/tests/waypoint-teleport.test.cjs",
     "test:stop-sign-catalog": "esbuild src/stop-sign/catalog-waypoint.test.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/tests/stop-sign-catalog.test.cjs && node dist/tests/stop-sign-catalog.test.cjs",
+    "test:stop-sign-probe": "esbuild src/stop-sign/location-probe.test.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/tests/stop-sign-probe.test.cjs && node dist/tests/stop-sign-probe.test.cjs",
     "test:stop-sign": "esbuild src/stop-sign/stop-sign.test.ts --bundle --platform=node --format=cjs --target=node18 --outfile=dist/tests/stop-sign.test.cjs && node dist/tests/stop-sign.test.cjs",
-    "test": "npm run test:world-isolation && npm run test:control-safety && npm run test:control-dispatch && npm run test:control-session && npm run test:scene-completion && npm run test:player-setup && npm run test:waypoint-teleport && npm run test:stop-sign-catalog && npm run test:stop-sign",
+    "test": "npm run test:world-isolation && npm run test:control-safety && npm run test:control-dispatch && npm run test:control-session && npm run test:scene-completion && npm run test:player-setup && npm run test:waypoint-teleport && npm run test:stop-sign-catalog && npm run test:stop-sign-probe && npm run test:stop-sign",
     "clean": "rm -rf dist",
     "clean:wsl": "npm run clean"
   },

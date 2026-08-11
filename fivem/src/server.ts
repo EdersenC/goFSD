@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-stop-sign-calibration-guard-v4";
+const SERVER_BUILD_ID = "2026-08-11-stop-sign-probe-v6";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
@@ -131,6 +131,7 @@ type ControlCommandType =
     | "setStopSignTarget"
     | "clearStopSignTarget"
     | "setStopSignCatalogWaypoint"
+    | "probeStopSignTarget"
     | "startStopSignBatch";
 type InferenceCommandType = "startEgo" | "stopEgo";
 
@@ -143,6 +144,7 @@ type ControlCommand = {
     stopSignBatchId?: string
     stopSignJobs?: StopSignJob[]
     stopSignCatalogPosition?: {x: number, y: number, z: number}
+    stopSignProbe?: unknown
     createdAt?: string
 }
 
@@ -166,6 +168,15 @@ type ControlStatusUpdate = {
         phase: string
         startedAtMs: number
         updatedAtMs: number
+        lastAttemptOutcome?: {
+            success: boolean
+            status: string
+            failureReason: string
+            durationMs: number
+            stoppedAtDistanceM: number | null
+            dwellDurationMs: number
+            crossedStopLineBeforeDwell: boolean
+        }
     }
 }
 
@@ -282,7 +293,10 @@ function formatAttemptProgress(attemptIndex: unknown, attemptCount: unknown): st
         return "--/--";
     }
     const index = Math.trunc(Number(attemptIndex ?? 0));
-    return `${index + 1}/${count}`;
+    if (index <= 0) {
+        return `--/${count}`;
+    }
+    return `${Math.min(index, count)}/${count}`;
 }
 
 onNet("capture:startRequest", async (request: CaptureRequest) => {

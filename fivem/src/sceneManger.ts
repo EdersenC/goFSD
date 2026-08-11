@@ -13,6 +13,10 @@ import {
 import {defaultScene} from "./datasets";
 import {createNoEgoControlTelemetry, EgoControlTelemetry} from "./controlTelemetry";
 import {completeSuccessfulScene} from "./scene-completion";
+import {
+    placeVehicleAtStopSignLocation,
+    StopSignLocationProbeOperations,
+} from "./stop-sign/location-probe";
 import {StopSignBatchHooks, StopSignRunner, STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
 import {StopSignJob, StopSignPose, StopSignTelemetry} from "./stop-sign/types";
 import {WorldIsolation} from "./world-isolation";
@@ -22,7 +26,29 @@ export {syncFlash} from "./syncFlash";
 const egoService = new EgoService();
 const envService = new EnvironmentService();
 const stopSignRunner = new StopSignRunner(egoService);
-const worldIsolation = new WorldIsolation();
+const worldIsolation = new WorldIsolation(() => egoService.oldEgo?.vehicle.id ?? 0);
+const stopSignLocationProbeOperations: StopSignLocationProbeOperations = {
+    closestVehicleNode: ({x, y, z}) => {
+        const [found, position, heading] = GetClosestVehicleNodeWithHeading(x, y, z, 1, 3, 0);
+        return [found, position as [number, number, number], heading];
+    },
+    entityCoords: (entity) => GetEntityCoords(entity, false) as [number, number, number],
+    entityHeading: (entity) => GetEntityHeading(entity),
+    entityPitch: (entity) => GetEntityPitch(entity),
+    entityRoll: (entity) => GetEntityRoll(entity),
+    entitySpeed: (entity) => GetEntitySpeed(entity),
+    entityOnGround: (entity) => IsVehicleOnAllWheels(entity),
+    freezeEntity: (entity, frozen) => FreezeEntityPosition(entity, frozen),
+    setEntityCoords: (entity, [x, y, z]) => SetEntityCoordsNoOffset(entity, x, y, z, false, false, true),
+    setEntityHeading: (entity, heading) => SetEntityHeading(entity, heading),
+    setVehicleForwardSpeed: (vehicle, speedMps) => SetVehicleForwardSpeed(vehicle, speedMps),
+    setVehicleOnGround: (vehicle) => SetVehicleOnGroundProperly(vehicle),
+    setFocus: ([x, y, z]) => SetFocusPosAndVel(x, y, z, 0, 0, 0),
+    clearFocus: () => ClearFocus(),
+    requestCollision: ([x, y, z]) => RequestCollisionAtCoord(x, y, z),
+    collisionLoaded: (entity) => HasCollisionLoadedAroundEntity(entity),
+    wait,
+};
 export const newScene = defaultScene;
 const canonicalInnerCitySceneName = "inner-city-driving:default";
 
@@ -423,6 +449,32 @@ export class SceneManager {
         stopSignRunner.clearTarget();
     }
 
+    public async probeStopSignTarget(rawRequest: unknown, assertCurrent: () => void) {
+        if (!this.egoControlActive || this.activeSceneName !== "ego-control") {
+            throw new Error("Stop-sign location probing requires the active setup car");
+        }
+        const ego = egoService.oldEgo;
+        if (!ego || !DoesEntityExist(ego.vehicle.id)) {
+            throw new Error("Stop-sign location probing requires a valid managed setup car");
+        }
+        if (GetPedInVehicleSeat(ego.vehicle.id, -1) !== PlayerPedId()) {
+            throw new Error("Stop-sign location probing requires the player in the managed driver seat");
+        }
+
+        const probe = await placeVehicleAtStopSignLocation(
+            ego.vehicle.id,
+            rawRequest,
+            stopSignLocationProbeOperations,
+            assertCurrent,
+        );
+        assertCurrent();
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        egoService.startCaptureCamera(ego);
+        const target = stopSignRunner.calibrateTargetFromCurrentEgo();
+        return {probe, target};
+    }
+
     public async startStopSignBatch(
         batchId: string,
         jobs: StopSignJob[],
@@ -435,7 +487,11 @@ export class SceneManager {
             this.egoControlActive = false;
             this.activeSceneName = null;
         }
-        worldIsolation.start();
+        const cleared = worldIsolation.start();
+        log(
+            `Stop-sign preflight cleared ${cleared.removedVehicles} unoccupied vehicles `
+            + `and ${cleared.removedPeds} NPCs before spawning the collection car.`
+        );
         this.activeSceneName = STOP_SIGN_SCENE_NAME;
         this.stopCurrentSceneRequested = false;
         try {

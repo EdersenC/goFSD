@@ -9,7 +9,7 @@ import {CONTROL_TELEMETRY_SAMPLE_INTERVAL_MS} from "./controlTelemetry";
 import {resolveStopCommandStatus} from "./control-status";
 import {parseStopSignJobs} from "./stop-sign/batch";
 import {STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
-import {StopSignPose} from "./stop-sign/types";
+import {StopSignOutcome, StopSignPose} from "./stop-sign/types";
 import {setStopSignCatalogWaypoint} from "./stop-sign/catalog-waypoint";
 import {
     canAcknowledgeControlSafetyEpochSync,
@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-stop-sign-calibration-guard-v4";
+const CLIENT_BUILD_ID = "2026-08-11-stop-sign-probe-v6";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -65,6 +65,7 @@ type ControlCommandType =
     | "setStopSignTarget"
     | "clearStopSignTarget"
     | "setStopSignCatalogWaypoint"
+    | "probeStopSignTarget"
     | "startStopSignBatch";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
 type ControlStopSignBatchProgress = {
@@ -80,6 +81,7 @@ type ControlStopSignBatchProgress = {
     attemptIndex: number
     attemptCount: number
     phase: string
+    lastAttemptOutcome?: StopSignOutcome
 };
 
 type ControlCommand = {
@@ -91,6 +93,7 @@ type ControlCommand = {
     stopSignBatchId?: string
     stopSignJobs?: unknown
     stopSignCatalogPosition?: unknown
+    stopSignProbe?: unknown
 }
 
 type AvailableScene = {
@@ -324,6 +327,23 @@ function clearStopSignTarget() {
     reportControlStatus("runningScene", "ego-control");
 }
 
+async function executeStopSignProbe(command: ControlCommand, safetyStart: SafetyStartLease) {
+    safetyStart.throwIfStale();
+    reportControlStatus("runningScene", "stop-sign-probe");
+    const result = await sceneManager.probeStopSignTarget(
+        command.stopSignProbe,
+        () => safetyStart.throwIfStale(),
+    );
+    safetyStart.throwIfStale();
+    reportControlStatus("runningScene", "ego-control");
+    log(
+        `[stop-sign] probe ready id=${result.probe.catalogId} `
+        + `nodeDistance=${result.probe.distanceFromCatalogM.toFixed(2)}m `
+        + `pose=(${result.target.signPose.x.toFixed(2)}, ${result.target.signPose.y.toFixed(2)}, `
+        + `${result.target.signPose.z.toFixed(2)}, h=${result.target.signPose.heading.toFixed(1)})`,
+    );
+}
+
 async function executeStopSignBatchControl(
     batchIdValue: unknown,
     planFingerprintValue: unknown,
@@ -351,6 +371,7 @@ async function executeStopSignBatchControl(
     let completedJobs = 0;
     let attemptIndex = 0;
     let attemptCount = 0;
+    let lastAttemptOutcome: StopSignOutcome | undefined;
     const progress = (state: ControlStopSignBatchProgress["state"]): ControlStopSignBatchProgress => ({
         batchId,
         planFingerprint,
@@ -362,6 +383,7 @@ async function executeStopSignBatchControl(
         attemptIndex,
         attemptCount,
         phase: sceneManager.currentEgoControlTelemetry().stopSignPhase,
+        lastAttemptOutcome: lastAttemptOutcome ? {...lastAttemptOutcome} : undefined,
         startedAtMs,
         updatedAtMs: Date.now(),
     });
@@ -385,8 +407,9 @@ async function executeStopSignBatchControl(
                 attemptCount = job.attemptCount;
                 publishProgress("running");
             },
-            onAttemptComplete: (_job, completedAttempt, _outcome) => {
+            onAttemptComplete: (_job, completedAttempt, outcome) => {
                 attemptIndex = completedAttempt;
+                lastAttemptOutcome = {...outcome};
                 publishProgress("running");
             },
             onJobComplete: (_job, jobIndex) => {
@@ -694,6 +717,9 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
                 log(`[client] stop-sign catalog waypoint set x=${position.x.toFixed(2)} y=${position.y.toFixed(2)} z=${position.z.toFixed(2)}; use /tpwaypoint to travel`);
                 break;
             }
+            case "probeStopSignTarget":
+                await executeGuardedControlStart(command, (safetyStart) => executeStopSignProbe(command, safetyStart));
+                break;
             case "startStopSignBatch":
                 await executeGuardedControlStart(command, (safetyStart) => (
                     executeStopSignBatchControl(

@@ -32,6 +32,7 @@ const (
 	CommandSetStopSignTarget          CommandType = "setStopSignTarget"
 	CommandClearStopSignTarget        CommandType = "clearStopSignTarget"
 	CommandSetStopSignCatalogWaypoint CommandType = "setStopSignCatalogWaypoint"
+	CommandProbeStopSignTarget        CommandType = "probeStopSignTarget"
 )
 
 const (
@@ -61,6 +62,7 @@ type Command struct {
 	StopSignBatchID         string             `json:"stopSignBatchId,omitempty"`
 	StopSignJobs            []StopSignBatchJob `json:"stopSignJobs,omitempty"`
 	StopSignCatalogPosition *WorldPosition     `json:"stopSignCatalogPosition,omitempty"`
+	StopSignProbe           *StopSignProbe     `json:"stopSignProbe,omitempty"`
 	CreatedAt               string             `json:"createdAt"`
 }
 
@@ -73,6 +75,7 @@ type CommandRequest struct {
 	StopSignBatchID         string             `json:"stopSignBatchId,omitempty"`
 	StopSignJobs            []StopSignBatchJob `json:"stopSignJobs,omitempty"`
 	StopSignCatalogPosition *WorldPosition     `json:"stopSignCatalogPosition,omitempty"`
+	StopSignProbe           *StopSignProbe     `json:"stopSignProbe,omitempty"`
 }
 
 // WorldPosition identifies a GTA map location without pretending that a
@@ -81,6 +84,14 @@ type WorldPosition struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
 	Z float64 `json:"z"`
+}
+
+// StopSignProbe describes a probe-only lane projection. CatalogPosition is a
+// roadside landmark location; FiveM resolves the calibrated lane pose at run time.
+type StopSignProbe struct {
+	CatalogID        string        `json:"catalogId"`
+	CatalogPosition  WorldPosition `json:"catalogPosition"`
+	HeadingOffsetDeg float64       `json:"headingOffsetDeg,omitempty"`
 }
 
 type StopSignPose = stopsignbatch.Pose
@@ -100,18 +111,29 @@ type StatusUpdate struct {
 }
 
 type StopSignBatchProgress struct {
-	BatchID         string `json:"batchId"`
-	PlanFingerprint string `json:"planFingerprint,omitempty"`
-	State           string `json:"state"`
-	JobID           string `json:"jobId,omitempty"`
-	JobIndex        int    `json:"jobIndex"`
-	JobCount        int    `json:"jobCount"`
-	CompletedJobs   int    `json:"completedJobs"`
-	AttemptIndex    int    `json:"attemptIndex"`
-	AttemptCount    int    `json:"attemptCount"`
-	Phase           string `json:"phase,omitempty"`
-	StartedAtMs     int64  `json:"startedAtMs,omitempty"`
-	UpdatedAtMs     int64  `json:"updatedAtMs,omitempty"`
+	BatchID            string                  `json:"batchId"`
+	PlanFingerprint    string                  `json:"planFingerprint,omitempty"`
+	State              string                  `json:"state"`
+	JobID              string                  `json:"jobId,omitempty"`
+	JobIndex           int                     `json:"jobIndex"`
+	JobCount           int                     `json:"jobCount"`
+	CompletedJobs      int                     `json:"completedJobs"`
+	AttemptIndex       int                     `json:"attemptIndex"`
+	AttemptCount       int                     `json:"attemptCount"`
+	Phase              string                  `json:"phase,omitempty"`
+	StartedAtMs        int64                   `json:"startedAtMs,omitempty"`
+	UpdatedAtMs        int64                   `json:"updatedAtMs,omitempty"`
+	LastAttemptOutcome *StopSignAttemptOutcome `json:"lastAttemptOutcome,omitempty"`
+}
+
+type StopSignAttemptOutcome struct {
+	Success                    bool     `json:"success"`
+	Status                     string   `json:"status"`
+	FailureReason              string   `json:"failureReason"`
+	DurationMS                 int64    `json:"durationMs"`
+	StoppedAtDistanceM         *float64 `json:"stoppedAtDistanceM"`
+	DwellDurationMS            int64    `json:"dwellDurationMs"`
+	CrossedStopLineBeforeDwell bool     `json:"crossedStopLineBeforeDwell"`
 }
 
 type TelemetryUpdate struct {
@@ -354,7 +376,7 @@ func WithNowFunc(now func() time.Time) Option {
 func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 	commandType := normalizeCommandType(req.Type)
 	sceneName := strings.TrimSpace(req.SceneName)
-	if err := validateCommand(commandType, sceneName, req.StopSignBatchID, req.PlanFingerprint, req.StopSignJobs, req.StopSignCatalogPosition); err != nil {
+	if err := validateCommand(commandType, sceneName, req.StopSignBatchID, req.PlanFingerprint, req.StopSignJobs, req.StopSignCatalogPosition, req.StopSignProbe); err != nil {
 		return Command{}, err
 	}
 
@@ -380,6 +402,7 @@ func (s *Store) Enqueue(req CommandRequest) (Command, error) {
 		StopSignBatchID:         strings.TrimSpace(req.StopSignBatchID),
 		StopSignJobs:            cloneStopSignBatchJobs(req.StopSignJobs),
 		StopSignCatalogPosition: cloneWorldPosition(req.StopSignCatalogPosition),
+		StopSignProbe:           cloneStopSignProbe(req.StopSignProbe),
 		CreatedAt:               now.Format(time.RFC3339),
 	}
 
@@ -889,6 +912,15 @@ func normalizedStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBat
 	progress.AttemptCount = max(0, progress.AttemptCount)
 	progress.AttemptIndex = max(0, min(progress.AttemptIndex, progress.AttemptCount))
 	progress.Phase = normalizeStopSignPhase(progress.Phase)
+	if progress.LastAttemptOutcome != nil {
+		outcome := *progress.LastAttemptOutcome
+		outcome.Status = strings.TrimSpace(outcome.Status)
+		outcome.FailureReason = strings.TrimSpace(outcome.FailureReason)
+		outcome.DurationMS = max(int64(0), outcome.DurationMS)
+		outcome.DwellDurationMS = max(int64(0), outcome.DwellDurationMS)
+		outcome.StoppedAtDistanceM = cloneFloatPtr(outcome.StoppedAtDistanceM)
+		progress.LastAttemptOutcome = &outcome
+	}
 	return &progress
 }
 
@@ -897,6 +929,11 @@ func cloneStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBatchPro
 		return nil
 	}
 	clone := *source
+	if source.LastAttemptOutcome != nil {
+		outcome := *source.LastAttemptOutcome
+		outcome.StoppedAtDistanceM = cloneFloatPtr(source.LastAttemptOutcome.StoppedAtDistanceM)
+		clone.LastAttemptOutcome = &outcome
+	}
 	return &clone
 }
 
@@ -961,6 +998,7 @@ func validateCommand(
 	planFingerprint string,
 	stopSignJobs []StopSignBatchJob,
 	stopSignCatalogPosition *WorldPosition,
+	stopSignProbe *StopSignProbe,
 ) error {
 	switch commandType {
 	case CommandStartScene:
@@ -997,6 +1035,10 @@ func validateCommand(
 		if err := validateWorldPosition(stopSignCatalogPosition); err != nil {
 			return fmt.Errorf("%w: stopSignCatalogPosition %v", ErrInvalidCommand, err)
 		}
+	case CommandProbeStopSignTarget:
+		if err := validateStopSignProbe(stopSignProbe); err != nil {
+			return fmt.Errorf("%w: stopSignProbe %v", ErrInvalidCommand, err)
+		}
 	default:
 		return fmt.Errorf("%w: unsupported command type %q", ErrInvalidCommand, commandType)
 	}
@@ -1015,6 +1057,22 @@ func validateWorldPosition(position *WorldPosition) error {
 	}
 	if position.X < -10_000 || position.X > 10_000 || position.Y < -10_000 || position.Y > 10_000 || position.Z < -1_000 || position.Z > 3_000 {
 		return errors.New("is outside the supported GTA world bounds")
+	}
+	return nil
+}
+
+func validateStopSignProbe(probe *StopSignProbe) error {
+	if probe == nil {
+		return errors.New("is required")
+	}
+	if catalogID := strings.TrimSpace(probe.CatalogID); catalogID == "" || len(catalogID) > 120 {
+		return errors.New("catalogId must contain between 1 and 120 characters")
+	}
+	if err := validateWorldPosition(&probe.CatalogPosition); err != nil {
+		return fmt.Errorf("catalogPosition %v", err)
+	}
+	if probe.HeadingOffsetDeg != 0 && probe.HeadingOffsetDeg != 180 {
+		return errors.New("headingOffsetDeg must be either 0 or 180")
 	}
 	return nil
 }
@@ -1054,10 +1112,19 @@ func cloneCommand(source *Command) *Command {
 	clone := *source
 	clone.StopSignJobs = cloneStopSignBatchJobs(source.StopSignJobs)
 	clone.StopSignCatalogPosition = cloneWorldPosition(source.StopSignCatalogPosition)
+	clone.StopSignProbe = cloneStopSignProbe(source.StopSignProbe)
 	return &clone
 }
 
 func cloneWorldPosition(source *WorldPosition) *WorldPosition {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	return &clone
+}
+
+func cloneStopSignProbe(source *StopSignProbe) *StopSignProbe {
 	if source == nil {
 		return nil
 	}
@@ -1084,7 +1151,7 @@ func isEmergencyStopCommand(commandType CommandType) bool {
 
 func requiresSafetyEpoch(commandType CommandType) bool {
 	switch commandType {
-	case CommandStartScene, CommandRunAllScenes, CommandStartEgo, CommandStartStopSignBatch:
+	case CommandStartScene, CommandRunAllScenes, CommandStartEgo, CommandStartStopSignBatch, CommandProbeStopSignTarget:
 		return true
 	default:
 		return false

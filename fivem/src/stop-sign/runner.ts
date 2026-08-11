@@ -22,6 +22,12 @@ import {
 } from "./expert";
 import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
+    nextFixedIntervalDeadlineMs,
+    shouldReportStoppedTooEarly,
+    updateDepartureObserved,
+    validateStopSignAttemptVehicleState,
+} from "./attempt-progress";
+import {
     StopSignBehaviorPhase,
     StopSignGoal,
     StopSignJob,
@@ -199,8 +205,7 @@ export class StopSignRunner {
     }
 
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
-        await resetVehicleAtPose(ego.vehicle.id, job.startPose);
-        await ensurePlayerIsDriver(ego.vehicle.id);
+        await prepareAttemptVehicle(this.egoService, ego, job.startPose);
         SetNewWaypoint(job.exitPose.x, job.exitPose.y);
         const goal = buildGoal(job, this.attemptIndex);
         const capturePayload = {
@@ -256,35 +261,49 @@ export class StopSignRunner {
         let dwellStartedAtMs: number | null = null;
         let stoppedAtDistanceM: number | null = null;
         let previousDesiredSpeedMps = 0;
+        let departureObserved = false;
+        let nextControlDeadlineMs = startedAtMs;
         while (true) {
             const nowMs = GetGameTimer();
             if (this.localStopRequested) {
-                return outcome(false, "stopped", "Collection stopped", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(false, "stopped", "Collection stopped", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
             if (nowMs - startedAtMs > maximumAttemptDurationMs) {
-                return outcome(false, "timeout", "Attempt timed out", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(false, "timeout", "Attempt timed out", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
             if (!isValidEntity(ego.vehicle.id)) {
-                return outcome(false, "invalid_vehicle", "Vehicle no longer exists", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(false, "invalid_vehicle", "Vehicle no longer exists", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
             if (HasEntityCollidedWithAnything(ego.vehicle.id)) {
-                return outcome(false, "collision", "Vehicle collided during the stop-sign clip", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(false, "collision", "Vehicle collided during the stop-sign clip", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
 
             const pose = entityPose(ego.vehicle.id);
             if (!pose) {
-                return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
             const speedMps = Math.max(0, GetEntitySpeed(ego.vehicle.id));
             const centerError = relativeStopLinePose(pose, job.egoStopPose);
+            const startError = relativeStopLinePose(pose, job.startPose);
+            departureObserved = updateDepartureObserved(
+                departureObserved,
+                speedMps,
+                startError.longitudinalM,
+                startError.lateralM,
+            );
             const frontDistanceM = signedFrontBumperDistance(ego.vehicle.id, pose, job.stopLinePose);
             const withinStopPose = Math.abs(centerError.longitudinalM) <= STOP_SIGN_STOP_POSITION_TOLERANCE_M
                 && Math.abs(centerError.lateralM) <= 0.8;
             if (dwellStartedAtMs === null && frontDistanceM < -0.1) {
-                return outcome(false, "crossed_without_stop", "Front bumper crossed the stop line before the dwell", startedAtMs, nowMs, stoppedAtDistanceM, null, true);
+                return outcome(false, "crossed_without_stop", "Front bumper crossed the stop line before the dwell", startedAtMs, nowMs, stoppedAtDistanceM, null, job.dwellMs, true);
             }
-            if (dwellStartedAtMs === null && speedMps <= STOP_SIGN_STOP_SPEED_MPS && -centerError.longitudinalM > 3) {
-                return outcome(false, "stopped_too_early", "Vehicle stopped more than 3 m before the ego stop pose", startedAtMs, nowMs, stoppedAtDistanceM, null, false);
+            if (shouldReportStoppedTooEarly(
+                departureObserved,
+                dwellStartedAtMs,
+                speedMps,
+                -centerError.longitudinalM,
+            )) {
+                return outcome(false, "stopped_too_early", "Vehicle stopped more than 3 m before the ego stop pose", startedAtMs, nowMs, stoppedAtDistanceM, null, job.dwellMs, false);
             }
             if (dwellStartedAtMs === null && withinStopPose && speedMps <= STOP_SIGN_STOP_SPEED_MPS) {
                 dwellStartedAtMs = nowMs;
@@ -326,16 +345,21 @@ export class StopSignRunner {
                 headingErrorDeg: centerError.headingErrorDeg,
             });
             previousDesiredSpeedMps = supervision.desiredSpeedMps;
-            applyExpertControl(ego.vehicle.id, speedMps, supervision);
+            applyExpertControl(ego.vehicle.id, supervision);
             this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
 
             const exitError = relativeStopLinePose(pose, job.exitPose);
             if (phase === "release" && reachedExitPose(exitError)) {
                 this.phase = "complete";
                 this.latestTelemetry = {...this.latestTelemetry, stopSignPhase: "complete"};
-                return outcome(true, "succeeded", "", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, false);
+                return outcome(true, "succeeded", "", startedAtMs, nowMs, stoppedAtDistanceM, dwellStartedAtMs, job.dwellMs, false);
             }
-            await wait(STOP_SIGN_CONTROL_INTERVAL_MS);
+            nextControlDeadlineMs = nextFixedIntervalDeadlineMs(
+                nextControlDeadlineMs,
+                GetGameTimer(),
+                STOP_SIGN_CONTROL_INTERVAL_MS,
+            );
+            await wait(Math.max(0, nextControlDeadlineMs - GetGameTimer()));
         }
     }
 
@@ -397,9 +421,10 @@ export class StopSignRunner {
     }
 }
 
-function applyExpertControl(vehicle: number, measuredSpeedMps: number, supervision: {
+function applyExpertControl(vehicle: number, supervision: {
     phase: StopSignBehaviorPhase
     desiredWheelSteerNormalized: number
+    desiredSpeedMps: number
     throttle: number
     brake: number
 }) {
@@ -412,12 +437,9 @@ function applyExpertControl(vehicle: number, measuredSpeedMps: number, supervisi
     }
     SetVehicleHandbrake(vehicle, false);
     SetVehicleBrake(vehicle, supervision.brake > 0.01);
-    const dtSeconds = STOP_SIGN_CONTROL_INTERVAL_MS / 1000;
-    const nextSpeedMps = Math.max(
-        0,
-        measuredSpeedMps + supervision.throttle * 1.8 * dtSeconds - supervision.brake * 3 * dtSeconds,
-    );
-    SetVehicleForwardSpeed(vehicle, nextSpeedMps);
+    // The planner already rate-limits desiredSpeedMps from its previous command.
+    // Applying a second measured-speed limiter here makes gravity win on grades.
+    SetVehicleForwardSpeed(vehicle, supervision.desiredSpeedMps);
 }
 
 async function resetVehicleAtPose(vehicle: number, pose: StopSignPose) {
@@ -439,6 +461,31 @@ async function resetVehicleAtPose(vehicle: number, pose: StopSignPose) {
     SetEntityRecordsCollisions(vehicle, true);
     FreezeEntityPosition(vehicle, false);
     SetVehicleHandbrake(vehicle, false);
+    await wait(150);
+}
+
+async function prepareAttemptVehicle(egoService: EgoService, ego: Ego, pose: StopSignPose) {
+    await resetVehicleAtPose(ego.vehicle.id, pose);
+    await ensurePlayerIsDriver(ego.vehicle.id);
+    SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+    SetVehicleUndriveable(ego.vehicle.id, false);
+    egoService.startCaptureCamera(ego);
+    await wait(100);
+
+    const player = PlayerPedId();
+    const readinessError = validateStopSignAttemptVehicleState({
+        exists: isValidEntity(ego.vehicle.id),
+        playerIsDriver: GetPedInVehicleSeat(ego.vehicle.id, -1) === player,
+        engineRunning: GetIsVehicleEngineRunning(ego.vehicle.id),
+        onAllWheels: IsVehicleOnAllWheels(ego.vehicle.id),
+        speedMps: GetEntitySpeed(ego.vehicle.id),
+        pitchDeg: GetEntityPitch(ego.vehicle.id),
+        rollDeg: GetEntityRoll(ego.vehicle.id),
+        collided: HasEntityCollidedWithAnything(ego.vehicle.id),
+    });
+    if (readinessError) {
+        throw new Error(`Stop-sign attempt preflight failed: ${readinessError}`);
+    }
 }
 
 async function ensurePlayerIsDriver(vehicle: number) {
@@ -617,6 +664,7 @@ function outcome(
     nowMs: number,
     stoppedAtDistanceM: number | null,
     dwellStartedAtMs: number | null,
+    dwellTargetMs: number,
     crossedStopLineBeforeDwell: boolean,
 ): StopSignOutcome {
     return {
@@ -625,7 +673,9 @@ function outcome(
         failureReason,
         durationMs: Math.max(0, nowMs - startedAtMs),
         stoppedAtDistanceM,
-        dwellDurationMs: dwellStartedAtMs === null ? 0 : Math.max(0, nowMs - dwellStartedAtMs),
+        dwellDurationMs: dwellStartedAtMs === null
+            ? 0
+            : Math.min(dwellTargetMs, Math.max(0, nowMs - dwellStartedAtMs)),
         crossedStopLineBeforeDwell,
     };
 }

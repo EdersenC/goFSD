@@ -6,6 +6,12 @@ import {
     planStopSignExpert,
 } from "./expert";
 import {parseStopSignJobs} from "./batch";
+import {
+    nextFixedIntervalDeadlineMs,
+    shouldReportStoppedTooEarly,
+    updateDepartureObserved,
+    validateStopSignAttemptVehicleState,
+} from "./attempt-progress";
 
 function testGeometryUsesGtaHeadingConvention() {
     const north = gtaForwardVector(0);
@@ -76,6 +82,50 @@ function testStopAndGoLabelsAreExplicit() {
     assert(go.throttle > 0);
 }
 
+function testEarlyStopScoringWaitsForActualDeparture() {
+    assert.equal(updateDepartureObserved(false, 0, 0, 0), false);
+    assert.equal(updateDepartureObserved(false, 0, 0.8, 0.4), false);
+    assert.equal(updateDepartureObserved(false, 0, 1, 0), true);
+    assert.equal(updateDepartureObserved(false, 0.5, 0, 0), true);
+    assert.equal(shouldReportStoppedTooEarly(false, null, 0, 40), false);
+    assert.equal(shouldReportStoppedTooEarly(true, null, 0, 40), true);
+    assert.equal(shouldReportStoppedTooEarly(true, null, 1, 40), false);
+    assert.equal(shouldReportStoppedTooEarly(true, 1000, 0, 40), false);
+}
+
+function testFixedIntervalSchedulerDoesNotAccumulateWorkTime() {
+    assert.equal(nextFixedIntervalDeadlineMs(1000, 1020, 50), 1050);
+    assert.equal(nextFixedIntervalDeadlineMs(1050, 1070, 50), 1100);
+    assert.equal(nextFixedIntervalDeadlineMs(1100, 1190, 50), 1240);
+}
+
+function testAttemptPreflightRejectsUnsafeStarts() {
+    const readyVehicle = {
+        exists: true,
+        playerIsDriver: true,
+        engineRunning: true,
+        onAllWheels: true,
+        speedMps: 0,
+        pitchDeg: 0,
+        rollDeg: 0,
+        collided: false,
+    };
+    assert.equal(validateStopSignAttemptVehicleState(readyVehicle), null);
+    assert.equal(validateStopSignAttemptVehicleState({...readyVehicle, pitchDeg: 8}), null);
+    assert.match(
+        validateStopSignAttemptVehicleState({...readyVehicle, playerIsDriver: false}) ?? "",
+        /driver seat/,
+    );
+    assert.match(
+        validateStopSignAttemptVehicleState({...readyVehicle, collided: true}) ?? "",
+        /spawned in contact/,
+    );
+    assert.match(
+        validateStopSignAttemptVehicleState({...readyVehicle, rollDeg: 6}) ?? "",
+        /not level/,
+    );
+}
+
 function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     const signPose = {x: 100, y: 200, z: 8, heading: 90};
     const stopDistanceM = 4;
@@ -126,5 +176,8 @@ testGeometryUsesGtaHeadingConvention();
 testPhaseClassificationIsTemporalButNotSequenceDependent();
 testApproachTransitionsFromThrottleToBrake();
 testStopAndGoLabelsAreExplicit();
+testEarlyStopScoringWaitsForActualDeparture();
+testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
+testAttemptPreflightRejectsUnsafeStarts();
 testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
 console.log("stop-sign expert tests passed");

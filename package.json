@@ -19,6 +19,7 @@
     "dev:model": "bash scripts/dev-model-server.sh",
     "data:backfill": "bash scripts/dev-backend.sh process-runs -stop-sign-only",
     "data:rebuild": "bash scripts/dev-backend.sh process-runs -stop-sign-only -dataset-only -force",
-    "data:report": "bash scripts/dev-backend.sh report-runs -stop-sign-only"
+    "data:report": "bash scripts/dev-backend.sh report-runs -stop-sign-only",
+    "probe:stop-sign": "node scripts/stop-sign-probe.mjs"
   }
 }

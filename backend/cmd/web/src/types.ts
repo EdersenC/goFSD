@@ -92,6 +92,15 @@ export type BatchProgress = {
     phase: string
     startedAtMs?: number
     updatedAtMs?: number
+    lastAttemptOutcome?: {
+        success: boolean
+        status: string
+        failureReason: string
+        durationMs: number
+        stoppedAtDistanceM: number | null
+        dwellDurationMs: number
+        crossedStopLineBeforeDwell: boolean
+    }
 };
 
 export type RuntimeState = {

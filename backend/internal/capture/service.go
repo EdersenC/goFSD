@@ -32,6 +32,7 @@ var (
 	ErrNotRunning          = errors.New("capture is not running")
 	ErrStartFailed         = errors.New("failed to start capture")
 	ErrStopFailed          = errors.New("failed to stop capture")
+	ErrSnapshotFailed      = errors.New("failed to capture snapshot")
 	ErrUnsupportedFFmpeg   = errors.New("ffmpeg build does not support required capture features")
 )
 
@@ -79,6 +80,23 @@ type StopResult struct {
 	OutputBytes int64  `json:"outputBytes"`
 }
 
+type SnapshotRequest struct {
+	SourceID           string `json:"sourceId"`
+	OutputFile         string `json:"outputFile,omitempty"`
+	PreferredMonitorID string `json:"preferredMonitorId,omitempty"`
+	CropToWindow       *bool  `json:"cropToWindow,omitempty"`
+}
+
+type SnapshotResult struct {
+	Status            string        `json:"status"`
+	OutputFile        string        `json:"outputFile"`
+	OutputBytes       int64         `json:"outputBytes"`
+	CaptureBackend    string        `json:"captureBackend,omitempty"`
+	SelectedMonitorID string        `json:"selectedMonitorId,omitempty"`
+	CropApplied       bool          `json:"cropApplied,omitempty"`
+	DetectedWindow    *WindowBounds `json:"detectedWindowBounds,omitempty"`
+}
+
 type CommandFactory func(name string, args ...string) *exec.Cmd
 type SourceDiscovery func(ctx context.Context) ([]Source, error)
 type CapabilityProbe func(ctx context.Context, ffmpegBin string, capability string) (bool, error)
@@ -99,7 +117,8 @@ type Service struct {
 	discover   SourceDiscovery
 	probe      CapabilityProbe
 
-	active *session
+	active         *session
+	snapshotActive bool
 }
 
 type session struct {
@@ -252,7 +271,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}
 
 	s.mu.Lock()
-	if s.active != nil {
+	if s.active != nil || s.snapshotActive {
 		s.mu.Unlock()
 		return StartResult{}, ErrAlreadyRunning
 	}
@@ -314,6 +333,80 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 		PID:               cmd.Process.Pid,
 		OutputFile:        outputFile,
 		LogFile:           logFile,
+		CaptureBackend:    spec.backend,
+		SelectedMonitorID: spec.selectedMonitorID,
+		CropApplied:       spec.cropApplied,
+		DetectedWindow:    spec.detectedWindow,
+	}, nil
+}
+
+// Snapshot captures one visual evidence frame without starting a recording session.
+// It is intentionally unavailable while capture is active so probe evidence cannot
+// compete with a training recording for the same GPU desktop source.
+func (s *Service) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotResult, error) {
+	sources, err := s.discover(ctx)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	spec, err := s.resolveCaptureSpec(
+		ctx,
+		sources,
+		strings.TrimSpace(req.SourceID),
+		strings.TrimSpace(req.PreferredMonitorID),
+		shouldCropToWindowSnapshot(req),
+	)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+
+	s.mu.Lock()
+	if s.active != nil || s.snapshotActive {
+		s.mu.Unlock()
+		return SnapshotResult{}, ErrAlreadyRunning
+	}
+	s.snapshotActive = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.snapshotActive = false
+		s.mu.Unlock()
+	}()
+
+	stamp := s.nowFunc().UTC().Format("20060102T150405.000000000Z")
+	requested := strings.TrimSpace(req.OutputFile)
+	if requested == "" {
+		requested = path.Join("probe-evidence", "snapshot-"+stamp+".png")
+	}
+	outputFile, err := s.resolveOutputFile("probe-"+stamp, requested)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	ext := strings.ToLower(filepath.Ext(outputFile))
+	if ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
+		return SnapshotResult{}, fmt.Errorf("%w: snapshot output must use .png, .jpg, or .jpeg", ErrInvalidRequest)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
+		return SnapshotResult{}, fmt.Errorf("%w: %v", ErrSnapshotFailed, err)
+	}
+
+	cmd := s.newCommand(s.ffmpegBin, buildSnapshotFFmpegArgs(spec, outputFile)...)
+	combined, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(combined))
+		if len(message) > 1000 {
+			message = message[len(message)-1000:]
+		}
+		return SnapshotResult{}, fmt.Errorf("%w: %v: %s", ErrSnapshotFailed, err, message)
+	}
+	info, err := os.Stat(outputFile)
+	if err != nil || info.Size() <= 0 {
+		return SnapshotResult{}, fmt.Errorf("%w: output validation failed for %s", ErrSnapshotFailed, outputFile)
+	}
+
+	return SnapshotResult{
+		Status:            "captured",
+		OutputFile:        outputFile,
+		OutputBytes:       info.Size(),
 		CaptureBackend:    spec.backend,
 		SelectedMonitorID: spec.selectedMonitorID,
 		CropApplied:       spec.cropApplied,
@@ -770,6 +863,30 @@ func buildFFmpegArgs(spec captureSpec, outputFile string) []string {
 	)
 
 	return args
+}
+
+func buildSnapshotFFmpegArgs(spec captureSpec, outputFile string) []string {
+	args := []string{"-y"}
+	switch spec.backend {
+	case "ddagrab":
+		args = append(args, "-f", spec.inputFormat, "-i", spec.input, "-vf", spec.videoFilter)
+	case "gdigrab":
+		args = append(args,
+			"-f", spec.inputFormat,
+			"-framerate", "30",
+			"-draw_mouse", "0",
+			"-i", spec.input,
+			"-vf", spec.videoFilter,
+		)
+	}
+	return append(args, "-frames:v", "1", outputFile)
+}
+
+func shouldCropToWindowSnapshot(req SnapshotRequest) bool {
+	if req.CropToWindow == nil {
+		return true
+	}
+	return *req.CropToWindow
 }
 
 func selectSource(sources []Source, sourceID string) (Source, error) {

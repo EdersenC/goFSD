@@ -76,6 +76,54 @@ func TestEnqueueStopSignCatalogWaypointValidatesAndClonesPosition(t *testing.T) 
 	}
 }
 
+func TestEnqueueStopSignProbeValidatesClonesAndRequiresSafetyEpoch(t *testing.T) {
+	store := NewStore()
+	probe := &StopSignProbe{
+		CatalogID:        "gta-v-sign-0022",
+		CatalogPosition:  WorldPosition{X: -1832.1594, Y: 145.45688, Z: 77.10415},
+		HeadingOffsetDeg: 180,
+	}
+	if _, err := store.Enqueue(CommandRequest{Type: CommandProbeStopSignTarget, StopSignProbe: probe}); !errors.Is(err, ErrSafetyEpochRequired) {
+		t.Fatalf("probe without safety epoch: got=%v", err)
+	}
+
+	command, err := store.Enqueue(CommandRequest{
+		Type:          CommandProbeStopSignTarget,
+		SafetyEpoch:   currentSafetyEpochPtr(store),
+		StopSignProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("enqueue stop-sign probe: %v", err)
+	}
+	probe.CatalogPosition.X = 0
+	if command.StopSignProbe == nil || command.StopSignProbe.CatalogPosition.X != -1832.1594 {
+		t.Fatalf("enqueue retained caller-owned probe: %+v", command.StopSignProbe)
+	}
+	state := store.State()
+	state.PendingCommands[0].StopSignProbe.CatalogPosition.Y = 0
+	if got := store.State().PendingCommands[0].StopSignProbe.CatalogPosition.Y; got != 145.45688 {
+		t.Fatalf("state returned aliased stop-sign probe: got=%f", got)
+	}
+
+	for name, invalid := range map[string]*StopSignProbe{
+		"missing":         nil,
+		"missing id":      {CatalogPosition: WorldPosition{X: 1, Y: 2, Z: 3}},
+		"bad coordinates": {CatalogID: "bad", CatalogPosition: WorldPosition{X: math.Inf(1)}},
+		"bad heading":     {CatalogID: "bad", CatalogPosition: WorldPosition{X: 1, Y: 2, Z: 3}, HeadingOffsetDeg: 90},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.Enqueue(CommandRequest{
+				Type:          CommandProbeStopSignTarget,
+				SafetyEpoch:   currentSafetyEpochPtr(store),
+				StopSignProbe: invalid,
+			})
+			if !errors.Is(err, ErrInvalidCommand) {
+				t.Fatalf("expected invalid command, got=%v", err)
+			}
+		})
+	}
+}
+
 func TestEnqueueStartStopSignBatchValidatesIdentityAndAttempts(t *testing.T) {
 	tests := []struct {
 		name string
@@ -940,7 +988,19 @@ func guardedStartCommandRequests(safetyEpoch *uint64) []CommandRequest {
 		{Type: CommandStartScene, SafetyEpoch: safetyEpoch, SceneName: "inner-city-driving:default"},
 		{Type: CommandRunAllScenes, SafetyEpoch: safetyEpoch},
 		{Type: CommandStartEgo, SafetyEpoch: safetyEpoch},
+		validStopSignProbeCommandRequest(safetyEpoch),
 		validStopSignBatchCommandRequest(safetyEpoch),
+	}
+}
+
+func validStopSignProbeCommandRequest(safetyEpoch *uint64) CommandRequest {
+	return CommandRequest{
+		Type:        CommandProbeStopSignTarget,
+		SafetyEpoch: safetyEpoch,
+		StopSignProbe: &StopSignProbe{
+			CatalogID:       "gta-v-sign-0022",
+			CatalogPosition: WorldPosition{X: -1832.1594, Y: 145.45688, Z: 77.10415},
+		},
 	}
 }
 

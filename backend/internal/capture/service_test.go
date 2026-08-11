@@ -145,6 +145,50 @@ func TestStartStopAndDuplicateStart(t *testing.T) {
 	}
 }
 
+func TestSnapshotCapturesOneEvidenceFrame(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	var capturedArgs []string
+	svc := NewService(
+		WithOutputRootDir(tmp),
+		WithSourceDiscovery(func(context.Context) ([]Source, error) {
+			return []Source{{
+				ID: "monitor-2", Name: "Monitor 2", InputFormat: "ddagrab", Input: "desktop",
+				CaptureType: "monitor", Width: 1920, Height: 1080, OutputIndex: 1,
+			}}, nil
+		}),
+		WithCapabilityProbe(func(context.Context, string, string) (bool, error) { return true, nil }),
+		WithCommandFactory(func(_ string, args ...string) *exec.Cmd {
+			capturedArgs = append([]string{}, args...)
+			cmd := exec.Command(os.Args[0], append([]string{"-test.run=TestHelperProcessFFmpeg", "--"}, args...)...)
+			cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+			return cmd
+		}),
+	)
+
+	result, err := svc.Snapshot(ctx, SnapshotRequest{
+		SourceID:   "monitor-2",
+		OutputFile: "probe-evidence/alta-before.png",
+	})
+	if err != nil {
+		t.Fatalf("snapshot failed: %v", err)
+	}
+	if result.Status != "captured" || result.OutputBytes == 0 {
+		t.Fatalf("unexpected snapshot result: %+v", result)
+	}
+	if !contains(capturedArgs, "-frames:v") || !contains(capturedArgs, "1") {
+		t.Fatalf("snapshot did not constrain FFmpeg to one frame: %v", capturedArgs)
+	}
+	if filepath.Ext(result.OutputFile) != ".png" {
+		t.Fatalf("unexpected snapshot output: %s", result.OutputFile)
+	}
+
+	_, err = svc.Snapshot(ctx, SnapshotRequest{OutputFile: "probe-evidence/not-an-image.mkv"})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid snapshot extension, got=%v", err)
+	}
+}
+
 func TestStartFailsForUnknownSource(t *testing.T) {
 	svc := NewService(
 		WithSourceDiscovery(func(context.Context) ([]Source, error) {
@@ -355,9 +399,14 @@ func TestHelperProcessFFmpeg(t *testing.T) {
 	args := os.Args
 	if len(args) > 0 {
 		outputFile := args[len(args)-1]
-		if strings.HasSuffix(strings.ToLower(outputFile), ".mkv") {
+		ext := strings.ToLower(filepath.Ext(outputFile))
+		if ext == ".mkv" {
 			_ = os.MkdirAll(filepath.Dir(outputFile), 0o755)
 			_ = os.WriteFile(outputFile, []byte("fake-video-data"), 0o644)
+		} else if ext == ".png" || ext == ".jpg" || ext == ".jpeg" {
+			_ = os.MkdirAll(filepath.Dir(outputFile), 0o755)
+			_ = os.WriteFile(outputFile, []byte("fake-image-data"), 0o644)
+			os.Exit(0)
 		}
 	}
 
