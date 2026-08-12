@@ -789,7 +789,7 @@ async function waitForSavedStart(pose: Pose, catalogId: string, timeoutMs = 20_0
     });
 }
 
-function waypointAheadOfPose(pose: Pose, distanceM = 8): {x: number, y: number, z: number} {
+function waypointAheadOfPose(pose: Pose, distanceM = 40): {x: number, y: number, z: number} {
     const headingRadians = pose.heading * Math.PI / 180;
     return {
         x: pose.x - Math.sin(headingRadians) * distanceM,

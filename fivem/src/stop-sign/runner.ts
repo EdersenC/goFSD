@@ -43,7 +43,7 @@ export const STOP_SIGN_SCENE_NAME = `${STOP_SIGN_SCENE_ID}:${STOP_SIGN_SCENE_VAR
 
 const captureWarmupMs = 750;
 const maximumAttemptDurationMs = 90_000;
-const exitWaypointLeadM = 8;
+const exitWaypointLeadM = 40;
 
 export type StopSignBatchHooks = {
     stopRequested: () => boolean
