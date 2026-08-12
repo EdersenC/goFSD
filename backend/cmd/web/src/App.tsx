@@ -695,7 +695,7 @@ function CollectionControls({
                                     ? "baseline · 0% difference"
                                     : `${batch.variationProfile.combinationMagnitudePct.toFixed(1)}% combined difference`}
                             />
-                            <Chip size="small" variant="outlined" label={`${batch.variationProfile.changeCount}/13 dimensions changed`} />
+                            <Chip size="small" variant="outlined" label={`${batch.variationProfile.changeCount}/15 dimensions changed`} />
                         </Stack>
                         {!batch.variationProfile.baseline && (
                             <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: .6}}>

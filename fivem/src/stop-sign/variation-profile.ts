@@ -1,9 +1,11 @@
 import {StopSignVariationProfile} from "./types";
 
-export const STOP_SIGN_VARIATION_PROFILE_CONTRACT = "stop-sign-variation-profile.v1";
+export const STOP_SIGN_VARIATION_PROFILE_CONTRACT = "stop-sign-variation-profile.v2";
 
 const canonicalDimensions = [
     "target_speed",
+    "braking_deceleration",
+    "release_acceleration",
     "start_distance",
     "exit_distance",
     "stop_pose",
@@ -34,6 +36,8 @@ export function parseStopSignVariationProfile(value: unknown, label: string): St
         combinationMagnitudePct: boundedNumber(value.combinationMagnitudePct, `${label}.combinationMagnitudePct`, 0, 100),
         targetSpeedDeltaMps: boundedNumber(value.targetSpeedDeltaMps, `${label}.targetSpeedDeltaMps`, -15, 15),
         targetSpeedDeltaPct: boundedNumber(value.targetSpeedDeltaPct, `${label}.targetSpeedDeltaPct`, -100, 3000),
+        brakingDecelerationDeltaMps2: boundedNumber(value.brakingDecelerationDeltaMps2, `${label}.brakingDecelerationDeltaMps2`, -.7, .7),
+        releaseAccelerationDeltaMps2: boundedNumber(value.releaseAccelerationDeltaMps2, `${label}.releaseAccelerationDeltaMps2`, -2, 2),
         startDistanceDeltaM: boundedNumber(value.startDistanceDeltaM, `${label}.startDistanceDeltaM`, -250, 250),
         exitDistanceDeltaM: boundedNumber(value.exitDistanceDeltaM, `${label}.exitDistanceDeltaM`, -50, 50),
         stopOffsetM: boundedNumber(value.stopOffsetM, `${label}.stopOffsetM`, 0, 25),
@@ -71,6 +75,8 @@ function validateInternalConsistency(profile: StopSignVariationProfile, label: s
 function changedDimensions(profile: StopSignVariationProfile): string[] {
     const changed = [
         nonZero(profile.targetSpeedDeltaMps),
+        nonZero(profile.brakingDecelerationDeltaMps2),
+        nonZero(profile.releaseAccelerationDeltaMps2),
         nonZero(profile.startDistanceDeltaM),
         nonZero(profile.exitDistanceDeltaM),
         nonZero(profile.stopOffsetM),

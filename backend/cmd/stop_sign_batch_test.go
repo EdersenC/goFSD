@@ -51,6 +51,9 @@ func TestStopSignBatchHandlerQueuesOneDeterministicCommand(t *testing.T) {
 	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.ExitPose.X != 92 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.ExitDistanceM != 8 || job.TargetSpeedMPS != 7.5 || job.StopConfirmationMS != 500 || job.AttemptCount != 4 {
 		t.Fatalf("unexpected derived/varied job: %+v", job)
 	}
+	if job.BrakingDecelerationMPS2 != 3.8 || job.ReleaseAccelerationMPS2 != 3.5 {
+		t.Fatalf("manual job lost the default behavior profile: %+v", job)
+	}
 	if job.Weather != "RAIN" || job.Time.Hour != 17 || job.Vehicle.Model != "sultan" || job.Vehicle.Color == nil || job.Vehicle.Color.B != 255 {
 		t.Fatalf("unexpected conditions: %+v", job)
 	}

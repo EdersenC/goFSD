@@ -41,6 +41,8 @@ Raw 50 ms telemetry retains enough evidence to reproduce and diagnose the expert
 - expert desired speed and steering
 - expert throttle and brake
 - expert stop/go probabilities
+
+Collection jobs may apply a small seeded behavior profile: braking deceleration only increases from `3.80` up to `4.05 m/s²`, and release acceleration only increases from `3.50` up to `4.20 m/s²` at maximum Motion variance. These values alter the expert's desired-speed trajectory and are retained in `stopSignGoal.variationProfile` for auditing, but the profile itself is not a policy input. The range is intentionally narrow so the temporal policy sees bounded robustness variation instead of several contradictory driving styles for the same visual state.
 - fine phase
 - oracle-relative geometry and final outcome
 

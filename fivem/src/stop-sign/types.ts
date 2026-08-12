@@ -24,7 +24,7 @@ export type StopSignTimeVariant = {
 };
 
 export type StopSignVariationProfile = {
-    contract: "stop-sign-variation-profile.v1"
+    contract: "stop-sign-variation-profile.v2"
     baseline: boolean
     configuredMotionVariancePct: number
     changedDimensions: string[]
@@ -32,6 +32,8 @@ export type StopSignVariationProfile = {
     combinationMagnitudePct: number
     targetSpeedDeltaMps: number
     targetSpeedDeltaPct: number
+    brakingDecelerationDeltaMps2: number
+    releaseAccelerationDeltaMps2: number
     startDistanceDeltaM: number
     exitDistanceDeltaM: number
     stopOffsetM: number
@@ -62,6 +64,8 @@ export type StopSignJob = {
     startDistanceM: number
     exitDistanceM: number
     targetSpeedMps: number
+    brakingDecelerationMps2: number
+    releaseAccelerationMps2: number
     stopConfirmationMs: number
     attemptCount: number
     weather: string
@@ -107,6 +111,8 @@ export type StopSignGoal = {
     routeWaypointForwardM: number
     routeWaypointLateralM: number
     targetSpeedMps: number
+    brakingDecelerationMps2: number
+    releaseAccelerationMps2: number
     stopConfirmationMs: number
     attemptIndex: number
     attemptCount: number

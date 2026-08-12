@@ -5,10 +5,12 @@ import (
 	"strings"
 )
 
-const VariationProfileContract = "stop-sign-variation-profile.v1"
+const VariationProfileContract = "stop-sign-variation-profile.v2"
 
 var variationDimensions = []string{
 	"target_speed",
+	"braking_deceleration",
+	"release_acceleration",
 	"start_distance",
 	"exit_distance",
 	"stop_pose",
@@ -27,26 +29,28 @@ var variationDimensions = []string{
 // scene. CombinationMagnitudePct is the RMS of the normalized dimensions
 // above; exact physical and categorical deltas remain available for audits.
 type VariationProfile struct {
-	Contract                    string   `json:"contract"`
-	Baseline                    bool     `json:"baseline"`
-	ConfiguredMotionVariancePct float64  `json:"configuredMotionVariancePct"`
-	ChangedDimensions           []string `json:"changedDimensions"`
-	ChangeCount                 int      `json:"changeCount"`
-	CombinationMagnitudePct     float64  `json:"combinationMagnitudePct"`
-	TargetSpeedDeltaMPS         float64  `json:"targetSpeedDeltaMps"`
-	TargetSpeedDeltaPct         float64  `json:"targetSpeedDeltaPct"`
-	StartDistanceDeltaM         float64  `json:"startDistanceDeltaM"`
-	ExitDistanceDeltaM          float64  `json:"exitDistanceDeltaM"`
-	StopOffsetM                 float64  `json:"stopOffsetM"`
-	StopHeadingDeltaDeg         float64  `json:"stopHeadingDeltaDeg"`
-	StartLaneOffsetDeltaM       float64  `json:"startLaneOffsetDeltaM"`
-	StartHeadingDeltaDeg        float64  `json:"startHeadingDeltaDeg"`
-	ExitLaneOffsetDeltaM        float64  `json:"exitLaneOffsetDeltaM"`
-	ExitHeadingDeltaDeg         float64  `json:"exitHeadingDeltaDeg"`
-	TimeDeltaMinutes            int      `json:"timeDeltaMinutes"`
-	WeatherChanged              bool     `json:"weatherChanged"`
-	VehicleModelChanged         bool     `json:"vehicleModelChanged"`
-	VehicleColorDeltaPct        float64  `json:"vehicleColorDeltaPct"`
+	Contract                     string   `json:"contract"`
+	Baseline                     bool     `json:"baseline"`
+	ConfiguredMotionVariancePct  float64  `json:"configuredMotionVariancePct"`
+	ChangedDimensions            []string `json:"changedDimensions"`
+	ChangeCount                  int      `json:"changeCount"`
+	CombinationMagnitudePct      float64  `json:"combinationMagnitudePct"`
+	TargetSpeedDeltaMPS          float64  `json:"targetSpeedDeltaMps"`
+	TargetSpeedDeltaPct          float64  `json:"targetSpeedDeltaPct"`
+	BrakingDecelerationDeltaMPS2 float64  `json:"brakingDecelerationDeltaMps2"`
+	ReleaseAccelerationDeltaMPS2 float64  `json:"releaseAccelerationDeltaMps2"`
+	StartDistanceDeltaM          float64  `json:"startDistanceDeltaM"`
+	ExitDistanceDeltaM           float64  `json:"exitDistanceDeltaM"`
+	StopOffsetM                  float64  `json:"stopOffsetM"`
+	StopHeadingDeltaDeg          float64  `json:"stopHeadingDeltaDeg"`
+	StartLaneOffsetDeltaM        float64  `json:"startLaneOffsetDeltaM"`
+	StartHeadingDeltaDeg         float64  `json:"startHeadingDeltaDeg"`
+	ExitLaneOffsetDeltaM         float64  `json:"exitLaneOffsetDeltaM"`
+	ExitHeadingDeltaDeg          float64  `json:"exitHeadingDeltaDeg"`
+	TimeDeltaMinutes             int      `json:"timeDeltaMinutes"`
+	WeatherChanged               bool     `json:"weatherChanged"`
+	VehicleModelChanged          bool     `json:"vehicleModelChanged"`
+	VehicleColorDeltaPct         float64  `json:"vehicleColorDeltaPct"`
 }
 
 func applyVariationProfiles(jobs []Job, motionVariancePct float64) {
@@ -66,23 +70,25 @@ func buildVariationProfile(job, baseline Job, motionVariancePct float64, baselin
 	baselineExitLaneOffset := poseRelativeTo(baseline.ExitPose, baseline.EgoStopPose).lateral
 
 	profile := VariationProfile{
-		Contract:                    VariationProfileContract,
-		Baseline:                    baselineJob,
-		ConfiguredMotionVariancePct: roundedVariation(motionVariancePct),
-		TargetSpeedDeltaMPS:         roundedVariation(job.TargetSpeedMPS - baseline.TargetSpeedMPS),
-		TargetSpeedDeltaPct:         roundedVariation(percentDelta(job.TargetSpeedMPS, baseline.TargetSpeedMPS)),
-		StartDistanceDeltaM:         roundedVariation(job.StartDistanceM - baseline.StartDistanceM),
-		ExitDistanceDeltaM:          roundedVariation(job.ExitDistanceM - baseline.ExitDistanceM),
-		StopOffsetM:                 roundedVariation(planarDistance(job.EgoStopPose, baseline.EgoStopPose)),
-		StopHeadingDeltaDeg:         roundedVariation(headingDelta(job.EgoStopPose.Heading, baseline.EgoStopPose.Heading)),
-		StartLaneOffsetDeltaM:       roundedVariation(startLaneOffset - baselineStartLaneOffset),
-		StartHeadingDeltaDeg:        roundedVariation(headingDelta(job.StartPose.Heading, baseline.StartPose.Heading)),
-		ExitLaneOffsetDeltaM:        roundedVariation(exitLaneOffset - baselineExitLaneOffset),
-		ExitHeadingDeltaDeg:         roundedVariation(headingDelta(job.ExitPose.Heading, baseline.ExitPose.Heading)),
-		TimeDeltaMinutes:            circularMinuteDelta(job.Time, baseline.Time),
-		WeatherChanged:              job.Weather != baseline.Weather,
-		VehicleModelChanged:         job.Vehicle.Model != baseline.Vehicle.Model,
-		VehicleColorDeltaPct:        roundedVariation(colorDeltaPct(job.Vehicle.Color, baseline.Vehicle.Color)),
+		Contract:                     VariationProfileContract,
+		Baseline:                     baselineJob,
+		ConfiguredMotionVariancePct:  roundedVariation(motionVariancePct),
+		TargetSpeedDeltaMPS:          roundedVariation(job.TargetSpeedMPS - baseline.TargetSpeedMPS),
+		TargetSpeedDeltaPct:          roundedVariation(percentDelta(job.TargetSpeedMPS, baseline.TargetSpeedMPS)),
+		BrakingDecelerationDeltaMPS2: roundedVariation(job.BrakingDecelerationMPS2 - baseline.BrakingDecelerationMPS2),
+		ReleaseAccelerationDeltaMPS2: roundedVariation(job.ReleaseAccelerationMPS2 - baseline.ReleaseAccelerationMPS2),
+		StartDistanceDeltaM:          roundedVariation(job.StartDistanceM - baseline.StartDistanceM),
+		ExitDistanceDeltaM:           roundedVariation(job.ExitDistanceM - baseline.ExitDistanceM),
+		StopOffsetM:                  roundedVariation(planarDistance(job.EgoStopPose, baseline.EgoStopPose)),
+		StopHeadingDeltaDeg:          roundedVariation(headingDelta(job.EgoStopPose.Heading, baseline.EgoStopPose.Heading)),
+		StartLaneOffsetDeltaM:        roundedVariation(startLaneOffset - baselineStartLaneOffset),
+		StartHeadingDeltaDeg:         roundedVariation(headingDelta(job.StartPose.Heading, baseline.StartPose.Heading)),
+		ExitLaneOffsetDeltaM:         roundedVariation(exitLaneOffset - baselineExitLaneOffset),
+		ExitHeadingDeltaDeg:          roundedVariation(headingDelta(job.ExitPose.Heading, baseline.ExitPose.Heading)),
+		TimeDeltaMinutes:             circularMinuteDelta(job.Time, baseline.Time),
+		WeatherChanged:               job.Weather != baseline.Weather,
+		VehicleModelChanged:          job.Vehicle.Model != baseline.Vehicle.Model,
+		VehicleColorDeltaPct:         roundedVariation(colorDeltaPct(job.Vehicle.Color, baseline.Vehicle.Color)),
 	}
 	profile.ChangedDimensions = changedVariationDimensions(profile)
 	profile.ChangeCount = len(profile.ChangedDimensions)
@@ -99,10 +105,13 @@ func combinationMagnitudePct(profile VariationProfile, baseline Job) float64 {
 	startDistanceScale := maximumStartDistanceM - minimumStartDistanceM
 	if strings.TrimSpace(baseline.CatalogID) != "" {
 		speedScale = maximumTargetSpeedMPS - minimumAutoTargetSpeedMPS
-		startDistanceScale = requiredRollingStartDistanceM(maximumTargetSpeedMPS) - requiredRollingStartDistanceM(minimumAutoTargetSpeedMPS)
+		startDistanceScale = requiredRollingStartDistanceM(maximumTargetSpeedMPS, DefaultBrakingDecelerationMPS2) -
+			requiredRollingStartDistanceM(minimumAutoTargetSpeedMPS, DefaultBrakingDecelerationMPS2)
 	}
 	factors := []float64{
 		normalizedVariation(profile.TargetSpeedDeltaMPS, speedScale),
+		normalizedVariation(profile.BrakingDecelerationDeltaMPS2, maximumAutoBrakingDecelerationMPS2-DefaultBrakingDecelerationMPS2),
+		normalizedVariation(profile.ReleaseAccelerationDeltaMPS2, maximumAutoReleaseAccelerationMPS2-DefaultReleaseAccelerationMPS2),
 		normalizedVariation(profile.StartDistanceDeltaM, startDistanceScale),
 		normalizedVariation(profile.ExitDistanceDeltaM, exitScale),
 		normalizedVariation(profile.StopOffsetM, stopScale),
@@ -127,6 +136,8 @@ func changedVariationDimensions(profile VariationProfile) []string {
 	changed := make([]string, 0, len(variationDimensions))
 	values := []bool{
 		nonZeroVariation(profile.TargetSpeedDeltaMPS),
+		nonZeroVariation(profile.BrakingDecelerationDeltaMPS2),
+		nonZeroVariation(profile.ReleaseAccelerationDeltaMPS2),
 		nonZeroVariation(profile.StartDistanceDeltaM),
 		nonZeroVariation(profile.ExitDistanceDeltaM),
 		nonZeroVariation(profile.StopOffsetM),
@@ -183,7 +194,9 @@ func validateChangedDimensions(profile VariationProfile) error {
 		}
 	}
 	for _, value := range []float64{
-		profile.TargetSpeedDeltaMPS, profile.TargetSpeedDeltaPct, profile.StartDistanceDeltaM,
+		profile.TargetSpeedDeltaMPS, profile.TargetSpeedDeltaPct,
+		profile.BrakingDecelerationDeltaMPS2, profile.ReleaseAccelerationDeltaMPS2,
+		profile.StartDistanceDeltaM,
 		profile.ExitDistanceDeltaM, profile.StopOffsetM, profile.StopHeadingDeltaDeg,
 		profile.StartLaneOffsetDeltaM, profile.StartHeadingDeltaDeg, profile.ExitLaneOffsetDeltaM,
 		profile.ExitHeadingDeltaDeg, profile.VehicleColorDeltaPct,

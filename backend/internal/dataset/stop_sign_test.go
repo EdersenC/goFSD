@@ -248,7 +248,7 @@ func TestDecorateStopSignSamplesCarriesGoalOutcomeAndTrainingEligibility(t *test
 		t.Fatalf("goal context was not carried into the dataset row: %+v", samples[0])
 	}
 	variationProfile, ok := samples[0].StopSignGoal["variationProfile"].(map[string]any)
-	if !ok || variationProfile["contract"] != "stop-sign-variation-profile.v1" || variationProfile["combinationMagnitudePct"] != 37.5 {
+	if !ok || variationProfile["contract"] != "stop-sign-variation-profile.v2" || variationProfile["combinationMagnitudePct"] != 37.5 {
 		t.Fatalf("variation combination profile was not preserved in the dataset row: %+v", samples[0].StopSignGoal)
 	}
 	if samples[0].StopSignOutcome["status"] != "succeeded" {
@@ -332,12 +332,14 @@ func stopSignGoalFixture(variationID string, x float64, y float64) map[string]an
 			"x": x, "y": y - 8, "z": 30.0, "heading": 180.0,
 		},
 		"variationProfile": map[string]any{
-			"contract":                    "stop-sign-variation-profile.v1",
-			"baseline":                    false,
-			"configuredMotionVariancePct": 20.0,
-			"changedDimensions":           []string{"target_speed", "weather", "time"},
-			"changeCount":                 3,
-			"combinationMagnitudePct":     37.5,
+			"contract":                     "stop-sign-variation-profile.v2",
+			"baseline":                     false,
+			"configuredMotionVariancePct":  20.0,
+			"changedDimensions":            []string{"target_speed", "weather", "time"},
+			"changeCount":                  3,
+			"combinationMagnitudePct":      37.5,
+			"brakingDecelerationDeltaMps2": 0.0,
+			"releaseAccelerationDeltaMps2": 0.0,
 		},
 	}
 }

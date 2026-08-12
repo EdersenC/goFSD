@@ -182,7 +182,7 @@ export function PlanEditor({
                                 <Box>
                                     <Typography sx={{fontWeight: 850}}>Automatic seeded variants</Typography>
                                     <Typography variant="body2" color="text.secondary">
-                                        Every run is a combination: speed, its coupled Start, End distance, lane offsets, headings, Stop jitter, weather, time, and color vary together. Each resolved job records exact deltas from auto-001 plus one normalized combination score.
+                                        Every run is a combination: speed, its coupled Start, End distance, lane offsets, headings, Stop jitter, weather, time, color, slightly harder braking, and faster release acceleration vary together. Behavior changes stay small and scale with Motion variance. Each resolved job records exact deltas from auto-001 plus one normalized combination score.
                                     </Typography>
                                 </Box>
                                 <Stack direction="row" sx={{gap: .75, flexWrap: "wrap", justifyContent: "flex-end"}}>
@@ -196,7 +196,8 @@ export function PlanEditor({
                                         variant="outlined"
                                         label={`${startRange.minimumM.toFixed(0)}–${startRange.maximumM.toFixed(0)} m generated Starts`}
                                     />}
-                                    <Chip variant="outlined" label="13 measured dimensions" />
+                                    <Chip variant="outlined" label="15 measured dimensions" />
+                                    <Chip variant="outlined" label="At 25% · brake 3.80–4.05 m/s² · release 3.50–4.20 m/s²" />
                                 </Stack>
                             </Stack>
                             <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "1fr 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>
@@ -223,7 +224,7 @@ export function PlanEditor({
                                 </Box>
                                 <Box>
                                     <Stack direction="row" sx={{justifyContent: "space-between"}}>
-                                        <Typography variant="caption">Motion variance</Typography>
+                                        <Typography variant="caption">Motion + behavior variance</Typography>
                                         <Typography variant="caption" sx={{fontFamily: "ui-monospace, monospace"}}>{entry.autoVariations?.motionVariancePct ?? 20}%</Typography>
                                     </Stack>
                                     <Slider
@@ -260,7 +261,7 @@ export function PlanEditor({
                                     </Box>
                                 </Box>
                                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
-                                    The first run uses the minimum, {formatSpeed(entry.targetSpeedMps)}; the second guarantees the maximum, {formatSpeed(MAXIMUM_TARGET_SPEED_MPS)}; remaining runs sample between them. Start is recalculated from each exact speed. The minimum needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m plus your captured cruise buffer. Launch frames stay raw; training begins after one stable cruise second.
+                                    The first run uses the minimum, {formatSpeed(entry.targetSpeedMps)}; the second guarantees the maximum, {formatSpeed(MAXIMUM_TARGET_SPEED_MPS)}; remaining runs sample between them. Start is recalculated from each exact speed and braking profile. The baseline minimum needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m plus your captured cruise buffer. Launch frames stay raw; training begins after one stable cruise second.
                                 </Typography>
                             </AccordionDetails>
                         </Accordion>

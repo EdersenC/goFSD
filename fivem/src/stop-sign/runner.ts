@@ -15,6 +15,7 @@ import {TripProfileSnapshot} from "../tripProfiles";
 import {
     classifyStopSignPhase,
     planStopSignExpert,
+    STOP_SIGN_BRAKING_DECELERATION_MPS2,
     STOP_SIGN_CONTROL_INTERVAL_MS,
     STOP_SIGN_GO_DISTANCE_M,
     STOP_SIGN_STOP_POSITION_TOLERANCE_M,
@@ -331,6 +332,7 @@ export class StopSignRunner {
                     remainingDistanceM: remainingStopDistanceM,
                     measuredSpeedMps: speedMps,
                     targetSpeedMps: job.targetSpeedMps,
+                    brakingDecelerationMps2: job.brakingDecelerationMps2,
                     previousDesiredSpeedMps,
                     dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
                 });
@@ -355,6 +357,8 @@ export class StopSignRunner {
                 remainingDistanceM: Math.max(0, -trackingError.longitudinalM),
                 measuredSpeedMps: speedMps,
                 targetSpeedMps: job.targetSpeedMps,
+                brakingDecelerationMps2: job.brakingDecelerationMps2,
+                releaseAccelerationMps2: job.releaseAccelerationMps2,
                 previousDesiredSpeedMps,
                 dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
                 lateralErrorM: trackingError.lateralM,
@@ -437,6 +441,7 @@ export class StopSignRunner {
                 remainingDistanceM: Math.max(0, -error.longitudinalM),
                 measuredSpeedMps: speedMps,
                 targetSpeedMps: 8,
+                brakingDecelerationMps2: STOP_SIGN_BRAKING_DECELERATION_MPS2,
                 previousDesiredSpeedMps: speedMps,
                 dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
             });
@@ -596,6 +601,8 @@ function buildGoal(job: StopSignJob, routeWaypoint: StopSignRouteWaypoint, attem
         routeWaypointForwardM: routeWaypoint.forwardM,
         routeWaypointLateralM: routeWaypoint.lateralM,
         targetSpeedMps: job.targetSpeedMps,
+        brakingDecelerationMps2: job.brakingDecelerationMps2,
+        releaseAccelerationMps2: job.releaseAccelerationMps2,
         stopConfirmationMs: job.stopConfirmationMs,
         attemptIndex,
         attemptCount: job.attemptCount,

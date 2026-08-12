@@ -17,36 +17,43 @@ const (
 	MaximumAutoVariants = 100
 	MinimumAutoVariants = 2
 
-	DefaultStopDistanceM      = 3.0
-	DefaultEgoCenterOffsetM   = 2.5
-	DefaultStartDistanceM     = 40.0
-	DefaultExitDistanceM      = 8.0
-	DefaultTargetSpeedMPS     = 10.0
-	DefaultStopConfirmationMS = 250
-	DefaultAttemptCount       = 1
-	DefaultWeather            = "EXTRASUNNY"
-	DefaultHour               = 12
-	DefaultMinute             = 0
+	DefaultStopDistanceM           = 3.0
+	DefaultEgoCenterOffsetM        = 2.5
+	DefaultStartDistanceM          = 40.0
+	DefaultExitDistanceM           = 8.0
+	DefaultTargetSpeedMPS          = 10.0
+	DefaultBrakingDecelerationMPS2 = 3.8
+	DefaultReleaseAccelerationMPS2 = 3.5
+	DefaultStopConfirmationMS      = 250
+	DefaultAttemptCount            = 1
+	DefaultWeather                 = "EXTRASUNNY"
+	DefaultHour                    = 12
+	DefaultMinute                  = 0
 
-	minimumStopDistanceM      = 0.5
-	maximumStopDistanceM      = 15.0
-	minimumEgoCenterOffsetM   = 0.5
-	maximumEgoCenterOffsetM   = 8.0
-	minimumStartDistanceM     = 5.0
-	maximumStartDistanceM     = 250.0
-	minimumExitDistanceM      = 2.0
-	maximumExitDistanceM      = 50.0
-	minimumTargetSpeedMPS     = 0.5
-	minimumAutoTargetSpeedMPS = 10.0
-	maximumTargetSpeedMPS     = 15.0
-	minimumStopConfirmationMS = 100
-	maximumStopConfirmationMS = 1_000
-	maximumMotionVariancePct  = 25.0
-	minimumCapturedStartM     = 16.0
-	minimumCapturedExitM      = 8.0
-	launchAccelerationMPS2    = 3.5
-	brakingDecelerationMPS2   = 3.8
-	minimumRollingCruiseS     = 1.25
+	minimumStopDistanceM               = 0.5
+	maximumStopDistanceM               = 15.0
+	minimumEgoCenterOffsetM            = 0.5
+	maximumEgoCenterOffsetM            = 8.0
+	minimumStartDistanceM              = 5.0
+	maximumStartDistanceM              = 250.0
+	minimumExitDistanceM               = 2.0
+	maximumExitDistanceM               = 50.0
+	minimumTargetSpeedMPS              = 0.5
+	minimumAutoTargetSpeedMPS          = 10.0
+	maximumTargetSpeedMPS              = 15.0
+	minimumStopConfirmationMS          = 100
+	maximumStopConfirmationMS          = 1_000
+	maximumMotionVariancePct           = 25.0
+	minimumCapturedStartM              = 16.0
+	minimumCapturedExitM               = 8.0
+	launchAccelerationMPS2             = 3.5
+	minimumBrakingDecelerationMPS2     = 3.5
+	maximumBrakingDecelerationMPS2     = 4.2
+	maximumAutoBrakingDecelerationMPS2 = 4.05
+	minimumReleaseAccelerationMPS2     = 3.0
+	maximumReleaseAccelerationMPS2     = 5.0
+	maximumAutoReleaseAccelerationMPS2 = 4.2
+	minimumRollingCruiseS              = 1.25
 )
 
 var (
@@ -96,17 +103,19 @@ type VehicleVariant struct {
 // Variation overrides collection conditions for one sign. Geometry remains
 // sign-relative so every job has one unambiguous stop line and approach.
 type Variation struct {
-	ID                 string          `json:"id"`
-	StopDistanceM      *float64        `json:"stopDistanceM,omitempty"`
-	EgoCenterOffsetM   *float64        `json:"egoCenterOffsetM,omitempty"`
-	StartDistanceM     *float64        `json:"startDistanceM,omitempty"`
-	ExitDistanceM      *float64        `json:"exitDistanceM,omitempty"`
-	TargetSpeedMPS     *float64        `json:"targetSpeedMps,omitempty"`
-	StopConfirmationMS *int            `json:"stopConfirmationMs,omitempty"`
-	AttemptCount       *int            `json:"attemptCount,omitempty"`
-	Weather            *string         `json:"weather,omitempty"`
-	Time               *TimeOfDay      `json:"time,omitempty"`
-	Vehicle            *VehicleVariant `json:"vehicle,omitempty"`
+	ID                      string          `json:"id"`
+	StopDistanceM           *float64        `json:"stopDistanceM,omitempty"`
+	EgoCenterOffsetM        *float64        `json:"egoCenterOffsetM,omitempty"`
+	StartDistanceM          *float64        `json:"startDistanceM,omitempty"`
+	ExitDistanceM           *float64        `json:"exitDistanceM,omitempty"`
+	TargetSpeedMPS          *float64        `json:"targetSpeedMps,omitempty"`
+	BrakingDecelerationMPS2 *float64        `json:"brakingDecelerationMps2,omitempty"`
+	ReleaseAccelerationMPS2 *float64        `json:"releaseAccelerationMps2,omitempty"`
+	StopConfirmationMS      *int            `json:"stopConfirmationMs,omitempty"`
+	AttemptCount            *int            `json:"attemptCount,omitempty"`
+	Weather                 *string         `json:"weather,omitempty"`
+	Time                    *TimeOfDay      `json:"time,omitempty"`
+	Vehicle                 *VehicleVariant `json:"vehicle,omitempty"`
 }
 
 // AutoVariationSpec expands one captured scene into deterministic collection
@@ -122,25 +131,27 @@ type AutoVariationSpec struct {
 // Entry defines one ordered stop sign plus optional base collection settings.
 // Missing settings use the package defaults exported above.
 type Entry struct {
-	ID                 string             `json:"id"`
-	SignPose           Pose               `json:"signPose"`
-	CatalogID          string             `json:"catalogId,omitempty"`
-	CatalogPosition    *WorldPosition     `json:"catalogPosition,omitempty"`
-	StartPose          *Pose              `json:"startPose,omitempty"`
-	EgoStopPose        *Pose              `json:"egoStopPose,omitempty"`
-	ExitPose           *Pose              `json:"exitPose,omitempty"`
-	AutoVariations     *AutoVariationSpec `json:"autoVariations,omitempty"`
-	StopDistanceM      *float64           `json:"stopDistanceM,omitempty"`
-	EgoCenterOffsetM   *float64           `json:"egoCenterOffsetM,omitempty"`
-	StartDistanceM     *float64           `json:"startDistanceM,omitempty"`
-	ExitDistanceM      *float64           `json:"exitDistanceM,omitempty"`
-	TargetSpeedMPS     *float64           `json:"targetSpeedMps,omitempty"`
-	StopConfirmationMS *int               `json:"stopConfirmationMs,omitempty"`
-	AttemptCount       *int               `json:"attemptCount,omitempty"`
-	Weather            *string            `json:"weather,omitempty"`
-	Time               *TimeOfDay         `json:"time,omitempty"`
-	Vehicle            *VehicleVariant    `json:"vehicle,omitempty"`
-	Variations         []Variation        `json:"variations,omitempty"`
+	ID                      string             `json:"id"`
+	SignPose                Pose               `json:"signPose"`
+	CatalogID               string             `json:"catalogId,omitempty"`
+	CatalogPosition         *WorldPosition     `json:"catalogPosition,omitempty"`
+	StartPose               *Pose              `json:"startPose,omitempty"`
+	EgoStopPose             *Pose              `json:"egoStopPose,omitempty"`
+	ExitPose                *Pose              `json:"exitPose,omitempty"`
+	AutoVariations          *AutoVariationSpec `json:"autoVariations,omitempty"`
+	StopDistanceM           *float64           `json:"stopDistanceM,omitempty"`
+	EgoCenterOffsetM        *float64           `json:"egoCenterOffsetM,omitempty"`
+	StartDistanceM          *float64           `json:"startDistanceM,omitempty"`
+	ExitDistanceM           *float64           `json:"exitDistanceM,omitempty"`
+	TargetSpeedMPS          *float64           `json:"targetSpeedMps,omitempty"`
+	BrakingDecelerationMPS2 *float64           `json:"brakingDecelerationMps2,omitempty"`
+	ReleaseAccelerationMPS2 *float64           `json:"releaseAccelerationMps2,omitempty"`
+	StopConfirmationMS      *int               `json:"stopConfirmationMs,omitempty"`
+	AttemptCount            *int               `json:"attemptCount,omitempty"`
+	Weather                 *string            `json:"weather,omitempty"`
+	Time                    *TimeOfDay         `json:"time,omitempty"`
+	Vehicle                 *VehicleVariant    `json:"vehicle,omitempty"`
+	Variations              []Variation        `json:"variations,omitempty"`
 }
 
 type Plan struct {
@@ -152,41 +163,45 @@ type Plan struct {
 // Job is a fully explicit collection unit. Catalog scenes preserve the three
 // operator-captured poses; compatibility scenes remain sign-relative.
 type Job struct {
-	ID                 string           `json:"id"`
-	EntryID            string           `json:"entryId"`
-	VariationID        string           `json:"variationId"`
-	CatalogID          string           `json:"catalogId,omitempty"`
-	CatalogPosition    *WorldPosition   `json:"catalogPosition,omitempty"`
-	SignPose           Pose             `json:"signPose"`
-	StopLinePose       Pose             `json:"stopLinePose"`
-	EgoStopPose        Pose             `json:"egoStopPose"`
-	StartPose          Pose             `json:"startPose"`
-	ExitPose           Pose             `json:"exitPose"`
-	StopDistanceM      float64          `json:"stopDistanceM"`
-	EgoCenterOffsetM   float64          `json:"egoCenterOffsetM"`
-	StartDistanceM     float64          `json:"startDistanceM"`
-	ExitDistanceM      float64          `json:"exitDistanceM"`
-	TargetSpeedMPS     float64          `json:"targetSpeedMps"`
-	StopConfirmationMS int              `json:"stopConfirmationMs"`
-	AttemptCount       int              `json:"attemptCount"`
-	Weather            string           `json:"weather"`
-	Time               TimeOfDay        `json:"time"`
-	Vehicle            VehicleVariant   `json:"vehicle"`
-	Seed               string           `json:"seed"`
-	VariationProfile   VariationProfile `json:"variationProfile"`
+	ID                      string           `json:"id"`
+	EntryID                 string           `json:"entryId"`
+	VariationID             string           `json:"variationId"`
+	CatalogID               string           `json:"catalogId,omitempty"`
+	CatalogPosition         *WorldPosition   `json:"catalogPosition,omitempty"`
+	SignPose                Pose             `json:"signPose"`
+	StopLinePose            Pose             `json:"stopLinePose"`
+	EgoStopPose             Pose             `json:"egoStopPose"`
+	StartPose               Pose             `json:"startPose"`
+	ExitPose                Pose             `json:"exitPose"`
+	StopDistanceM           float64          `json:"stopDistanceM"`
+	EgoCenterOffsetM        float64          `json:"egoCenterOffsetM"`
+	StartDistanceM          float64          `json:"startDistanceM"`
+	ExitDistanceM           float64          `json:"exitDistanceM"`
+	TargetSpeedMPS          float64          `json:"targetSpeedMps"`
+	BrakingDecelerationMPS2 float64          `json:"brakingDecelerationMps2"`
+	ReleaseAccelerationMPS2 float64          `json:"releaseAccelerationMps2"`
+	StopConfirmationMS      int              `json:"stopConfirmationMs"`
+	AttemptCount            int              `json:"attemptCount"`
+	Weather                 string           `json:"weather"`
+	Time                    TimeOfDay        `json:"time"`
+	Vehicle                 VehicleVariant   `json:"vehicle"`
+	Seed                    string           `json:"seed"`
+	VariationProfile        VariationProfile `json:"variationProfile"`
 }
 
 type settings struct {
-	stopDistanceM      float64
-	egoCenterOffsetM   float64
-	startDistanceM     float64
-	exitDistanceM      float64
-	targetSpeedMPS     float64
-	stopConfirmationMS int
-	attemptCount       int
-	weather            string
-	time               TimeOfDay
-	vehicle            VehicleVariant
+	stopDistanceM           float64
+	egoCenterOffsetM        float64
+	startDistanceM          float64
+	exitDistanceM           float64
+	targetSpeedMPS          float64
+	brakingDecelerationMPS2 float64
+	releaseAccelerationMPS2 float64
+	stopConfirmationMS      int
+	attemptCount            int
+	weather                 string
+	time                    TimeOfDay
+	vehicle                 VehicleVariant
 }
 
 // Expand validates a plan and emits jobs in entry order, then variation order.
@@ -285,25 +300,27 @@ func Expand(plan Plan) ([]Job, error) {
 			}
 			jobIDs[jobID] = struct{}{}
 			jobs = append(jobs, Job{
-				ID:                 jobID,
-				EntryID:            entryID,
-				VariationID:        variationID,
-				SignPose:           entry.SignPose,
-				StopLinePose:       stopLinePose,
-				EgoStopPose:        egoStopPose,
-				StartPose:          startPose,
-				ExitPose:           exitPose,
-				StopDistanceM:      resolved.stopDistanceM,
-				EgoCenterOffsetM:   resolved.egoCenterOffsetM,
-				StartDistanceM:     resolved.startDistanceM,
-				ExitDistanceM:      resolved.exitDistanceM,
-				TargetSpeedMPS:     resolved.targetSpeedMPS,
-				StopConfirmationMS: resolved.stopConfirmationMS,
-				AttemptCount:       resolved.attemptCount,
-				Weather:            resolved.weather,
-				Time:               resolved.time,
-				Vehicle:            resolved.vehicle,
-				Seed:               seed + ":" + jobID,
+				ID:                      jobID,
+				EntryID:                 entryID,
+				VariationID:             variationID,
+				SignPose:                entry.SignPose,
+				StopLinePose:            stopLinePose,
+				EgoStopPose:             egoStopPose,
+				StartPose:               startPose,
+				ExitPose:                exitPose,
+				StopDistanceM:           resolved.stopDistanceM,
+				EgoCenterOffsetM:        resolved.egoCenterOffsetM,
+				StartDistanceM:          resolved.startDistanceM,
+				ExitDistanceM:           resolved.exitDistanceM,
+				TargetSpeedMPS:          resolved.targetSpeedMPS,
+				BrakingDecelerationMPS2: resolved.brakingDecelerationMPS2,
+				ReleaseAccelerationMPS2: resolved.releaseAccelerationMPS2,
+				StopConfirmationMS:      resolved.stopConfirmationMS,
+				AttemptCount:            resolved.attemptCount,
+				Weather:                 resolved.weather,
+				Time:                    resolved.time,
+				Vehicle:                 resolved.vehicle,
+				Seed:                    seed + ":" + jobID,
 			})
 			if len(jobs) > MaximumExpandedJobs {
 				return nil, invalid("plan expands to more than %d jobs", MaximumExpandedJobs)
@@ -365,12 +382,20 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 	if base.targetSpeedMPS != minimumAutoTargetSpeedMPS {
 		return nil, invalid("%s.targetSpeedMps must equal %.1f for the automatic %.1f-%.1fm/s range", label, minimumAutoTargetSpeedMPS, minimumAutoTargetSpeedMPS, maximumTargetSpeedMPS)
 	}
+	if base.brakingDecelerationMPS2 != DefaultBrakingDecelerationMPS2 || base.releaseAccelerationMPS2 != DefaultReleaseAccelerationMPS2 {
+		return nil, invalid(
+			"%s automatic behavior variants require baseline brakingDecelerationMps2 %.2f and releaseAccelerationMps2 %.2f",
+			label,
+			DefaultBrakingDecelerationMPS2,
+			DefaultReleaseAccelerationMPS2,
+		)
+	}
 	jobs := make([]Job, 0, spec.Count)
 	for variantIndex := 0; variantIndex < spec.Count; variantIndex++ {
 		variationID := fmt.Sprintf("auto-%03d", variantIndex+1)
 		variantSeed := seed + ":" + entryID + ":" + variationID
 		baseline := variantIndex == 0
-		resolved := capturedVariantSettings(base, variantSeed, variantIndex)
+		resolved := capturedVariantSettings(base, variantSeed, variantIndex, spec.MotionVariancePct)
 		startPose, stopPose, exitPose := capturedVariantPoses(
 			variantSeed,
 			*entry.StartPose,
@@ -379,7 +404,13 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 			spec.MotionVariancePct,
 			baseline,
 		)
-		startDistanceM := coupledVariantStartDistanceM(baseStartDistanceM, base.targetSpeedMPS, resolved.targetSpeedMPS)
+		startDistanceM := coupledVariantStartDistanceM(
+			baseStartDistanceM,
+			base.targetSpeedMPS,
+			base.brakingDecelerationMPS2,
+			resolved.targetSpeedMPS,
+			resolved.brakingDecelerationMPS2,
+		)
 		startPose = poseAtApproachDistance(startPose, stopPose, startDistanceM)
 		startDistanceM = planarDistance(startPose, stopPose)
 		exitDistanceM := planarDistance(stopPose, exitPose)
@@ -388,7 +419,7 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		if err := validateSettings(resolved, label+"."+variationID); err != nil {
 			return nil, err
 		}
-		if err := validateRollingApproachDistance(label+"."+variationID, startDistanceM, resolved.targetSpeedMPS); err != nil {
+		if err := validateRollingApproachDistance(label+"."+variationID, startDistanceM, resolved.targetSpeedMPS, resolved.brakingDecelerationMPS2); err != nil {
 			return nil, err
 		}
 		if err := validateCapturedRoute(label+"."+variationID, startPose, stopPose, exitPose); err != nil {
@@ -398,35 +429,37 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		signPose := poseAhead(stopLinePose, resolved.stopDistanceM)
 		catalogPosition := *entry.CatalogPosition
 		jobs = append(jobs, Job{
-			ID:                 entryID + ":" + variationID,
-			EntryID:            entryID,
-			VariationID:        variationID,
-			CatalogID:          catalogID,
-			CatalogPosition:    &catalogPosition,
-			SignPose:           signPose,
-			StopLinePose:       stopLinePose,
-			EgoStopPose:        stopPose,
-			StartPose:          startPose,
-			ExitPose:           exitPose,
-			StopDistanceM:      resolved.stopDistanceM,
-			EgoCenterOffsetM:   resolved.egoCenterOffsetM,
-			StartDistanceM:     startDistanceM,
-			ExitDistanceM:      exitDistanceM,
-			TargetSpeedMPS:     resolved.targetSpeedMPS,
-			StopConfirmationMS: resolved.stopConfirmationMS,
-			AttemptCount:       resolved.attemptCount,
-			Weather:            resolved.weather,
-			Time:               resolved.time,
-			Vehicle:            cloneVehicle(resolved.vehicle),
-			Seed:               variantSeed,
+			ID:                      entryID + ":" + variationID,
+			EntryID:                 entryID,
+			VariationID:             variationID,
+			CatalogID:               catalogID,
+			CatalogPosition:         &catalogPosition,
+			SignPose:                signPose,
+			StopLinePose:            stopLinePose,
+			EgoStopPose:             stopPose,
+			StartPose:               startPose,
+			ExitPose:                exitPose,
+			StopDistanceM:           resolved.stopDistanceM,
+			EgoCenterOffsetM:        resolved.egoCenterOffsetM,
+			StartDistanceM:          startDistanceM,
+			ExitDistanceM:           exitDistanceM,
+			TargetSpeedMPS:          resolved.targetSpeedMPS,
+			BrakingDecelerationMPS2: resolved.brakingDecelerationMPS2,
+			ReleaseAccelerationMPS2: resolved.releaseAccelerationMPS2,
+			StopConfirmationMS:      resolved.stopConfirmationMS,
+			AttemptCount:            resolved.attemptCount,
+			Weather:                 resolved.weather,
+			Time:                    resolved.time,
+			Vehicle:                 cloneVehicle(resolved.vehicle),
+			Seed:                    variantSeed,
 		})
 	}
 	applyVariationProfiles(jobs, spec.MotionVariancePct)
 	return jobs, nil
 }
 
-func validateRollingApproachDistance(label string, startDistanceM, targetSpeedMPS float64) error {
-	requiredDistanceM := requiredRollingStartDistanceM(targetSpeedMPS)
+func validateRollingApproachDistance(label string, startDistanceM, targetSpeedMPS, brakingDecelerationMPS2 float64) error {
+	requiredDistanceM := requiredRollingStartDistanceM(targetSpeedMPS, brakingDecelerationMPS2)
 	if startDistanceM+1e-6 < requiredDistanceM {
 		return invalid(
 			"%s.startPose must be at least %.1fm before egoStopPose to reach %.1fm/s (%.1fmph) and record stable cruise",
@@ -439,16 +472,19 @@ func validateRollingApproachDistance(label string, startDistanceM, targetSpeedMP
 	return nil
 }
 
-func requiredRollingStartDistanceM(targetSpeedMPS float64) float64 {
+func requiredRollingStartDistanceM(targetSpeedMPS, brakingDecelerationMPS2 float64) float64 {
 	accelerationDistanceM := targetSpeedMPS * targetSpeedMPS / (2 * launchAccelerationMPS2)
 	cruiseDistanceM := targetSpeedMPS * minimumRollingCruiseS
 	brakingDistanceM := targetSpeedMPS * targetSpeedMPS / (2 * brakingDecelerationMPS2)
 	return accelerationDistanceM + cruiseDistanceM + brakingDistanceM
 }
 
-func coupledVariantStartDistanceM(baseStartDistanceM, baseTargetSpeedMPS, targetSpeedMPS float64) float64 {
-	capturedCruiseBufferM := math.Max(0, baseStartDistanceM-requiredRollingStartDistanceM(baseTargetSpeedMPS))
-	targetDistanceM := requiredRollingStartDistanceM(targetSpeedMPS) + capturedCruiseBufferM
+func coupledVariantStartDistanceM(
+	baseStartDistanceM, baseTargetSpeedMPS, baseBrakingDecelerationMPS2,
+	targetSpeedMPS, targetBrakingDecelerationMPS2 float64,
+) float64 {
+	capturedCruiseBufferM := math.Max(0, baseStartDistanceM-requiredRollingStartDistanceM(baseTargetSpeedMPS, baseBrakingDecelerationMPS2))
+	targetDistanceM := requiredRollingStartDistanceM(targetSpeedMPS, targetBrakingDecelerationMPS2) + capturedCruiseBufferM
 	return math.Min(maximumStartDistanceM, math.Max(minimumCapturedStartM, targetDistanceM))
 }
 
@@ -478,15 +514,20 @@ func capturedVariantPoses(seed string, start, stop, exit Pose, variancePct float
 	return start, stop, exit
 }
 
-func capturedVariantSettings(base settings, seed string, jobIndex int) settings {
+func capturedVariantSettings(base settings, seed string, jobIndex int, motionVariancePct float64) settings {
 	resolved := cloneSettings(base)
 	if jobIndex == 0 {
 		return resolved
 	}
+	strength := motionVariancePct / maximumMotionVariancePct
 	resolved.targetSpeedMPS = maximumTargetSpeedMPS
 	if jobIndex > 1 {
 		resolved.targetSpeedMPS = base.targetSpeedMPS + variantUnit(seed, "target-speed")*(maximumTargetSpeedMPS-base.targetSpeedMPS)
 	}
+	resolved.brakingDecelerationMPS2 = base.brakingDecelerationMPS2 +
+		variantUnit(seed, "braking-deceleration")*(maximumAutoBrakingDecelerationMPS2-base.brakingDecelerationMPS2)*strength
+	resolved.releaseAccelerationMPS2 = base.releaseAccelerationMPS2 +
+		variantUnit(seed, "release-acceleration")*(maximumAutoReleaseAccelerationMPS2-base.releaseAccelerationMPS2)*strength
 	weatherPool := []string{"CLEAR", "EXTRASUNNY", "CLOUDS", "OVERCAST", "RAIN", "FOGGY", "SMOG", "THUNDER"}
 	resolved.weather = weatherPool[variantIndex(seed, "weather", len(weatherPool))]
 	resolved.time = TimeOfDay{
@@ -638,16 +679,18 @@ func ValidateExpandedJob(job Job) error {
 		return err
 	}
 	resolved := settings{
-		stopDistanceM:      job.StopDistanceM,
-		egoCenterOffsetM:   job.EgoCenterOffsetM,
-		startDistanceM:     job.StartDistanceM,
-		exitDistanceM:      job.ExitDistanceM,
-		targetSpeedMPS:     job.TargetSpeedMPS,
-		stopConfirmationMS: job.StopConfirmationMS,
-		attemptCount:       job.AttemptCount,
-		weather:            job.Weather,
-		time:               job.Time,
-		vehicle:            cloneVehicle(job.Vehicle),
+		stopDistanceM:           job.StopDistanceM,
+		egoCenterOffsetM:        job.EgoCenterOffsetM,
+		startDistanceM:          job.StartDistanceM,
+		exitDistanceM:           job.ExitDistanceM,
+		targetSpeedMPS:          job.TargetSpeedMPS,
+		brakingDecelerationMPS2: job.BrakingDecelerationMPS2,
+		releaseAccelerationMPS2: job.ReleaseAccelerationMPS2,
+		stopConfirmationMS:      job.StopConfirmationMS,
+		attemptCount:            job.AttemptCount,
+		weather:                 job.Weather,
+		time:                    job.Time,
+		vehicle:                 cloneVehicle(job.Vehicle),
 	}
 	if err := validateSettings(resolved, "expanded job"); err != nil {
 		return err
@@ -671,7 +714,7 @@ func ValidateExpandedJob(job Job) error {
 		if err := validateCapturedRoute("expanded job", job.StartPose, job.EgoStopPose, job.ExitPose); err != nil {
 			return err
 		}
-		if err := validateRollingApproachDistance("expanded job", job.StartDistanceM, job.TargetSpeedMPS); err != nil {
+		if err := validateRollingApproachDistance("expanded job", job.StartDistanceM, job.TargetSpeedMPS, job.BrakingDecelerationMPS2); err != nil {
 			return err
 		}
 		expectedStopLine := poseAhead(job.EgoStopPose, job.EgoCenterOffsetM)
@@ -709,15 +752,17 @@ func ValidateExpandedJob(job Job) error {
 
 func defaultSettings() settings {
 	return settings{
-		stopDistanceM:      DefaultStopDistanceM,
-		egoCenterOffsetM:   DefaultEgoCenterOffsetM,
-		startDistanceM:     DefaultStartDistanceM,
-		exitDistanceM:      DefaultExitDistanceM,
-		targetSpeedMPS:     DefaultTargetSpeedMPS,
-		stopConfirmationMS: DefaultStopConfirmationMS,
-		attemptCount:       DefaultAttemptCount,
-		weather:            DefaultWeather,
-		time:               TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute},
+		stopDistanceM:           DefaultStopDistanceM,
+		egoCenterOffsetM:        DefaultEgoCenterOffsetM,
+		startDistanceM:          DefaultStartDistanceM,
+		exitDistanceM:           DefaultExitDistanceM,
+		targetSpeedMPS:          DefaultTargetSpeedMPS,
+		brakingDecelerationMPS2: DefaultBrakingDecelerationMPS2,
+		releaseAccelerationMPS2: DefaultReleaseAccelerationMPS2,
+		stopConfirmationMS:      DefaultStopConfirmationMS,
+		attemptCount:            DefaultAttemptCount,
+		weather:                 DefaultWeather,
+		time:                    TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute},
 	}
 }
 
@@ -729,17 +774,20 @@ func cloneSettings(source settings) settings {
 
 func applyEntrySettings(destination *settings, entry Entry, label string) error {
 	return applySettings(destination, entry.StopDistanceM, entry.EgoCenterOffsetM, entry.StartDistanceM, entry.ExitDistanceM, entry.TargetSpeedMPS,
+		entry.BrakingDecelerationMPS2, entry.ReleaseAccelerationMPS2,
 		entry.StopConfirmationMS, entry.AttemptCount, entry.Weather, entry.Time, entry.Vehicle, label)
 }
 
 func applyVariationSettings(destination *settings, variation Variation, label string) error {
 	return applySettings(destination, variation.StopDistanceM, variation.EgoCenterOffsetM, variation.StartDistanceM, variation.ExitDistanceM, variation.TargetSpeedMPS,
+		variation.BrakingDecelerationMPS2, variation.ReleaseAccelerationMPS2,
 		variation.StopConfirmationMS, variation.AttemptCount, variation.Weather, variation.Time, variation.Vehicle, label)
 }
 
 func applySettings(
 	destination *settings,
 	stopDistanceM, egoCenterOffsetM, startDistanceM, exitDistanceM, targetSpeedMPS *float64,
+	brakingDecelerationMPS2, releaseAccelerationMPS2 *float64,
 	stopConfirmationMS, attemptCount *int,
 	weather *string,
 	timeOfDay *TimeOfDay,
@@ -760,6 +808,12 @@ func applySettings(
 	}
 	if targetSpeedMPS != nil {
 		destination.targetSpeedMPS = *targetSpeedMPS
+	}
+	if brakingDecelerationMPS2 != nil {
+		destination.brakingDecelerationMPS2 = *brakingDecelerationMPS2
+	}
+	if releaseAccelerationMPS2 != nil {
+		destination.releaseAccelerationMPS2 = *releaseAccelerationMPS2
 	}
 	if stopConfirmationMS != nil {
 		destination.stopConfirmationMS = *stopConfirmationMS
@@ -793,6 +847,12 @@ func validateSettings(value settings, label string) error {
 		return err
 	}
 	if err := validateRange(label+".targetSpeedMps", value.targetSpeedMPS, minimumTargetSpeedMPS, maximumTargetSpeedMPS); err != nil {
+		return err
+	}
+	if err := validateRange(label+".brakingDecelerationMps2", value.brakingDecelerationMPS2, minimumBrakingDecelerationMPS2, maximumBrakingDecelerationMPS2); err != nil {
+		return err
+	}
+	if err := validateRange(label+".releaseAccelerationMps2", value.releaseAccelerationMPS2, minimumReleaseAccelerationMPS2, maximumReleaseAccelerationMPS2); err != nil {
 		return err
 	}
 	if value.stopConfirmationMS < minimumStopConfirmationMS || value.stopConfirmationMS > maximumStopConfirmationMS {

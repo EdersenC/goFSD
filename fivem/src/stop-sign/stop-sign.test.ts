@@ -38,7 +38,7 @@ function testGeometryUsesGtaHeadingConvention() {
 }
 
 function testPhaseClassificationIsTemporalButNotSequenceDependent() {
-    const common = {targetSpeedMps: 8, dtSeconds: 0.05};
+    const common = {targetSpeedMps: 8, brakingDecelerationMps2: 3.8, dtSeconds: 0.05};
     assert.equal(classifyStopSignPhase({
         ...common,
         remainingDistanceM: 30,
@@ -61,6 +61,7 @@ function testPhaseClassificationIsTemporalButNotSequenceDependent() {
     const command = planStopSignExpert({
         ...brakingInput,
         phase,
+        releaseAccelerationMps2: 3.5,
         lateralErrorM: 0,
         headingErrorDeg: 0,
     });
@@ -75,6 +76,8 @@ function testApproachTransitionsFromThrottleToBrake() {
         remainingDistanceM: 30,
         measuredSpeedMps: 1,
         targetSpeedMps: 8,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 1,
         dtSeconds: 0.05,
         lateralErrorM: 0,
@@ -85,6 +88,8 @@ function testApproachTransitionsFromThrottleToBrake() {
         remainingDistanceM: 0.8,
         measuredSpeedMps: 5,
         targetSpeedMps: 8,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 5,
         dtSeconds: 0.05,
         lateralErrorM: 0,
@@ -100,6 +105,8 @@ function testStopAndGoLabelsAreExplicit() {
         remainingDistanceM: 0,
         measuredSpeedMps: 0,
         targetSpeedMps: 7,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 0,
         dtSeconds: 0.05,
         lateralErrorM: 0,
@@ -111,6 +118,34 @@ function testStopAndGoLabelsAreExplicit() {
     assert.equal(stop.stopProbability, 1);
     assert.equal(go.goProbability, 1);
     assert(go.throttle > 0);
+}
+
+function testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile() {
+    const brakingCommon = {
+        remainingDistanceM: 8.1,
+        measuredSpeedMps: 8,
+        targetSpeedMps: 8,
+        previousDesiredSpeedMps: 8,
+        dtSeconds: 0.05,
+    };
+    assert.equal(classifyStopSignPhase({...brakingCommon, brakingDecelerationMps2: 3.8}), "decelerate");
+    assert.equal(classifyStopSignPhase({...brakingCommon, brakingDecelerationMps2: 4.05}), "cruise_approach");
+
+    const releaseCommon = {
+        phase: "release" as const,
+        remainingDistanceM: 8,
+        measuredSpeedMps: 0,
+        targetSpeedMps: 8,
+        previousDesiredSpeedMps: 0,
+        brakingDecelerationMps2: 3.8,
+        dtSeconds: 0.05,
+        lateralErrorM: 0,
+        headingErrorDeg: 0,
+    };
+    const standard = planStopSignExpert({...releaseCommon, releaseAccelerationMps2: 3.5});
+    const faster = planStopSignExpert({...releaseCommon, releaseAccelerationMps2: 4.2});
+    assert(faster.desiredSpeedMps > standard.desiredSpeedMps);
+    assert(faster.throttle > standard.throttle);
 }
 
 function testEarlyStopScoringWaitsForActualDeparture() {
@@ -208,6 +243,8 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         startDistanceM,
         exitDistanceM,
         targetSpeedMps: 15,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
         stopConfirmationMs: 250,
         attemptCount: 2,
         weather: "EXTRASUNNY",
@@ -218,7 +255,11 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     };
     assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
     assert.equal(parseStopSignJobs([job])[0]?.targetSpeedMps, 15);
+    assert.equal(parseStopSignJobs([job])[0]?.brakingDecelerationMps2, 3.8);
+    assert.equal(parseStopSignJobs([job])[0]?.releaseAccelerationMps2, 3.5);
     assert.throws(() => parseStopSignJobs([{...job, targetSpeedMps: 15.01}]), /targetSpeedMps/);
+    assert.throws(() => parseStopSignJobs([{...job, brakingDecelerationMps2: 4.21}]), /brakingDecelerationMps2/);
+    assert.throws(() => parseStopSignJobs([{...job, releaseAccelerationMps2: 5.01}]), /releaseAccelerationMps2/);
     assert.throws(
         () => parseStopSignJobs([{...job, signPose: {x: 0, y: 0, z: 0, heading: 0}}]),
         /uncalibrated origin placeholder/,
@@ -292,6 +333,8 @@ function capturedSceneJobFixture() {
         startDistanceM: 20,
         exitDistanceM: 12,
         targetSpeedMps: 5,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
         stopConfirmationMs: 250,
         attemptCount: 1,
         weather: "EXTRASUNNY",
@@ -304,7 +347,7 @@ function capturedSceneJobFixture() {
 
 function baselineVariationProfile(configuredMotionVariancePct = 0) {
     return {
-        contract: "stop-sign-variation-profile.v1",
+        contract: "stop-sign-variation-profile.v2",
         baseline: true,
         configuredMotionVariancePct,
         changedDimensions: [],
@@ -312,6 +355,8 @@ function baselineVariationProfile(configuredMotionVariancePct = 0) {
         combinationMagnitudePct: 0,
         targetSpeedDeltaMps: 0,
         targetSpeedDeltaPct: 0,
+        brakingDecelerationDeltaMps2: 0,
+        releaseAccelerationDeltaMps2: 0,
         startDistanceDeltaM: 0,
         exitDistanceDeltaM: 0,
         stopOffsetM: 0,
@@ -331,6 +376,7 @@ testGeometryUsesGtaHeadingConvention();
 testPhaseClassificationIsTemporalButNotSequenceDependent();
 testApproachTransitionsFromThrottleToBrake();
 testStopAndGoLabelsAreExplicit();
+testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile();
 testEarlyStopScoringWaitsForActualDeparture();
 testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
 testAttemptPreflightRejectsUnsafeStarts();

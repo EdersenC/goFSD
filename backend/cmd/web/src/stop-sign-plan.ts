@@ -370,6 +370,8 @@ function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
             startDistanceM: variation.startDistanceM,
             exitDistanceM: variation.exitDistanceM,
             targetSpeedMps: variation.targetSpeedMps,
+            brakingDecelerationMps2: variation.brakingDecelerationMps2,
+            releaseAccelerationMps2: variation.releaseAccelerationMps2,
             stopConfirmationMs: variation.stopConfirmationMs,
             attemptCount: variation.attemptCount,
             weather: variation.weather,

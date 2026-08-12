@@ -78,7 +78,8 @@ func TestExpandUsesDocumentedDefaults(t *testing.T) {
 	}
 	job := jobs[0]
 	if job.StopDistanceM != DefaultStopDistanceM || job.EgoCenterOffsetM != DefaultEgoCenterOffsetM || job.StartDistanceM != DefaultStartDistanceM || job.ExitDistanceM != DefaultExitDistanceM ||
-		job.TargetSpeedMPS != DefaultTargetSpeedMPS || job.StopConfirmationMS != DefaultStopConfirmationMS ||
+		job.TargetSpeedMPS != DefaultTargetSpeedMPS || job.BrakingDecelerationMPS2 != DefaultBrakingDecelerationMPS2 ||
+		job.ReleaseAccelerationMPS2 != DefaultReleaseAccelerationMPS2 || job.StopConfirmationMS != DefaultStopConfirmationMS ||
 		job.AttemptCount != DefaultAttemptCount || job.Weather != DefaultWeather ||
 		job.Time != (TimeOfDay{Hour: DefaultHour, Minute: DefaultMinute}) {
 		t.Fatalf("unexpected defaults: %+v", job)
@@ -128,6 +129,9 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		baseline.VariationProfile.ChangeCount != 0 || baseline.VariationProfile.CombinationMagnitudePct != 0 {
 		t.Fatalf("baseline variation profile must be an explicit zero reference: %+v", baseline.VariationProfile)
 	}
+	if baseline.BrakingDecelerationMPS2 != DefaultBrakingDecelerationMPS2 || baseline.ReleaseAccelerationMPS2 != DefaultReleaseAccelerationMPS2 {
+		t.Fatalf("baseline must preserve the standard behavior profile: %+v", baseline)
+	}
 	minimumSpeedJob := baseline
 	maximumSpeedJob := baseline
 	maximumCombinationChanges := 0
@@ -141,8 +145,20 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		if job.TargetSpeedMPS < 10 || job.TargetSpeedMPS > 15 {
 			t.Fatalf("generated speed escaped automatic target range: %+v", job)
 		}
+		if job.BrakingDecelerationMPS2 < DefaultBrakingDecelerationMPS2 || job.BrakingDecelerationMPS2 > 4.0 {
+			t.Fatalf("generated braking change escaped the minimal 20%% bound: %+v", job)
+		}
+		if job.ReleaseAccelerationMPS2 < DefaultReleaseAccelerationMPS2 || job.ReleaseAccelerationMPS2 > 4.06 {
+			t.Fatalf("generated release acceleration escaped the 20%% bound: %+v", job)
+		}
 		if index > 0 {
-			wantStartDistanceM := coupledVariantStartDistanceM(40, 10, job.TargetSpeedMPS)
+			wantStartDistanceM := coupledVariantStartDistanceM(
+				40,
+				10,
+				DefaultBrakingDecelerationMPS2,
+				job.TargetSpeedMPS,
+				job.BrakingDecelerationMPS2,
+			)
 			if math.Abs(job.StartDistanceM-wantStartDistanceM) > 1e-6 {
 				t.Fatalf("generated start distance is not coupled to target speed: got=%.6f want=%.6f job=%+v", job.StartDistanceM, wantStartDistanceM, job)
 			}
@@ -168,11 +184,21 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		maximumSpeedJob.VariationProfile.StartDistanceDeltaM <= 40 || maximumSpeedJob.VariationProfile.CombinationMagnitudePct <= 0 {
 		t.Fatalf("maximum-speed combination did not measure its exact change from baseline: %+v", maximumSpeedJob.VariationProfile)
 	}
-	if maximumCombinationChanges < 8 {
+	if maximumCombinationChanges < 10 {
 		t.Fatalf("seeded jobs did not combine enough independent dimensions: max changed dimensions=%d", maximumCombinationChanges)
 	}
 	if first[1].Weather == baseline.Weather && first[1].Time == baseline.Time && reflect.DeepEqual(first[1].Vehicle.Color, baseline.Vehicle.Color) {
 		t.Fatalf("generated conditions did not vary: %+v", first[1])
+	}
+	if first[1].BrakingDecelerationMPS2 <= baseline.BrakingDecelerationMPS2 ||
+		first[1].ReleaseAccelerationMPS2 <= baseline.ReleaseAccelerationMPS2 {
+		t.Fatalf("generated behavior profile did not add bounded harder braking and faster release: %+v", first[1])
+	}
+	behaviorDimensions := strings.Join(first[1].VariationProfile.ChangedDimensions, ",")
+	if !strings.Contains(behaviorDimensions, "braking_deceleration") || !strings.Contains(behaviorDimensions, "release_acceleration") ||
+		math.Abs(first[1].VariationProfile.BrakingDecelerationDeltaMPS2-(first[1].BrakingDecelerationMPS2-baseline.BrakingDecelerationMPS2)) > 1e-6 ||
+		math.Abs(first[1].VariationProfile.ReleaseAccelerationDeltaMPS2-(first[1].ReleaseAccelerationMPS2-baseline.ReleaseAccelerationMPS2)) > 1e-6 {
+		t.Fatalf("variation profile did not audit exact behavior deltas: %+v", first[1].VariationProfile)
 	}
 
 	lowVariancePlan := plan
@@ -199,6 +225,10 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 			lowVarianceJobs[1].VariationProfile,
 			highVarianceJobs[1].VariationProfile,
 		)
+	}
+	if highVarianceJobs[1].BrakingDecelerationMPS2 <= lowVarianceJobs[1].BrakingDecelerationMPS2 ||
+		highVarianceJobs[1].ReleaseAccelerationMPS2 <= lowVarianceJobs[1].ReleaseAccelerationMPS2 {
+		t.Fatalf("behavior changes must scale with Motion variance: low=%+v high=%+v", lowVarianceJobs[1], highVarianceJobs[1])
 	}
 }
 
@@ -237,10 +267,10 @@ func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
 	if len(jobs) != 2 || jobs[0].TargetSpeedMPS != 10 || jobs[1].TargetSpeedMPS != 15 {
 		t.Fatalf("automatic variants did not guarantee range endpoints: %+v", jobs)
 	}
-	if jobs[1].StartDistanceM <= jobs[0].StartDistanceM || jobs[1].StartDistanceM < requiredRollingStartDistanceM(15) {
+	if jobs[1].StartDistanceM <= jobs[0].StartDistanceM || jobs[1].StartDistanceM < requiredRollingStartDistanceM(15, jobs[1].BrakingDecelerationMPS2) {
 		t.Fatalf("maximum-speed job did not move Start far enough back: %+v", jobs)
 	}
-	if jobs[0].StartDistanceM < requiredRollingStartDistanceM(10) {
+	if jobs[0].StartDistanceM < requiredRollingStartDistanceM(10, jobs[0].BrakingDecelerationMPS2) {
 		t.Fatalf("minimum-speed job did not extend the captured Start far enough back: %+v", jobs)
 	}
 	targetSpeed = 9
@@ -251,6 +281,11 @@ func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
 	plan.Entries[0].AutoVariations.Count = 1
 	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "between 2 and") {
 		t.Fatalf("automatic range needs at least two jobs to cover both endpoints: %v", err)
+	}
+	plan.Entries[0].AutoVariations.Count = 2
+	plan.Entries[0].BrakingDecelerationMPS2 = float64Ptr(4)
+	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "automatic behavior variants require baseline") {
+		t.Fatalf("automatic behavior range needs the canonical baseline: %v", err)
 	}
 }
 
@@ -324,6 +359,8 @@ func TestExpandRejectsInvalidPlans(t *testing.T) {
 		{name: "start distance", edit: func(plan *Plan) { plan.Entries[0].StartDistanceM = float64Ptr(251) }, want: "startDistanceM"},
 		{name: "exit distance", edit: func(plan *Plan) { plan.Entries[0].ExitDistanceM = float64Ptr(1) }, want: "exitDistanceM"},
 		{name: "target speed", edit: func(plan *Plan) { plan.Entries[0].TargetSpeedMPS = float64Ptr(41) }, want: "targetSpeedMps"},
+		{name: "braking deceleration", edit: func(plan *Plan) { plan.Entries[0].BrakingDecelerationMPS2 = float64Ptr(5) }, want: "brakingDecelerationMps2"},
+		{name: "release acceleration", edit: func(plan *Plan) { plan.Entries[0].ReleaseAccelerationMPS2 = float64Ptr(2) }, want: "releaseAccelerationMps2"},
 		{name: "stop confirmation", edit: func(plan *Plan) { plan.Entries[0].StopConfirmationMS = intPtr(50) }, want: "stopConfirmationMs"},
 		{name: "attempts", edit: func(plan *Plan) { plan.Entries[0].AttemptCount = intPtr(51) }, want: "attemptCount"},
 		{name: "weather", edit: func(plan *Plan) { plan.Entries[0].Weather = stringPtr("tornado") }, want: "weather"},

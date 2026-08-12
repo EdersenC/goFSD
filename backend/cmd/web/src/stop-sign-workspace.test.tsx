@@ -39,7 +39,7 @@ const editorMarkup = render(
         captureBusy={false}
     />,
 );
-for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded variants", "50 continuous runs", "Motion variance", "Every run is a combination", "exact deltas", "13 measured dimensions"]) {
+for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded variants", "50 continuous runs", "Motion + behavior variance", "Every run is a combination", "slightly harder braking", "faster release acceleration", "exact deltas", "15 measured dimensions"]) {
     assert(editorMarkup.includes(label), `plan editor missing ${label}`);
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
