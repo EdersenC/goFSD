@@ -4,6 +4,7 @@ import {
     currentSceneStep,
     isStopSignSceneCalibrated,
     migrateImplicitCatalogDrafts,
+    metersPerSecondToMph,
     parseStoredCollectionEntryIds,
     parseStoredStopSignPlan,
     planForEntries,
@@ -73,7 +74,8 @@ assertEqual(JSON.stringify(parseStoredCollectionEntryIds(JSON.stringify([secondL
 assertEqual(parseStoredCollectionEntryIds(JSON.stringify([secondLocation.id, 3])), null);
 assertThrows(() => planForEntries(twoScenePlan, []), "at least one");
 assertThrows(() => planForEntries(twoScenePlan, [location.id, location.id]), "duplicate");
-assert(requiredRollingStartDistanceM(15) > 125 && requiredRollingStartDistanceM(15) < 130);
+assert(requiredRollingStartDistanceM(15) > 80 && requiredRollingStartDistanceM(15) < 82);
+assert(metersPerSecondToMph(15) > 33.5 && metersPerSecondToMph(15) < 33.6);
 const highSpeedShort = {...plan, entries: [{...plan.entries[0]!, targetSpeedMps: 15}]};
 assert(validateStopSignPlan(highSpeedShort).some((error) => error.includes("record stable cruise")));
 const highSpeedLong = captureScenePose(highSpeedShort, 0, "startPose", {x: 0, y: -140, z: 30, heading: 0});

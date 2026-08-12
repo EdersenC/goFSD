@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-streamed-stop-sign-probe-v17";
+const CLIENT_BUILD_ID = "2026-08-11-calibrated-speed-profile-v18";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 

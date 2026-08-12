@@ -107,7 +107,7 @@ const control: ControlState = {
     pendingCommands: [],
 };
 const telemetryMarkup = render(<TelemetryPanel control={control} />);
-for (const value of ["FiveM linked", "approach_braking", "4.25m/s", "16.50m", "Attempt 2/10"]) {
+for (const value of ["FiveM linked", "approach_braking", "9.5 mph", "4.25 m/s", "16.50m", "Attempt 2/10"]) {
     assert(telemetryMarkup.includes(value), `telemetry panel missing ${value}`);
 }
 

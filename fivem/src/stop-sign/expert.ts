@@ -1,8 +1,9 @@
 import {StopSignBehaviorPhase, StopSignExpertSupervision} from "./types";
 
 export const STOP_SIGN_CONTROL_INTERVAL_MS = 50;
-export const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 2.4;
-export const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 1.8;
+// These are smooth collection motion targets, not GTA vehicle limits.
+export const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 3.8;
+export const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 3.5;
 export const STOP_SIGN_STOP_SPEED_MPS = 0.12;
 export const STOP_SIGN_STOP_POSITION_TOLERANCE_M = 0.65;
 export const STOP_SIGN_EARLY_STOP_DISTANCE_M = 3;

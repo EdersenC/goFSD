@@ -22,8 +22,10 @@ import {useMemo} from "react";
 import {
     currentSceneStep,
     createStopSignSeed,
+    formatSpeed,
     MAXIMUM_MOTION_VARIANCE_PCT,
     MAXIMUM_TARGET_SPEED_MPS,
+    metersPerSecondToMph,
     poseSummary,
     requiredRollingStartDistanceM,
     ScenePoseField,
@@ -231,7 +233,7 @@ export function PlanEditor({
                                     <Box sx={{px: .5}}>
                                         <Stack direction="row" sx={{justifyContent: "space-between", alignItems: "center"}}>
                                             <Typography variant="caption">Target speed</Typography>
-                                            <Chip size="small" color="primary" label={`${entry.targetSpeedMps.toFixed(1)} m/s · ${(entry.targetSpeedMps * 2.23694).toFixed(0)} mph`} />
+                                            <Chip size="small" color="primary" label={`${metersPerSecondToMph(entry.targetSpeedMps).toFixed(1)} mph · ${entry.targetSpeedMps.toFixed(1)} m/s`} />
                                         </Stack>
                                         <Slider
                                             aria-label="Target speed"
@@ -240,12 +242,13 @@ export function PlanEditor({
                                             step={.5}
                                             value={entry.targetSpeedMps}
                                             onChange={(_event, value) => updateEntry({...entry, targetSpeedMps: Number(value)})}
+                                            valueLabelFormat={(value) => `${metersPerSecondToMph(value).toFixed(1)} mph`}
                                             valueLabelDisplay="auto"
                                         />
                                     </Box>
                                 </Box>
                                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
-                                    For {entry.targetSpeedMps.toFixed(1)} m/s, Start needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m before Stop. Launch frames stay in the raw recording but training begins only after one stable cruise second. Stop confirmation remains brief.
+                                    For {formatSpeed(entry.targetSpeedMps)}, Start needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m before Stop. This is the smooth expert profile, not a GTA top-speed limit. Launch frames stay raw; training begins after one stable cruise second.
                                 </Typography>
                             </AccordionDetails>
                         </Accordion>

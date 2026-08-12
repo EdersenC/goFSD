@@ -165,7 +165,7 @@ func TestExpandCapturedSceneRejectsIncompleteOrBackwardsRoutes(t *testing.T) {
 }
 
 func TestExpandCapturedSceneRequiresRoomForStableRollingCaptureAtHighSpeed(t *testing.T) {
-	start := Pose{X: 0, Y: -100, Z: 30, Heading: 0}
+	start := Pose{X: 0, Y: -70, Z: 30, Heading: 0}
 	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
 	exit := Pose{X: 0, Y: 12, Z: 30, Heading: 0}
 	targetSpeed := 15.0
@@ -178,7 +178,7 @@ func TestExpandCapturedSceneRequiresRoomForStableRollingCaptureAtHighSpeed(t *te
 		t.Fatalf("short high-speed approach must be rejected with actionable guidance: %v", err)
 	}
 
-	start.Y = -140
+	start.Y = -90
 	jobs, err := Expand(plan)
 	if err != nil {
 		t.Fatalf("long high-speed approach should be accepted: %v", err)

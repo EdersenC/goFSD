@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-streamed-stop-sign-probe-v17";
+const SERVER_BUILD_ID = "2026-08-11-calibrated-speed-profile-v18";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 

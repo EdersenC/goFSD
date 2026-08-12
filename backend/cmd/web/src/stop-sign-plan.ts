@@ -13,8 +13,9 @@ export const DEFAULT_MOTION_VARIANCE_PCT = 20;
 export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
 export const MAXIMUM_TARGET_SPEED_MPS = 15;
 export const MINIMUM_ROLLING_CRUISE_SECONDS = 1.25;
-const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 1.8;
-const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 2.4;
+const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 3.5;
+const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 3.8;
+const MPS_TO_MPH = 2.2369362921;
 
 export type ScenePoseField = "startPose" | "egoStopPose" | "exitPose";
 export type CalibratedStopSignPlanEntry = StopSignPlanEntry & {
@@ -231,7 +232,7 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
         const end = relativeTo(entry.exitPose, entry.egoStopPose);
         const minimumRollingStartM = requiredRollingStartDistanceM(entry.targetSpeedMps);
         if (start.longitudinal > -minimumRollingStartM) {
-            errors.push(`Start must be at least ${minimumRollingStartM.toFixed(0)} m before Stop to reach ${entry.targetSpeedMps.toFixed(1)} m/s and record stable cruise.`);
+            errors.push(`Start must be at least ${minimumRollingStartM.toFixed(0)} m before Stop to reach ${formatSpeed(entry.targetSpeedMps)} and record stable cruise.`);
         }
         if (end.longitudinal < 8) {
             errors.push("End must be at least 8 m beyond Stop so the release clip has enough temporal context.");
@@ -270,6 +271,14 @@ export function requiredRollingStartDistanceM(targetSpeedMps: number): number {
     const cruiseDistanceM = targetSpeedMps * MINIMUM_ROLLING_CRUISE_SECONDS;
     const brakingDistanceM = targetSpeedMps ** 2 / (2 * STOP_SIGN_BRAKING_DECELERATION_MPS2);
     return accelerationDistanceM + cruiseDistanceM + brakingDistanceM;
+}
+
+export function metersPerSecondToMph(speedMps: number): number {
+    return speedMps * MPS_TO_MPH;
+}
+
+export function formatSpeed(speedMps: number): string {
+    return `${metersPerSecondToMph(speedMps).toFixed(1)} mph (${speedMps.toFixed(1)} m/s)`;
 }
 
 export function parseStoredStopSignPlan(raw: string | null): StopSignPlan | null {

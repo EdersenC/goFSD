@@ -1,5 +1,6 @@
 import {Box, Card, CardContent, Chip, LinearProgress, Stack, Typography} from "@mui/material";
 import type {ControlState, RuntimeTelemetry} from "../types";
+import {metersPerSecondToMph} from "../stop-sign-plan";
 
 export function TelemetryPanel({control}: {control?: ControlState}) {
     const telemetry = control?.telemetry;
@@ -21,7 +22,7 @@ export function TelemetryPanel({control}: {control?: ControlState}) {
                 </Stack>
                 <Box sx={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 1, mt: 2}}>
                     <Metric label="Phase" value={phase || "idle"} accent />
-                    <Metric label="Speed" value={format(telemetry?.currentSpeed, "m/s")} />
+                    <Metric label="Speed" value={formatSpeed(telemetry?.currentSpeed)} />
                     <Metric label="Throttle" value={format(telemetry?.throttleApplied, "")} />
                     <Metric label="Brake" value={format(telemetry?.brakeApplied ?? telemetry?.brakePressureAvg, "")} />
                     <Metric label="Sign" value={format(telemetry?.stopSignDistanceM, "m")} />
@@ -90,4 +91,10 @@ function stopConfirmationPercent(telemetry?: RuntimeTelemetry): number {
 
 function format(value: number | undefined, suffix: string): string {
     return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : "—";
+}
+
+function formatSpeed(value: number | undefined): string {
+    return typeof value === "number" && Number.isFinite(value)
+        ? `${metersPerSecondToMph(value).toFixed(1)} mph · ${value.toFixed(2)} m/s`
+        : "—";
 }

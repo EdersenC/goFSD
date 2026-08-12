@@ -42,8 +42,8 @@ const (
 	maximumMotionVariancePct  = 25.0
 	minimumCapturedStartM     = 16.0
 	minimumCapturedExitM      = 8.0
-	launchAccelerationMPS2    = 1.8
-	brakingDecelerationMPS2   = 2.4
+	launchAccelerationMPS2    = 3.5
+	brakingDecelerationMPS2   = 3.8
 	minimumRollingCruiseS     = 1.25
 )
 
@@ -417,7 +417,13 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 func validateRollingApproachDistance(label string, startDistanceM, targetSpeedMPS float64) error {
 	requiredDistanceM := requiredRollingStartDistanceM(targetSpeedMPS)
 	if startDistanceM+1e-6 < requiredDistanceM {
-		return invalid("%s.startPose must be at least %.1fm before egoStopPose to reach %.1fm/s and record stable cruise", label, requiredDistanceM, targetSpeedMPS)
+		return invalid(
+			"%s.startPose must be at least %.1fm before egoStopPose to reach %.1fm/s (%.1fmph) and record stable cruise",
+			label,
+			requiredDistanceM,
+			targetSpeedMPS,
+			targetSpeedMPS*2.2369362921,
+		)
 	}
 	return nil
 }
