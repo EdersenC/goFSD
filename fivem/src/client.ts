@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-stop-sign-causal-phases-v15";
+const CLIENT_BUILD_ID = "2026-08-11-multi-scene-rolling-capture-v16";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 

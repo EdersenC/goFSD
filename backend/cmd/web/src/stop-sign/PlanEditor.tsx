@@ -23,7 +23,9 @@ import {
     currentSceneStep,
     createStopSignSeed,
     MAXIMUM_MOTION_VARIANCE_PCT,
+    MAXIMUM_TARGET_SPEED_MPS,
     poseSummary,
+    requiredRollingStartDistanceM,
     ScenePoseField,
     stopSignPlanStats,
     validateStopSignEntry,
@@ -174,20 +176,28 @@ export function PlanEditor({
                                     label={`${entry.autoVariations?.count ?? 0} continuous runs · 3 labeled stages each`}
                                 />
                             </Stack>
-                            <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "160px 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>
-                                <TextField
-                                    label="Variant count"
-                                    type="number"
-                                    value={entry.autoVariations?.count ?? 50}
-                                    slotProps={{htmlInput: {min: 1, max: 100}}}
-                                    onChange={(event) => updateEntry({
+                            <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "1fr 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>
+                                <Box>
+                                    <Stack direction="row" sx={{justifyContent: "space-between"}}>
+                                        <Typography variant="caption">Variant count</Typography>
+                                        <Chip size="small" label={entry.autoVariations?.count ?? 50} />
+                                    </Stack>
+                                    <Slider
+                                        aria-label="Variant count"
+                                        min={1}
+                                        max={100}
+                                        step={1}
+                                        value={entry.autoVariations?.count ?? 50}
+                                        onChange={(_event, value) => updateEntry({
                                         ...entry,
                                         autoVariations: {
-                                            count: Number(event.target.value),
+                                            count: Number(value),
                                             motionVariancePct: entry.autoVariations?.motionVariancePct ?? 20,
                                         },
                                     })}
-                                />
+                                        valueLabelDisplay="auto"
+                                    />
+                                </Box>
                                 <Box>
                                     <Stack direction="row" sx={{justifyContent: "space-between"}}>
                                         <Typography variant="caption">Motion variance</Typography>
@@ -218,16 +228,24 @@ export function PlanEditor({
                                         <TextField label="Library seed" value={plan.seed} onChange={(event) => onChange({...plan, seed: event.target.value})} fullWidth />
                                         <Button variant="outlined" onClick={() => onChange({...plan, seed: createStopSignSeed()})}>New seed</Button>
                                     </Stack>
-                                    <TextField
-                                        label="Target speed (m/s)"
-                                        type="number"
-                                        value={entry.targetSpeedMps}
-                                        slotProps={{htmlInput: {min: .5, max: 8, step: .25}}}
-                                        onChange={(event) => updateEntry({...entry, targetSpeedMps: Number(event.target.value)})}
-                                    />
+                                    <Box sx={{px: .5}}>
+                                        <Stack direction="row" sx={{justifyContent: "space-between", alignItems: "center"}}>
+                                            <Typography variant="caption">Target speed</Typography>
+                                            <Chip size="small" color="primary" label={`${entry.targetSpeedMps.toFixed(1)} m/s · ${(entry.targetSpeedMps * 2.23694).toFixed(0)} mph`} />
+                                        </Stack>
+                                        <Slider
+                                            aria-label="Target speed"
+                                            min={.5}
+                                            max={MAXIMUM_TARGET_SPEED_MPS}
+                                            step={.5}
+                                            value={entry.targetSpeedMps}
+                                            onChange={(_event, value) => updateEntry({...entry, targetSpeedMps: Number(value)})}
+                                            valueLabelDisplay="auto"
+                                        />
+                                    </Box>
                                 </Box>
                                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
-                                    Stop confirmation is fixed and brief; it is not varied or repeated as long dwell data.
+                                    For {entry.targetSpeedMps.toFixed(1)} m/s, Start needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m before Stop. Launch frames stay in the raw recording but training begins only after one stable cruise second. Stop confirmation remains brief.
                                 </Typography>
                             </AccordionDetails>
                         </Accordion>

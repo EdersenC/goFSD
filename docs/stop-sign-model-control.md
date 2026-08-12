@@ -20,7 +20,7 @@ causal RGB + speed history
 
 ## Model input boundary
 
-Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero uses the latest telemetry row at or before the RGB anchor; neither the current label nor the image history borrows from the future. Future training targets remain future-facing. Every anchor is labeled `approach`, `brake_stop`, or `release`, while its temporal context remains continuous across boundaries.
+Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero uses the latest telemetry row at or before the RGB anchor; neither the current label nor the image history borrows from the future. Future training targets remain future-facing. Training anchors begin only after one stable cruise second, so the earliest selected window contains cruise rather than launch acceleration. Every anchor is labeled `approach`, `brake_stop`, or `release`, while its temporal context remains continuous across boundaries.
 
 The perception boundary is RGB-only with respect to the stop sign and stopping geometry. These values may be recorded for expert generation, labels, scoring, debugging, and safety, but are not model perception inputs:
 
@@ -53,7 +53,7 @@ Processed samples retain a causal RGB/history window and a future label sequence
 
 `expert_throttle`, `expert_brake`, and `actual_brake_pressure` are low-weight auxiliary diagnostics. They help expose poor demonstrations or controller mismatch, but they are not the deployed controller interface.
 
-Every usable sample carries one fine phase:
+Every recorded telemetry row carries one fine phase; rolling-capture training normally starts at `cruise_approach`, while `accelerate` remains in the raw audit timeline and closed phase contract:
 
 1. `accelerate`
 2. `cruise_approach`
@@ -61,7 +61,7 @@ Every usable sample carries one fine phase:
 4. `stop_hold`
 5. `release`
 
-Training balances observed `(logical stage, fine phase)` groups so long approach spans do not drown out braking, stopping, or release. History and future labels intentionally cross a stage transition when the anchor is near it. Frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so all attempts and generated variants from one sign remain on one side of the split.
+Training balances observed `(logical stage, fine phase)` groups so long cruise spans do not drown out braking, stopping, or release. Launch-heavy anchors are excluded before balancing; raw launch telemetry and video remain inspectable. History and future labels intentionally cross a stage transition when the anchor is near it. Frames are not independently randomized across train and validation. Split isolation uses the physical stop-sign location so all attempts and generated variants from one sign remain on one side of the split.
 
 Only successful attempts with a complete `stopSignGoal` and `stopSignOutcome` are admitted by default. Failed attempts stay available for inspection and later hard-negative work.
 
@@ -69,7 +69,7 @@ Only successful attempts with a complete `stopSignGoal` and `stopSignOutcome` ar
 
 Collection preserves one real motion sequence:
 
-1. `approach` records launch and cruise.
+1. `approach` records launch and cruise; processing indexes only the stable-cruise tail.
 2. `brake_stop` begins when the planned speed decreases and includes the brief zero-speed confirmation.
 3. `release` begins immediately after confirmation without resetting the vehicle, camera, or temporal history.
 

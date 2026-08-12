@@ -2,6 +2,7 @@ package dataset
 
 import (
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -128,6 +129,42 @@ func TestBuildStopSignSamplesUsesCausalAnchorAndFutureFacingTargets(t *testing.T
 	}
 	if !reflect.DeepEqual(sample.Label.Aux.FutureStopSignPhases, []string{"decelerate"}) {
 		t.Fatalf("future targets must remain future-facing: %+v", sample.Label.Aux.FutureStopSignPhases)
+	}
+}
+
+func TestTrimStopSignRollingCaptureStartsAfterStableCruisePreRoll(t *testing.T) {
+	labels := make([]timedLabel, 0, 61)
+	for index := 0; index <= 60; index++ {
+		seconds := float64(index) * 0.05
+		phase := "accelerate"
+		desiredSpeed := math.Min(5, seconds*10)
+		if seconds >= 0.5 {
+			phase = "cruise_approach"
+			desiredSpeed = 5
+		}
+		if seconds >= 2.5 {
+			phase = "decelerate"
+			desiredSpeed = 4.8
+		}
+		labels = append(labels, timedLabel{RelativeSeconds: seconds, Label: stopSignTelemetryFixture(phase, desiredSpeed, desiredSpeed)})
+	}
+	samples := []DatasetSample{
+		{AnchorGameTime: 0.5}, {AnchorGameTime: 1.0}, {AnchorGameTime: 1.49},
+		{AnchorGameTime: 1.5}, {AnchorGameTime: 2.0}, {AnchorGameTime: 2.5},
+	}
+
+	trimmed, warmupCount := trimStopSignRollingCaptureSamples(samples, labels)
+	if warmupCount != 3 || len(trimmed) != 3 || trimmed[0].AnchorGameTime != 1.5 {
+		t.Fatalf("rolling capture did not retain exactly the stable cruise pre-roll boundary: warmup=%d samples=%+v", warmupCount, trimmed)
+	}
+
+	unstable := []timedLabel{
+		{RelativeSeconds: 0, Label: stopSignTelemetryFixture("accelerate", 0, 0)},
+		{RelativeSeconds: 0.5, Label: stopSignTelemetryFixture("decelerate", 2, 2)},
+	}
+	trimmed, warmupCount = trimStopSignRollingCaptureSamples(samples, unstable)
+	if len(trimmed) != 0 || warmupCount != len(samples) {
+		t.Fatalf("an approach without stable cruise must not leak launch-heavy rows: warmup=%d samples=%+v", warmupCount, trimmed)
 	}
 }
 

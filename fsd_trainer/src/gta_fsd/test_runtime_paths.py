@@ -75,7 +75,7 @@ class RuntimePathTests(unittest.TestCase):
         self.assertTrue(config.loader.phase_balancing.enabled)
         self.assertEqual(
             config.dataset.target_transforms["future_speed_mps"].range_max,
-            8.0,
+            15.0,
         )
 
 

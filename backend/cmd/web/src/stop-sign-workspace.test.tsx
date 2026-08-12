@@ -2,6 +2,7 @@ import {ThemeProvider} from "@mui/material";
 import {renderToStaticMarkup} from "react-dom/server";
 import {captureScenePose, createStopSignPlan, stageStopSignCatalogLocation} from "./stop-sign-plan";
 import {PhaseRail, resolvePhaseIndex} from "./stop-sign/PhaseRail";
+import {CollectionQueue} from "./stop-sign/CollectionQueue";
 import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
 import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
@@ -42,6 +43,29 @@ for (const label of ["Capture Start", "Start", "Stop", "End", "Automatic seeded 
     assert(editorMarkup.includes(label), `plan editor missing ${label}`);
 }
 assert(!/experience picker|guided runbook|choose a workflow/i.test(editorMarkup), "obsolete workflow selection copy must not render");
+
+const secondStaged = stageStopSignCatalogLocation(plan, {
+    id: "gta-v-sign-0042", x: -1800, y: 3220, z: 31,
+});
+let queuePlan = captureScenePose(secondStaged.plan, secondStaged.entryIndex, "startPose", {x: 120, y: 140, z: 30, heading: 0});
+queuePlan = captureScenePose(queuePlan, secondStaged.entryIndex, "egoStopPose", {x: 120, y: 200, z: 30, heading: 0});
+queuePlan = captureScenePose(queuePlan, secondStaged.entryIndex, "exitPose", {x: 120, y: 212, z: 30, heading: 0});
+const queueMarkup = render(<CollectionQueue
+    scenes={queuePlan.entries}
+    selectedEntryIds={[queuePlan.entries[1]!.id, queuePlan.entries[0]!.id]}
+    activeEntryId={queuePlan.entries[0]!.id}
+    disabled={false}
+    onToggle={() => undefined}
+    onSelectAll={() => undefined}
+    onSelectCurrent={() => undefined}
+    onClear={() => undefined}
+    onMove={() => undefined}
+/>);
+for (const label of ["Collection queue", "All ready", "Current only", "Clear", "2/2 signs", "gta-v-sign-0042", "gta-v-sign-0023", "50 seeded runs", "#1", "#2"]) {
+    assert(queueMarkup.includes(label), `collection queue missing ${label}`);
+}
+assert(queueMarkup.indexOf("gta-v-sign-0042") < queueMarkup.indexOf("gta-v-sign-0023"), "selected scenes must render in collection order");
+assert(queueMarkup.includes("Move gta-v-sign-0042 later"), "collection queue needs explicit reordering controls");
 
 const catalogMarkup = render(<StopSignCatalog
     connected

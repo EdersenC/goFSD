@@ -35,7 +35,7 @@ const (
 	defaultStoppedSampleBurst       = 3
 	defaultStoppedSampleSpacing     = 2.0
 	futureTargetSmoothingRadius     = 2
-	processingConfigVersion         = 6
+	processingConfigVersion         = 7
 	processingWorkspacePrefix       = ".processing-work-"
 	processingJournalVersion        = 1
 	processingJournalFile           = "promotion.json"
@@ -174,6 +174,7 @@ type GroupedTelemetryAux struct {
 type sampleBuildStats struct {
 	CandidateWindowCount            int
 	GeneratedSampleCount            int
+	RollingCaptureWarmupCount       int
 	IncompleteFrameHistoryCount     int
 	IncompleteTelemetryHistoryCount int
 	IncompleteTelemetryFutureCount  int
@@ -191,6 +192,9 @@ func (s sampleBuildStats) zeroSampleReasons() map[string]int {
 	}
 	if s.IncompleteFrameHistoryCount > 0 {
 		reasons["incomplete_frame_history"] = s.IncompleteFrameHistoryCount
+	}
+	if s.RollingCaptureWarmupCount > 0 {
+		reasons["rolling_capture_warmup"] = s.RollingCaptureWarmupCount
 	}
 	if s.IncompleteTelemetryHistoryCount > 0 {
 		reasons["incomplete_telemetry_history"] = s.IncompleteTelemetryHistoryCount
@@ -621,6 +625,9 @@ func (p *Processor) buildStagedOutputs(
 		p.telemetrySampleInterval,
 	)
 	if stopSignTimeline {
+		var warmupCount int
+		samples, warmupCount = trimStopSignRollingCaptureSamples(samples, labels)
+		sampleStats.RollingCaptureWarmupCount += warmupCount
 		samples = decorateStopSignSamples(samples, metadata)
 	} else {
 		samples = thinStoppedSamples(samples, defaultStoppedSampleBurst, defaultStoppedSampleSpacing)

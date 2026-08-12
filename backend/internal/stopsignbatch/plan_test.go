@@ -164,6 +164,30 @@ func TestExpandCapturedSceneRejectsIncompleteOrBackwardsRoutes(t *testing.T) {
 	}
 }
 
+func TestExpandCapturedSceneRequiresRoomForStableRollingCaptureAtHighSpeed(t *testing.T) {
+	start := Pose{X: 0, Y: -100, Z: 30, Heading: 0}
+	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
+	exit := Pose{X: 0, Y: 12, Z: 30, Heading: 0}
+	targetSpeed := 15.0
+	plan := Plan{ID: "high-speed", Seed: "seed", Entries: []Entry{{
+		ID: "sign", CatalogID: "gta-v-sign-0001", CatalogPosition: &WorldPosition{X: 1, Y: 2, Z: 3},
+		StartPose: &start, EgoStopPose: &stop, ExitPose: &exit,
+		AutoVariations: &AutoVariationSpec{Count: 1}, TargetSpeedMPS: &targetSpeed,
+	}}}
+	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "record stable cruise") {
+		t.Fatalf("short high-speed approach must be rejected with actionable guidance: %v", err)
+	}
+
+	start.Y = -140
+	jobs, err := Expand(plan)
+	if err != nil {
+		t.Fatalf("long high-speed approach should be accepted: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].TargetSpeedMPS != 15 {
+		t.Fatalf("high-speed job did not preserve the selected target: %+v", jobs)
+	}
+}
+
 func TestExpandMergesVehicleVariationFields(t *testing.T) {
 	jobs, err := Expand(Plan{
 		ID:   "vehicles",

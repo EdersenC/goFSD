@@ -21,7 +21,7 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
     }
     ids.add(id);
     const attemptCount = boundedNumber(raw.attemptCount, `stopSignJobs[${index}].attemptCount`, 1, 50, true);
-    const targetSpeedMps = boundedNumber(raw.targetSpeedMps, `stopSignJobs[${index}].targetSpeedMps`, 0.5, 8);
+    const targetSpeedMps = boundedNumber(raw.targetSpeedMps, `stopSignJobs[${index}].targetSpeedMps`, 0.5, 15);
     const stopConfirmationMs = boundedNumber(raw.stopConfirmationMs, `stopSignJobs[${index}].stopConfirmationMs`, 100, 1000, true);
     const stopDistanceM = boundedNumber(raw.stopDistanceM, `stopSignJobs[${index}].stopDistanceM`, 0.5, 15);
     const egoCenterOffsetM = boundedNumber(raw.egoCenterOffsetM, `stopSignJobs[${index}].egoCenterOffsetM`, 0.5, 8);

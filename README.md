@@ -4,7 +4,7 @@ This repository is a temporal-driving lab for one focused V0 behavior: approach 
 
 The three clip stages are:
 
-1. **Approach** — launch and establish the approach before braking begins.
+1. **Approach** — reach target speed, retain a short stable cruise history, then approach the braking boundary.
 2. **Brake + Stop** — slow down and end immediately after a brief zero-speed confirmation.
 3. **Release** — continue from the confirmed Stop pose to the captured End pose.
 
@@ -67,9 +67,10 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 4. Move it to the exact vehicle-center stopping point and press **Capture Stop**.
 5. Move it beyond the sign to the desired continuation point and press **Capture End**.
 6. Keep the default **50 variants** and **20% motion variance**, or adjust them. Motion variance is capped at `25%`; weather, clock time, and vehicle color vary broadly.
-7. Press **Collect this scene**. Every variant produces one continuous attempt with `approach`, `brake_stop`, and `release` labels.
-8. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
-9. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
+7. In **Collection queue**, choose **All ready**, **Current only**, or a custom ordered subset of saved signs.
+8. Press **Collect**. The unattended batch runs signs in queue order and every variant produces one continuous attempt with `approach`, `brake_stop`, and `release` labels.
+9. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
+10. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
 The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` preserves the captured scene exactly; later variants perturb route distance and speed within the selected bound, apply only centimeter-scale Stop jitter, and sample broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
 
@@ -86,7 +87,9 @@ Start  ── approach ──> braking boundary ── brake_stop ──> Stop �
 - `End` is the exact destination where the continuous attempt finishes.
 - The selected catalog prop supplies stable physical-sign identity and navigation coordinates, not a model input.
 
-The UI and backend require Start to be before Stop, End to be beyond Stop, and all three poses to remain compatible with one approach lane. FiveM receives explicit validated poses for every generated variant.
+The UI and backend require Start to be far enough before Stop for the selected target speed to accelerate, cruise stably, and brake; End must be beyond Stop; and all three poses must remain compatible with one approach lane. Target speed is selectable from `0.5–15 m/s`. FiveM receives explicit validated poses for every generated variant.
+
+The raw recording still includes launch for auditability. Dataset processing discards launch-heavy anchors and begins the training index only after the desired speed has remained within 2% of the approach peak for one second. The temporal history then contains cruise before `decelerate`, without splicing or fabricating frames.
 
 ## Data and model contract
 

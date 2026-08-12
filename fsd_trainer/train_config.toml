@@ -10,7 +10,7 @@ stale_timeout = '250ms'
 steering_gain = 1.0
 throttle_gain = 1.0
 throttle_floor = 0.0
-speed_limit_kph = 30.0
+speed_limit_kph = 60.0
 overspeed_brake_margin_kph = 2.0
 overspeed_brake = 0.25
 model_brake_threshold = 0.55
@@ -44,7 +44,7 @@ stop_probability_threshold = 0.65
 stop_probability_release_threshold = 0.35
 hold_speed_mps = 0.15
 stop_brake_effort = 0.45
-max_desired_speed_mps = 8.0
+max_desired_speed_mps = 15.0
 max_dt = '250ms'
 plan_timeout = '400ms'
 telemetry_timeout = '250ms'
@@ -97,7 +97,7 @@ include_failed_or_non_stop_sign_trips = false
 [dataset.target_transforms]
 [dataset.target_transforms.future_speed_mps]
 type = 'positive_cap'
-clip = 8.0
+clip = 15.0
 
 [dataset.target_transforms.stop_intent]
 type = 'positive_cap'
@@ -166,7 +166,7 @@ dropout = 0.10
 
 [state_inputs.current_speed]
 enabled = false
-cap = 5.0
+cap = 15.0
 
 [training]
 device = 'auto'

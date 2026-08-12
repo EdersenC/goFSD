@@ -20,7 +20,7 @@ const (
 	DefaultEgoCenterOffsetM   = 2.5
 	DefaultStartDistanceM     = 40.0
 	DefaultExitDistanceM      = 8.0
-	DefaultTargetSpeedMPS     = 8.0
+	DefaultTargetSpeedMPS     = 5.0
 	DefaultStopConfirmationMS = 250
 	DefaultAttemptCount       = 1
 	DefaultWeather            = "EXTRASUNNY"
@@ -36,12 +36,15 @@ const (
 	minimumExitDistanceM      = 2.0
 	maximumExitDistanceM      = 50.0
 	minimumTargetSpeedMPS     = 0.5
-	maximumTargetSpeedMPS     = 8.0
+	maximumTargetSpeedMPS     = 15.0
 	minimumStopConfirmationMS = 100
 	maximumStopConfirmationMS = 1_000
 	maximumMotionVariancePct  = 25.0
 	minimumCapturedStartM     = 16.0
 	minimumCapturedExitM      = 8.0
+	launchAccelerationMPS2    = 1.8
+	brakingDecelerationMPS2   = 2.4
+	minimumRollingCruiseS     = 1.25
 )
 
 var (
@@ -351,6 +354,10 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 	if err := applyEntrySettings(&base, entry, label); err != nil {
 		return nil, err
 	}
+	baseStartDistanceM := planarDistance(*entry.StartPose, *entry.EgoStopPose)
+	if err := validateRollingApproachDistance(label, baseStartDistanceM, base.targetSpeedMPS); err != nil {
+		return nil, err
+	}
 	jobs := make([]Job, 0, spec.Count)
 	for variantIndex := 0; variantIndex < spec.Count; variantIndex++ {
 		variationID := fmt.Sprintf("auto-%03d", variantIndex+1)
@@ -368,6 +375,9 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		exitDistanceM := planarDistance(stopPose, exitPose)
 		resolved.startDistanceM = startDistanceM
 		resolved.exitDistanceM = exitDistanceM
+		if variantIndex > 0 {
+			resolved.targetSpeedMPS = math.Min(resolved.targetSpeedMPS, maximumRollingTargetSpeedMPS(startDistanceM))
+		}
 		if err := validateSettings(resolved, label+"."+variationID); err != nil {
 			return nil, err
 		}
@@ -402,6 +412,27 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		})
 	}
 	return jobs, nil
+}
+
+func validateRollingApproachDistance(label string, startDistanceM, targetSpeedMPS float64) error {
+	requiredDistanceM := requiredRollingStartDistanceM(targetSpeedMPS)
+	if startDistanceM+1e-6 < requiredDistanceM {
+		return invalid("%s.startPose must be at least %.1fm before egoStopPose to reach %.1fm/s and record stable cruise", label, requiredDistanceM, targetSpeedMPS)
+	}
+	return nil
+}
+
+func requiredRollingStartDistanceM(targetSpeedMPS float64) float64 {
+	accelerationDistanceM := targetSpeedMPS * targetSpeedMPS / (2 * launchAccelerationMPS2)
+	cruiseDistanceM := targetSpeedMPS * minimumRollingCruiseS
+	brakingDistanceM := targetSpeedMPS * targetSpeedMPS / (2 * brakingDecelerationMPS2)
+	return accelerationDistanceM + cruiseDistanceM + brakingDistanceM
+}
+
+func maximumRollingTargetSpeedMPS(startDistanceM float64) float64 {
+	quadratic := 1/(2*launchAccelerationMPS2) + 1/(2*brakingDecelerationMPS2)
+	discriminant := minimumRollingCruiseS*minimumRollingCruiseS + 4*quadratic*startDistanceM
+	return math.Min(maximumTargetSpeedMPS, (-minimumRollingCruiseS+math.Sqrt(discriminant))/(2*quadratic))
 }
 
 func capturedVariantPoses(seed string, start, stop, exit Pose, variancePct float64, baseline bool) (Pose, Pose, Pose) {

@@ -10,6 +10,11 @@ import (
 
 const stopSignTask = "stop-sign"
 
+const (
+	stopSignCruisePreRollSeconds = 1.0
+	stopSignCruiseSpeedTolerance = 0.02
+)
+
 var stopSignPhases = map[string]struct{}{
 	"accelerate":      {},
 	"cruise_approach": {},
@@ -114,6 +119,57 @@ func buildStopSignSamplesWithImageOffsetsAndStats(
 	}
 
 	return samples, stats
+}
+
+// trimStopSignRollingCaptureSamples keeps the raw launch available for audit,
+// but starts the training index only after a full second at cruise. If an
+// approach never stabilizes, it contributes no training rows.
+func trimStopSignRollingCaptureSamples(samples []DatasetSample, labels []timedLabel) ([]DatasetSample, int) {
+	startSeconds, ok := stopSignRollingCaptureStartSeconds(normalizeStopSignPhaseTimeline(labels))
+	if !ok {
+		return nil, len(samples)
+	}
+	startIndex := 0
+	for startIndex < len(samples) && samples[startIndex].AnchorGameTime < startSeconds-1e-9 {
+		startIndex++
+	}
+	return samples[startIndex:], startIndex
+}
+
+func stopSignRollingCaptureStartSeconds(labels []timedLabel) (float64, bool) {
+	peakApproachSpeedMPS := 0.0
+	for _, label := range labels {
+		phase, ok := stopSignPhase(label.Label["stopSignPhase"])
+		if !ok || phase == "decelerate" || phase == "stop_hold" || phase == "release" {
+			break
+		}
+		desiredSpeedMPS, ok := nonNegativeNumber(label.Label["expertDesiredSpeedMps"])
+		if ok && desiredSpeedMPS > peakApproachSpeedMPS {
+			peakApproachSpeedMPS = desiredSpeedMPS
+		}
+	}
+	if peakApproachSpeedMPS <= 0 {
+		return 0, false
+	}
+
+	minimumCruiseSpeedMPS := peakApproachSpeedMPS * (1 - stopSignCruiseSpeedTolerance)
+	stableSinceSeconds := math.NaN()
+	for _, label := range labels {
+		phase, phaseOK := stopSignPhase(label.Label["stopSignPhase"])
+		desiredSpeedMPS, speedOK := nonNegativeNumber(label.Label["expertDesiredSpeedMps"])
+		stable := phaseOK && speedOK && phase == "cruise_approach" && desiredSpeedMPS >= minimumCruiseSpeedMPS
+		if !stable {
+			stableSinceSeconds = math.NaN()
+			continue
+		}
+		if math.IsNaN(stableSinceSeconds) {
+			stableSinceSeconds = label.RelativeSeconds
+		}
+		if label.RelativeSeconds-stableSinceSeconds >= stopSignCruisePreRollSeconds-1e-9 {
+			return label.RelativeSeconds, true
+		}
+	}
+	return 0, false
 }
 
 func normalizeStopSignPhaseTimeline(labels []timedLabel) []timedLabel {

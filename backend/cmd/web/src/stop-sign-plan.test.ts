@@ -4,8 +4,13 @@ import {
     currentSceneStep,
     isStopSignSceneCalibrated,
     migrateImplicitCatalogDrafts,
+    parseStoredCollectionEntryIds,
     parseStoredStopSignPlan,
+    planForEntries,
     planForScene,
+    readyStopSignEntryIds,
+    reconcileCollectionEntryIds,
+    requiredRollingStartDistanceM,
     stageStopSignCatalogLocation,
     stopSignPlanStats,
     validateStopSignPlan,
@@ -40,6 +45,28 @@ assertEqual(queued.entries[0]?.startPose?.y, -40);
 assertEqual(queued.entries[0]?.egoStopPose?.y, 0);
 assertEqual(queued.entries[0]?.exitPose?.y, 12);
 assertEqual(parseStoredStopSignPlan(JSON.stringify(plan))?.entries[0]?.catalogId, location.id);
+
+const secondLocation = {id: "gta-v-sign-0042", x: -1800, y: 3220, z: 31};
+const secondStaged = stageStopSignCatalogLocation(plan, secondLocation);
+let twoScenePlan = captureScenePose(secondStaged.plan, secondStaged.entryIndex, "startPose", {x: 20, y: -50, z: 30, heading: 0});
+twoScenePlan = captureScenePose(twoScenePlan, secondStaged.entryIndex, "egoStopPose", {x: 20, y: 0, z: 30, heading: 0});
+twoScenePlan = captureScenePose(twoScenePlan, secondStaged.entryIndex, "exitPose", {x: 20, y: 12, z: 30, heading: 0});
+const orderedQueue = planForEntries(twoScenePlan, [twoScenePlan.entries[1]!.id, twoScenePlan.entries[0]!.id]);
+assertEqual(orderedQueue.entries.length, 2);
+assertEqual(orderedQueue.entries[0]?.catalogId, secondLocation.id);
+assertEqual(orderedQueue.entries[1]?.catalogId, location.id);
+assertEqual(stopSignPlanStats(orderedQueue).jobCount, 100);
+assertEqual(JSON.stringify(readyStopSignEntryIds(twoScenePlan)), JSON.stringify([location.id, secondLocation.id]));
+assertEqual(JSON.stringify(reconcileCollectionEntryIds(twoScenePlan, [secondLocation.id, "missing", secondLocation.id, location.id])), JSON.stringify([secondLocation.id, location.id]));
+assertEqual(JSON.stringify(parseStoredCollectionEntryIds(JSON.stringify([secondLocation.id, location.id]))), JSON.stringify([secondLocation.id, location.id]));
+assertEqual(parseStoredCollectionEntryIds(JSON.stringify([secondLocation.id, 3])), null);
+assertThrows(() => planForEntries(twoScenePlan, []), "at least one");
+assertThrows(() => planForEntries(twoScenePlan, [location.id, location.id]), "duplicate");
+assert(requiredRollingStartDistanceM(15) > 125 && requiredRollingStartDistanceM(15) < 130);
+const highSpeedShort = {...plan, entries: [{...plan.entries[0]!, targetSpeedMps: 15}]};
+assert(validateStopSignPlan(highSpeedShort).some((error) => error.includes("record stable cruise")));
+const highSpeedLong = captureScenePose(highSpeedShort, 0, "startPose", {x: 0, y: -140, z: 30, heading: 0});
+assertEqual(validateStopSignPlan(highSpeedLong).length, 0);
 
 const reopened = stageStopSignCatalogLocation(plan, {...location, x: location.x + .1});
 assertEqual(reopened.plan.entries.length, 1);
@@ -77,4 +104,14 @@ function assert(condition: unknown, message = "assertion failed"): asserts condi
 
 function assertEqual(actual: unknown, expected: unknown, message = `expected ${String(expected)}, got ${String(actual)}`) {
     assert(Object.is(actual, expected), message);
+}
+
+function assertThrows(work: () => void, expectedMessage: string) {
+    try {
+        work();
+    } catch (error) {
+        assert(error instanceof Error && error.message.includes(expectedMessage), `expected error containing ${expectedMessage}`);
+        return;
+    }
+    throw new Error(`expected error containing ${expectedMessage}`);
 }

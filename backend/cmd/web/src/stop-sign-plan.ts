@@ -6,10 +6,15 @@ import {
 } from "./types";
 
 export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v5";
+export const STOP_SIGN_COLLECTION_QUEUE_STORAGE_KEY = "fsd.stop-sign-collection-queue.v1";
 export const LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v4";
 export const DEFAULT_VARIANT_COUNT = 50;
 export const DEFAULT_MOTION_VARIANCE_PCT = 20;
 export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
+export const MAXIMUM_TARGET_SPEED_MPS = 15;
+export const MINIMUM_ROLLING_CRUISE_SECONDS = 1.25;
+const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 1.8;
+const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 2.4;
 
 export type ScenePoseField = "startPose" | "egoStopPose" | "exitPose";
 export type CalibratedStopSignPlanEntry = StopSignPlanEntry & {
@@ -116,12 +121,63 @@ export function planForScene(plan: StopSignPlan, entryIndex: number): StopSignPl
     if (!entry) {
         throw new Error("Select a saved scene before collecting");
     }
+    return planForEntries(plan, [entry.id]);
+}
+
+export function planForEntries(plan: StopSignPlan, entryIds: readonly string[]): StopSignPlan {
+    if (entryIds.length === 0) {
+        throw new Error("Choose at least one saved scene before collecting");
+    }
+    const entriesById = new Map(plan.entries.map((entry) => [entry.id, entry]));
+    const selected = new Set<string>();
+    const entries = entryIds.map((entryId) => {
+        if (selected.has(entryId)) {
+            throw new Error(`Collection queue contains duplicate scene ${entryId}`);
+        }
+        selected.add(entryId);
+        const entry = entriesById.get(entryId);
+        if (!entry || !isStopSignSceneCalibrated(entry)) {
+            throw new Error(`Collection scene ${entryId} is missing a saved Start, Stop, or End pose`);
+        }
+        return cloneEntry(entry);
+    });
     return {
         version: STOP_SIGN_PLAN_VERSION,
-        id: `${plan.id}-${entry.id}`.slice(0, 120),
+        id: `${plan.id}-collection`.slice(0, 120),
         seed: plan.seed,
-        entries: [cloneEntry(entry)],
+        entries,
     };
+}
+
+export function readyStopSignEntryIds(plan: StopSignPlan): string[] {
+    return plan.entries.filter(isStopSignSceneCalibrated).map((entry) => entry.id);
+}
+
+export function reconcileCollectionEntryIds(plan: StopSignPlan, entryIds: readonly string[]): string[] {
+    const ready = new Set(readyStopSignEntryIds(plan));
+    const seen = new Set<string>();
+    return entryIds.filter((entryId) => {
+        if (!ready.has(entryId) || seen.has(entryId)) {
+            return false;
+        }
+        seen.add(entryId);
+        return true;
+    });
+}
+
+export function parseStoredCollectionEntryIds(raw: string | null): string[] | null {
+    if (!raw) {
+        return null;
+    }
+    try {
+        const candidate = JSON.parse(raw) as unknown;
+        if (!Array.isArray(candidate) || candidate.some((entryId) => typeof entryId !== "string" || !entryId.trim())) {
+            return null;
+        }
+        return [...candidate];
+    } catch {
+        return null;
+    }
 }
 
 export function validateStopSignPlan(plan: StopSignPlan): string[] {
@@ -173,8 +229,9 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     if (entry.startPose && entry.egoStopPose && entry.exitPose) {
         const start = relativeTo(entry.startPose, entry.egoStopPose);
         const end = relativeTo(entry.exitPose, entry.egoStopPose);
-        if (start.longitudinal > -16) {
-            errors.push("Start must be at least 16 m before Stop so the approach clip has enough temporal context.");
+        const minimumRollingStartM = requiredRollingStartDistanceM(entry.targetSpeedMps);
+        if (start.longitudinal > -minimumRollingStartM) {
+            errors.push(`Start must be at least ${minimumRollingStartM.toFixed(0)} m before Stop to reach ${entry.targetSpeedMps.toFixed(1)} m/s and record stable cruise.`);
         }
         if (end.longitudinal < 8) {
             errors.push("End must be at least 8 m beyond Stop so the release clip has enough temporal context.");
@@ -196,13 +253,23 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     if (!generated || !Number.isFinite(generated.motionVariancePct) || generated.motionVariancePct < 0 || generated.motionVariancePct > MAXIMUM_MOTION_VARIANCE_PCT) {
         errors.push(`motion variance must be from 0 to ${MAXIMUM_MOTION_VARIANCE_PCT}%.`);
     }
-    if (!Number.isFinite(entry.targetSpeedMps) || entry.targetSpeedMps < .5 || entry.targetSpeedMps > 8) {
-        errors.push("target speed must be from 0.5 to 8 m/s.");
+    if (!Number.isFinite(entry.targetSpeedMps) || entry.targetSpeedMps < .5 || entry.targetSpeedMps > MAXIMUM_TARGET_SPEED_MPS) {
+        errors.push(`target speed must be from 0.5 to ${MAXIMUM_TARGET_SPEED_MPS} m/s.`);
     }
     if (!Number.isInteger(entry.stopConfirmationMs) || entry.stopConfirmationMs < 100 || entry.stopConfirmationMs > 1000) {
         errors.push("stop confirmation must be a whole number from 100 to 1,000 ms.");
     }
     return errors;
+}
+
+export function requiredRollingStartDistanceM(targetSpeedMps: number): number {
+    if (!Number.isFinite(targetSpeedMps) || targetSpeedMps <= 0) {
+        return Number.POSITIVE_INFINITY;
+    }
+    const accelerationDistanceM = targetSpeedMps ** 2 / (2 * STOP_SIGN_LAUNCH_ACCELERATION_MPS2);
+    const cruiseDistanceM = targetSpeedMps * MINIMUM_ROLLING_CRUISE_SECONDS;
+    const brakingDistanceM = targetSpeedMps ** 2 / (2 * STOP_SIGN_BRAKING_DECELERATION_MPS2);
+    return accelerationDistanceM + cruiseDistanceM + brakingDistanceM;
 }
 
 export function parseStoredStopSignPlan(raw: string | null): StopSignPlan | null {

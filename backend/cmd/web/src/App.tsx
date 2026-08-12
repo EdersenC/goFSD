@@ -47,20 +47,25 @@ import {
     LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY,
     migrateImplicitCatalogDrafts,
     parseStoredStopSignPlan,
-    planForScene,
+    parseStoredCollectionEntryIds,
+    planForEntries,
+    readyStopSignEntryIds,
+    reconcileCollectionEntryIds,
     type ScenePoseField,
+    STOP_SIGN_COLLECTION_QUEUE_STORAGE_KEY,
     STOP_SIGN_PLAN_STORAGE_KEY,
     stageStopSignCatalogLocation,
     stopSignPlanStats,
     validateStopSignPlan,
 } from "./stop-sign-plan";
 import {PhaseRail} from "./stop-sign/PhaseRail";
+import {CollectionQueue} from "./stop-sign/CollectionQueue";
 import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
 import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
 import type {StopSignCatalogLocation} from "./stop-sign/catalog";
 import {deriveRouteWaypoint} from "./stop-sign/route-waypoint";
-import type {ControlState, InferenceModel, InferenceStatus, Pose, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
+import type {BatchProgress, ControlState, InferenceModel, InferenceStatus, Pose, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
 import {requireCurrentSafetyEpoch, runSafetyStartWithHoldBarrier} from "./workspace/safetyStartBarrier";
 import {ArchitectureOverview} from "./ArchitectureOverview";
 
@@ -72,6 +77,7 @@ export function App() {
     }
     const [plan, setPlan] = useState<StopSignPlan>(loadPlan);
     const [activeEntryIndex, setActiveEntryIndex] = useState(0);
+    const [collectionEntryIds, setCollectionEntryIds] = useState<string[]>(() => loadCollectionEntryIds(plan));
     const [candidateLocation, setCandidateLocation] = useState<StopSignCatalogLocation | null>(null);
     const [teleportingCatalogId, setTeleportingCatalogId] = useState("");
     const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
@@ -87,15 +93,15 @@ export function App() {
     const collection = useCollectionData(true);
     const training = useTrainingWorkspace(true);
     const inference = useInferenceWorkspace(true);
-    const activeScenePlan = useMemo(() => {
+    const collectionPlan = useMemo(() => {
         try {
-            return planForScene(plan, activeEntryIndex);
+            return planForEntries(plan, collectionEntryIds);
         } catch {
             return null;
         }
-    }, [plan, activeEntryIndex]);
-    const stats = useMemo(() => activeScenePlan ? stopSignPlanStats(activeScenePlan) : stopSignPlanStats(createStopSignPlan()), [activeScenePlan]);
-    const planErrors = useMemo(() => activeScenePlan ? validateStopSignPlan(activeScenePlan) : ["Choose a stop sign and capture Start, Stop, and End."], [activeScenePlan]);
+    }, [plan, collectionEntryIds]);
+    const stats = useMemo(() => collectionPlan ? stopSignPlanStats(collectionPlan) : stopSignPlanStats(createStopSignPlan()), [collectionPlan]);
+    const planErrors = useMemo(() => collectionPlan ? validateStopSignPlan(collectionPlan) : ["Choose at least one saved scene for the collection queue."], [collectionPlan]);
     const activeBatch = control.data?.runtime.stopSignBatch;
     const collectionActive = activeBatch?.state === "running" || control.data?.runtime.status === "runningAllScenes";
     const activeTraining = training.state.data?.activeJob;
@@ -111,6 +117,18 @@ export function App() {
             setNotice({message: "Plan storage unavailable. Keep this tab open.", severity: "warning"});
         }
     }, [plan]);
+
+    useEffect(() => {
+        setCollectionEntryIds((current) => reconcileCollectionEntryIds(plan, current));
+    }, [plan]);
+
+    useEffect(() => {
+        try {
+            window.localStorage.setItem(STOP_SIGN_COLLECTION_QUEUE_STORAGE_KEY, JSON.stringify(collectionEntryIds));
+        } catch {
+            setNotice({message: "Collection queue storage unavailable. Keep this tab open.", severity: "warning"});
+        }
+    }, [collectionEntryIds]);
 
     useEffect(() => {
         const models = inference.models.data ?? [];
@@ -323,6 +341,38 @@ export function App() {
         setActiveEntryIndex(Math.max(0, Math.min(activeEntryIndex, entries.length - 1)));
     };
 
+    const toggleCollectionScene = (entryId: string) => {
+        setCollectionEntryIds((current) => current.includes(entryId)
+            ? current.filter((candidate) => candidate !== entryId)
+            : [...current, entryId]);
+    };
+
+    const selectAllCollectionScenes = () => {
+        setCollectionEntryIds(readyStopSignEntryIds(plan));
+    };
+
+    const selectCurrentCollectionScene = () => {
+        const entry = plan.entries[activeEntryIndex];
+        if (!entry || !isStopSignSceneCalibrated(entry)) {
+            setNotice({message: "The current scene needs saved Start, Stop, and End poses before collection.", severity: "warning"});
+            return;
+        }
+        setCollectionEntryIds([entry.id]);
+    };
+
+    const moveCollectionScene = (entryId: string, direction: -1 | 1) => {
+        setCollectionEntryIds((current) => {
+            const index = current.indexOf(entryId);
+            const destination = index + direction;
+            if (index < 0 || destination < 0 || destination >= current.length) {
+                return current;
+            }
+            const next = [...current];
+            [next[index], next[destination]] = [next[destination]!, next[index]!];
+            return next;
+        });
+    };
+
     const queueCollection = () => operate("queue", async () => {
         if (planErrors.length > 0) {
             throw new Error(planErrors[0]);
@@ -336,12 +386,15 @@ export function App() {
         if (inference.status.data?.active || training.state.data?.running) {
             throw new Error("Stop inference or training before collection.");
         }
-        if (!activeScenePlan) {
-            throw new Error("Choose a saved scene before collecting.");
+        if (!collectionPlan) {
+            throw new Error("Choose at least one saved scene before collecting.");
         }
-        const result = await runControlStart((safetyEpoch, signal) => queueStopSignPlan(activeScenePlan, safetyEpoch, signal));
+        const result = await runControlStart((safetyEpoch, signal) => queueStopSignPlan(collectionPlan, safetyEpoch, signal));
         if (result.kind === "started") {
-            setNotice({message: `${result.value.jobCount} variants queued · one uninterrupted recording per attempt.`, severity: "success"});
+            setNotice({
+                message: `${result.value.jobCount} runs across ${stats.signCount} saved sign${stats.signCount === 1 ? "" : "s"} queued in order.`,
+                severity: "success",
+            });
         }
         window.setTimeout(() => void control.refresh(), 250);
     });
@@ -495,10 +548,19 @@ export function App() {
                             active={collectionActive}
                             valid={planErrors.length === 0}
                             validationError={planErrors[0]}
-                            variantCount={stats.variationCount}
-                            batchProgress={batchProgress(activeBatch)}
+                            scenes={plan.entries}
+                            selectedEntryIds={collectionEntryIds}
+                            activeEntryId={plan.entries[activeEntryIndex]?.id}
+                            sceneCount={stats.signCount}
+                            jobCount={stats.jobCount}
+                            batch={activeBatch}
                             pending={pending}
                             onStartSetup={startSetupCar}
+                            onToggleScene={toggleCollectionScene}
+                            onSelectAllScenes={selectAllCollectionScenes}
+                            onSelectCurrentScene={selectCurrentCollectionScene}
+                            onClearScenes={() => setCollectionEntryIds([])}
+                            onMoveScene={moveCollectionScene}
                             onQueue={queueCollection}
                             onStop={endCollection}
                         />
@@ -555,18 +617,49 @@ export function App() {
     );
 }
 
-function CollectionControls({connected, active, valid, validationError, variantCount, batchProgress, pending, onStartSetup, onQueue, onStop}: {
+function CollectionControls({
+    connected,
+    active,
+    valid,
+    validationError,
+    scenes,
+    selectedEntryIds,
+    activeEntryId,
+    sceneCount,
+    jobCount,
+    batch,
+    pending,
+    onStartSetup,
+    onToggleScene,
+    onSelectAllScenes,
+    onSelectCurrentScene,
+    onClearScenes,
+    onMoveScene,
+    onQueue,
+    onStop,
+}: {
     connected: boolean
     active: boolean
     valid: boolean
     validationError?: string
-    variantCount: number
-    batchProgress: number
+    scenes: ReadonlyArray<StopSignPlan["entries"][number]>
+    selectedEntryIds: readonly string[]
+    activeEntryId?: string
+    sceneCount: number
+    jobCount: number
+    batch?: BatchProgress
     pending: ReadonlySet<string>
     onStartSetup: () => void
+    onToggleScene: (entryId: string) => void
+    onSelectAllScenes: () => void
+    onSelectCurrentScene: () => void
+    onClearScenes: () => void
+    onMoveScene: (entryId: string, direction: -1 | 1) => void
     onQueue: () => void
     onStop: () => void
 }) {
+    const progress = batchProgress(batch);
+    const activeJobLabel = batch?.jobId || (active ? "preparing first scene" : "idle");
     return (
         <Card component="section" aria-labelledby="run-control-title">
             <CardContent>
@@ -574,18 +667,32 @@ function CollectionControls({connected, active, valid, validationError, variantC
                 <Stack sx={{gap: 1, mt: 1.5}}>
                     {!connected && <Alert severity="warning">FiveM control is not synchronized yet.</Alert>}
                     {connected && !valid && validationError && <Alert severity="warning">{validationError}</Alert>}
+                    <CollectionQueue
+                        scenes={scenes}
+                        selectedEntryIds={selectedEntryIds}
+                        activeEntryId={activeEntryId}
+                        disabled={active || pending.has("queue")}
+                        onToggle={onToggleScene}
+                        onSelectAll={onSelectAllScenes}
+                        onSelectCurrent={onSelectCurrentScene}
+                        onClear={onClearScenes}
+                        onMove={onMoveScene}
+                    />
                     <Button variant="outlined" disabled={!connected || pending.has("setup") || active} onClick={onStartSetup}>Start setup car</Button>
                     <Button variant="contained" startIcon={<PlayArrowRounded />} disabled={!connected || !valid || active || pending.has("queue")} onClick={onQueue}>
-                        Collect {variantCount} continuous variant{variantCount === 1 ? "" : "s"}
+                        Collect {jobCount} run{jobCount === 1 ? "" : "s"} across {sceneCount} sign{sceneCount === 1 ? "" : "s"}
                     </Button>
                     <Button variant="outlined" color="warning" startIcon={<StopRounded />} disabled={!active || pending.has("end-collection")} onClick={onStop}>End collection</Button>
                 </Stack>
                 <Divider sx={{my: 2}} />
                 <Stack direction="row" sx={{justifyContent: "space-between", mb: .7}}>
-                    <Typography variant="caption" color="text.secondary">Batch</Typography>
-                    <Typography variant="caption">{batchProgress.toFixed(0)}%</Typography>
+                    <Box sx={{minWidth: 0}}>
+                        <Typography variant="caption" color="text.secondary">Batch · {batch?.completedJobs ?? 0}/{batch?.jobCount ?? jobCount} runs</Typography>
+                        <Typography variant="caption" sx={{display: "block", fontFamily: "ui-monospace, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{activeJobLabel}</Typography>
+                    </Box>
+                    <Typography variant="caption">{progress.toFixed(0)}%</Typography>
                 </Stack>
-                <LinearProgress variant="determinate" value={batchProgress} />
+                <LinearProgress variant="determinate" value={progress} />
             </CardContent>
         </Card>
     );
@@ -727,6 +834,15 @@ function loadPlan(): StopSignPlan {
         return legacy ? migrateImplicitCatalogDrafts(legacy) : createStopSignPlan();
     } catch {
         return createStopSignPlan();
+    }
+}
+
+function loadCollectionEntryIds(plan: StopSignPlan): string[] {
+    try {
+        const stored = parseStoredCollectionEntryIds(window.localStorage.getItem(STOP_SIGN_COLLECTION_QUEUE_STORAGE_KEY));
+        return reconcileCollectionEntryIds(plan, stored ?? readyStopSignEntryIds(plan));
+    } catch {
+        return readyStopSignEntryIds(plan);
     }
 }
 

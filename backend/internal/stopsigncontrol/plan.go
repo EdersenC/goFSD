@@ -11,7 +11,7 @@ const (
 	// deterministic, feedback-controlled game actuation.
 	StopSignMotionPlanContractV1  = "stop_sign_motion_plan_v1"
 	StopSignDirectionForward      = "forward"
-	StopSignMotionPlanMaxSpeedMPS = 8.0
+	StopSignMotionPlanMaxSpeedMPS = 15.0
 )
 
 var ErrInvalidPlan = errors.New("invalid stop-sign motion plan")

@@ -31,7 +31,9 @@ The operator captures:
 | `egoStopPose` | Exact vehicle-center pose and heading for the end of Brake + Stop. |
 | `exitPose` | Exact destination pose and heading where the attempt ends. |
 
-Start must be at least `16 m` before Stop, End must be at least `8 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
+Start distance is speed-aware: it must cover the deterministic acceleration distance, `1.25 s` of stable cruise, and braking distance for the chosen `0.5–15 m/s` target. End must be at least `8 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
+
+The saved-scene collection queue can contain every ready sign or any ordered subset. The backend expands the queue in sign order and then seeded-variant order, while FiveM teleports to each saved Start automatically. The queue persists in the browser so an unattended overnight collection can be prepared once and started as one safety-fenced batch.
 
 ## Plan contract
 
@@ -70,6 +72,7 @@ The default is `50` variants with `20%` motion variance. The accepted motion ran
 
 - Jobs and attempts never overlap.
 - Every variant produces one physical recording with three logical stages in order: `approach`, `brake_stop`, and `release`.
+- The raw recording begins at launch, but the training index begins only after one full second at stable cruise (within 2% of the peak approach command). Launch-heavy frames remain available for inspection and are not selected for training.
 - Capture and synchronization happen once at Start. FiveM emits exact transition timestamps and a phase on every 50 ms telemetry row, then capture finalizes once at End.
 - The vehicle, camera, controller history, and recording stay continuous through braking, the brief zero-speed confirmation, and release.
 - Long stationary dwell footage is not collected.

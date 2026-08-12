@@ -207,7 +207,7 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         egoCenterOffsetM,
         startDistanceM,
         exitDistanceM,
-        targetSpeedMps: 8,
+        targetSpeedMps: 15,
         stopConfirmationMs: 250,
         attemptCount: 2,
         weather: "EXTRASUNNY",
@@ -216,6 +216,8 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         seed: "fresh:alta:base",
     };
     assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
+    assert.equal(parseStopSignJobs([job])[0]?.targetSpeedMps, 15);
+    assert.throws(() => parseStopSignJobs([{...job, targetSpeedMps: 15.01}]), /targetSpeedMps/);
     assert.throws(
         () => parseStopSignJobs([{...job, signPose: {x: 0, y: 0, z: 0, heading: 0}}]),
         /uncalibrated origin placeholder/,
