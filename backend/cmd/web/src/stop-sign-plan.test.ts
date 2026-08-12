@@ -40,6 +40,16 @@ plan = captureScenePose(plan, 0, "exitPose", {x: 0, y: 12, z: 30, heading: 0});
 assertEqual(currentSceneStep(plan.entries[0]), 3);
 assert(isStopSignSceneCalibrated(plan.entries[0]!));
 assertEqual(validateStopSignPlan(plan).length, 0);
+const maximumVariancePlan = {
+    ...plan,
+    entries: plan.entries.map((entry) => ({...entry, autoVariations: {count: 50, motionVariancePct: 50}})),
+};
+assertEqual(validateStopSignPlan(maximumVariancePlan).length, 0);
+const excessiveVariancePlan = {
+    ...plan,
+    entries: plan.entries.map((entry) => ({...entry, autoVariations: {count: 50, motionVariancePct: 51}})),
+};
+assert(validateStopSignPlan(excessiveVariancePlan).some((error) => error.includes("0 to 50%")));
 assertEqual(JSON.stringify(stopSignPlanStats(plan)), JSON.stringify({signCount: 1, variationCount: 50, jobCount: 50, attemptCount: 50}));
 
 const queued = planForScene(plan, 0);

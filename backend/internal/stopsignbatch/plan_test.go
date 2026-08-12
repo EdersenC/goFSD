@@ -135,6 +135,7 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 	minimumSpeedJob := baseline
 	maximumSpeedJob := baseline
 	maximumCombinationChanges := 0
+	observedSpeedBuckets := make(map[float64]bool)
 	for index, job := range first {
 		if err := ValidateExpandedJob(job); err != nil {
 			t.Fatalf("generated job %d is invalid: %v", index, err)
@@ -145,6 +146,10 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		if job.TargetSpeedMPS < 10 || job.TargetSpeedMPS > 15 {
 			t.Fatalf("generated speed escaped automatic target range: %+v", job)
 		}
+		if !isAutomaticTargetSpeedBucket(job.TargetSpeedMPS) {
+			t.Fatalf("generated speed is not one of the configured MPH buckets: %+v", job)
+		}
+		observedSpeedBuckets[job.TargetSpeedMPS] = true
 		if job.BrakingDecelerationMPS2 < DefaultBrakingDecelerationMPS2 || job.BrakingDecelerationMPS2 > 4.0 {
 			t.Fatalf("generated braking change escaped the minimal 20%% bound: %+v", job)
 		}
@@ -174,14 +179,17 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 			t.Fatalf("stop target jitter is too large: %+v", job.EgoStopPose)
 		}
 	}
-	if minimumSpeedJob.TargetSpeedMPS != 10 || maximumSpeedJob.TargetSpeedMPS != 15 {
-		t.Fatalf("seeded jobs must cover the configured target-speed range: min=%+v max=%+v", minimumSpeedJob, maximumSpeedJob)
+	if minimumSpeedJob.TargetSpeedMPS != 10 || maximumSpeedJob.TargetSpeedMPS <= minimumSpeedJob.TargetSpeedMPS || len(observedSpeedBuckets) < 4 {
+		t.Fatalf("seeded jobs did not randomize across enough target-speed buckets: min=%+v max=%+v buckets=%v", minimumSpeedJob, maximumSpeedJob, observedSpeedBuckets)
 	}
 	if minimumSpeedJob.StartDistanceM >= maximumSpeedJob.StartDistanceM {
 		t.Fatalf("faster target must produce a farther start: min=%+v max=%+v", minimumSpeedJob, maximumSpeedJob)
 	}
-	if maximumSpeedJob.VariationProfile.TargetSpeedDeltaMPS != 5 || maximumSpeedJob.VariationProfile.TargetSpeedDeltaPct != 50 ||
-		maximumSpeedJob.VariationProfile.StartDistanceDeltaM <= 40 || maximumSpeedJob.VariationProfile.CombinationMagnitudePct <= 0 {
+	wantMaximumDeltaMPS := maximumSpeedJob.TargetSpeedMPS - baseline.TargetSpeedMPS
+	wantMaximumDeltaPct := wantMaximumDeltaMPS / baseline.TargetSpeedMPS * 100
+	if math.Abs(maximumSpeedJob.VariationProfile.TargetSpeedDeltaMPS-wantMaximumDeltaMPS) > 1e-6 ||
+		math.Abs(maximumSpeedJob.VariationProfile.TargetSpeedDeltaPct-wantMaximumDeltaPct) > 1e-6 ||
+		maximumSpeedJob.VariationProfile.StartDistanceDeltaM <= 0 || maximumSpeedJob.VariationProfile.CombinationMagnitudePct <= 0 {
 		t.Fatalf("maximum-speed combination did not measure its exact change from baseline: %+v", maximumSpeedJob.VariationProfile)
 	}
 	if maximumCombinationChanges < 10 {
@@ -213,7 +221,7 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 	highVariancePlan := plan
 	highVariancePlan.Entries = append([]Entry(nil), plan.Entries...)
 	highVarianceSpec := *plan.Entries[0].AutoVariations
-	highVarianceSpec.MotionVariancePct = 25
+	highVarianceSpec.MotionVariancePct = 50
 	highVariancePlan.Entries[0].AutoVariations = &highVarianceSpec
 	highVarianceJobs, err := Expand(highVariancePlan)
 	if err != nil {
@@ -229,6 +237,14 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 	if highVarianceJobs[1].BrakingDecelerationMPS2 <= lowVarianceJobs[1].BrakingDecelerationMPS2 ||
 		highVarianceJobs[1].ReleaseAccelerationMPS2 <= lowVarianceJobs[1].ReleaseAccelerationMPS2 {
 		t.Fatalf("behavior changes must scale with Motion variance: low=%+v high=%+v", lowVarianceJobs[1], highVarianceJobs[1])
+	}
+	overLimitPlan := plan
+	overLimitPlan.Entries = append([]Entry(nil), plan.Entries...)
+	overLimitSpec := *plan.Entries[0].AutoVariations
+	overLimitSpec.MotionVariancePct = 51
+	overLimitPlan.Entries[0].AutoVariations = &overLimitSpec
+	if _, err := Expand(overLimitPlan); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "between 0 and 50") {
+		t.Fatalf("expected 51%% motion variance rejection, got=%v", err)
 	}
 }
 
@@ -250,7 +266,7 @@ func TestExpandCapturedSceneRejectsIncompleteOrBackwardsRoutes(t *testing.T) {
 	}
 }
 
-func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
+func TestExpandCapturedSceneDerivesStartForRandomSpeedBuckets(t *testing.T) {
 	start := Pose{X: 0, Y: -35, Z: 30, Heading: 0}
 	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
 	exit := Pose{X: 0, Y: 12, Z: 30, Heading: 0}
@@ -258,20 +274,27 @@ func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
 	plan := Plan{ID: "speed-range", Seed: "seed", Entries: []Entry{{
 		ID: "sign", CatalogID: "gta-v-sign-0001", CatalogPosition: &WorldPosition{X: 1, Y: 2, Z: 3},
 		StartPose: &start, EgoStopPose: &stop, ExitPose: &exit,
-		AutoVariations: &AutoVariationSpec{Count: 2}, TargetSpeedMPS: &targetSpeed,
+		AutoVariations: &AutoVariationSpec{Count: 16}, TargetSpeedMPS: &targetSpeed,
 	}}}
 	jobs, err := Expand(plan)
 	if err != nil {
 		t.Fatalf("valid automatic speed range should be accepted: %v", err)
 	}
-	if len(jobs) != 2 || jobs[0].TargetSpeedMPS != 10 || jobs[1].TargetSpeedMPS != 15 {
-		t.Fatalf("automatic variants did not guarantee range endpoints: %+v", jobs)
+	if len(jobs) != 16 || jobs[0].TargetSpeedMPS != 10 {
+		t.Fatalf("automatic variants did not preserve the minimum-speed baseline: %+v", jobs)
 	}
-	if jobs[1].StartDistanceM <= jobs[0].StartDistanceM || jobs[1].StartDistanceM < requiredRollingStartDistanceM(15, jobs[1].BrakingDecelerationMPS2) {
-		t.Fatalf("maximum-speed job did not move Start far enough back: %+v", jobs)
+	seen := make(map[float64]bool)
+	for _, job := range jobs {
+		if !isAutomaticTargetSpeedBucket(job.TargetSpeedMPS) {
+			t.Fatalf("automatic variant selected a non-bucket speed: %+v", job)
+		}
+		seen[job.TargetSpeedMPS] = true
+		if job.StartDistanceM < requiredRollingStartDistanceM(job.TargetSpeedMPS, job.BrakingDecelerationMPS2) {
+			t.Fatalf("speed-coupled Start is too close: %+v", job)
+		}
 	}
-	if jobs[0].StartDistanceM < requiredRollingStartDistanceM(10, jobs[0].BrakingDecelerationMPS2) {
-		t.Fatalf("minimum-speed job did not extend the captured Start far enough back: %+v", jobs)
+	if len(seen) < 3 {
+		t.Fatalf("seeded random target speeds did not cover enough buckets: %v", seen)
 	}
 	targetSpeed = 9
 	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "automatic 10.0-15.0m/s range") {
@@ -280,13 +303,28 @@ func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
 	targetSpeed = 10
 	plan.Entries[0].AutoVariations.Count = 1
 	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "between 2 and") {
-		t.Fatalf("automatic range needs at least two jobs to cover both endpoints: %v", err)
+		t.Fatalf("automatic range needs a baseline plus at least one randomized job: %v", err)
 	}
 	plan.Entries[0].AutoVariations.Count = 2
 	plan.Entries[0].BrakingDecelerationMPS2 = float64Ptr(4)
 	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "automatic behavior variants require baseline") {
 		t.Fatalf("automatic behavior range needs the canonical baseline: %v", err)
 	}
+}
+
+func isAutomaticTargetSpeedBucket(speedMPS float64) bool {
+	for index, speedMPH := range automaticTargetSpeedBucketsMPH {
+		bucketMPS := speedMPH / metersPerSecondToMilesPerHour
+		if index == 0 {
+			bucketMPS = minimumAutoTargetSpeedMPS
+		} else if index == len(automaticTargetSpeedBucketsMPH)-1 {
+			bucketMPS = maximumTargetSpeedMPS
+		}
+		if math.Abs(speedMPS-bucketMPS) <= 1e-9 {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPoseAtApproachDistancePreservesLaneOffset(t *testing.T) {

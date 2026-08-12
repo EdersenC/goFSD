@@ -51,7 +51,7 @@ Collect at least one clean continuous variant and deliberate failures that exerc
 - [ ] `release`: the same vehicle and recording continue smoothly from Stop to End.
 - [ ] The one video spans both stage boundaries without a visual or controller discontinuity.
 - [ ] The default scene expands to 50 deterministic variants, repeating the same seed reproduces them, and changing the seed changes them.
-- [ ] Route distance and speed stay within the selected bound (default `20%`, maximum `25%`), while weather/time/color cover broader conditions.
+- [ ] Route distance stays within the selected bound (default `20%`, maximum `50%`), target speed is one of the configured `22.4–33.6 mph` buckets, and weather/time/color cover broader conditions.
 - [ ] Crossing without stopping, stopping too early, collision, timeout, and operator stop produce inspectable failed outcomes.
 
 ## Data acceptance

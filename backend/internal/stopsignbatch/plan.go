@@ -43,7 +43,7 @@ const (
 	maximumTargetSpeedMPS              = 15.0
 	minimumStopConfirmationMS          = 100
 	maximumStopConfirmationMS          = 1_000
-	maximumMotionVariancePct           = 25.0
+	maximumMotionVariancePct           = 50.0
 	minimumCapturedStartM              = 16.0
 	minimumCapturedExitM               = 8.0
 	launchAccelerationMPS2             = 3.5
@@ -54,7 +54,10 @@ const (
 	maximumReleaseAccelerationMPS2     = 5.0
 	maximumAutoReleaseAccelerationMPS2 = 4.2
 	minimumRollingCruiseS              = 1.25
+	metersPerSecondToMilesPerHour      = 2.2369362921
 )
+
+var automaticTargetSpeedBucketsMPH = [...]float64{22.4, 24.4, 26.4, 28.4, 30.4, 32.4, 33.6}
 
 var (
 	ErrInvalidPlan = errors.New("invalid stop-sign collection plan")
@@ -119,9 +122,9 @@ type Variation struct {
 }
 
 // AutoVariationSpec expands one captured scene into deterministic collection
-// jobs. MotionVariancePct bounds route and exit changes. Target speeds cover
-// the configured minimum through the global maximum. Each generated start is
-// derived from its target speed so faster jobs have enough
+// jobs. MotionVariancePct bounds route and exit changes. Non-baseline target
+// speeds are selected reproducibly from the supported MPH buckets. Each
+// generated start is derived from its target speed so faster jobs have enough
 // acceleration, stable-cruise, and braking distance.
 type AutoVariationSpec struct {
 	Count             int     `json:"count"`
@@ -520,9 +523,8 @@ func capturedVariantSettings(base settings, seed string, jobIndex int, motionVar
 		return resolved
 	}
 	strength := motionVariancePct / maximumMotionVariancePct
-	resolved.targetSpeedMPS = maximumTargetSpeedMPS
-	if jobIndex > 1 {
-		resolved.targetSpeedMPS = base.targetSpeedMPS + variantUnit(seed, "target-speed")*(maximumTargetSpeedMPS-base.targetSpeedMPS)
+	if jobIndex > 0 {
+		resolved.targetSpeedMPS = randomAutomaticTargetSpeedMPS(seed)
 	}
 	resolved.brakingDecelerationMPS2 = base.brakingDecelerationMPS2 +
 		variantUnit(seed, "braking-deceleration")*(maximumAutoBrakingDecelerationMPS2-base.brakingDecelerationMPS2)*strength
@@ -541,6 +543,19 @@ func capturedVariantSettings(base settings, seed string, jobIndex int, motionVar
 	color := colorPool[variantIndex(seed, "vehicle-color", len(colorPool))]
 	resolved.vehicle.Color = &color
 	return resolved
+}
+
+func randomAutomaticTargetSpeedMPS(seed string) float64 {
+	bucketIndex := variantIndex(seed, "target-speed-bucket", len(automaticTargetSpeedBucketsMPH))
+	speedMPH := automaticTargetSpeedBucketsMPH[bucketIndex]
+	switch speedMPH {
+	case automaticTargetSpeedBucketsMPH[0]:
+		return minimumAutoTargetSpeedMPS
+	case automaticTargetSpeedBucketsMPH[len(automaticTargetSpeedBucketsMPH)-1]:
+		return maximumTargetSpeedMPS
+	default:
+		return speedMPH / metersPerSecondToMilesPerHour
+	}
 }
 
 func validateCapturedRoute(label string, start, stop, exit Pose) error {

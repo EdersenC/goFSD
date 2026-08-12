@@ -11,6 +11,11 @@ export const STOP_SIGN_EARLY_STOP_DISTANCE_M = 3;
 export const STOP_SIGN_STOP_INTENT_MARGIN_M = 1.4;
 export const STOP_SIGN_GO_DISTANCE_M = 8;
 
+const maximumSteeringCommand = 0.35;
+const initialLaunchSteeringLimit = 0.08;
+const launchSteeringRampDistanceM = 18;
+const steeringCommandRatePerSecond = 0.8;
+
 export type StopSignExpertInput = {
     phase: StopSignBehaviorPhase
     remainingDistanceM: number
@@ -19,6 +24,8 @@ export type StopSignExpertInput = {
     brakingDecelerationMps2: number
     releaseAccelerationMps2: number
     previousDesiredSpeedMps: number
+    previousDesiredWheelSteerNormalized: number
+    distanceFromStartM: number
     dtSeconds: number
     lateralErrorM: number
     headingErrorDeg: number
@@ -50,7 +57,8 @@ export function planStopSignExpert(input: StopSignExpertInput): StopSignExpertSu
     const speedErrorMps = desiredSpeedMps - input.measuredSpeedMps;
     const throttle = clamp(speedErrorMps * 0.85, 0, 1);
     const brake = clamp(-speedErrorMps * 0.75, 0, 1);
-    const steering = trackingSteer(input.lateralErrorM, input.headingErrorDeg, input.measuredSpeedMps);
+    const rawSteering = trackingSteer(input.lateralErrorM, input.headingErrorDeg, input.measuredSpeedMps);
+    const steering = guardedSteering(input, rawSteering);
     const stopProbability = input.phase === "decelerate"
         ? clamp(1 - input.remainingDistanceM / Math.max(1, stopIntentReferenceDistance(input.measuredSpeedMps, input.brakingDecelerationMps2)), 0, 1)
         : 0;
@@ -125,7 +133,26 @@ function accelerateToward(current: number, target: number, accelerationMps2: num
 function trackingSteer(lateralErrorM: number, headingErrorDeg: number, speedMps: number): number {
     const headingCorrection = headingErrorDeg * Math.PI / 180;
     const crossTrackCorrection = Math.atan2(0.55 * lateralErrorM, speedMps + 1);
-    return clamp((headingCorrection + crossTrackCorrection) / 0.733038306, -0.35, 0.35);
+    return clamp((headingCorrection + crossTrackCorrection) / 0.733038306, -maximumSteeringCommand, maximumSteeringCommand);
+}
+
+function guardedSteering(input: StopSignExpertInput, requestedSteering: number): number {
+    const launchProgress = input.phase === "release"
+        ? 1
+        : smoothStep(clamp(input.distanceFromStartM / launchSteeringRampDistanceM, 0, 1));
+    const steeringLimit = initialLaunchSteeringLimit
+        + (maximumSteeringCommand - initialLaunchSteeringLimit) * launchProgress;
+    const boundedRequest = clamp(requestedSteering, -steeringLimit, steeringLimit);
+    const maximumStep = steeringCommandRatePerSecond * input.dtSeconds;
+    return moveToward(input.previousDesiredWheelSteerNormalized, boundedRequest, maximumStep);
+}
+
+function moveToward(current: number, target: number, maximumStep: number): number {
+    return current + clamp(target - current, -maximumStep, maximumStep);
+}
+
+function smoothStep(value: number): number {
+    return value * value * (3 - 2 * value);
 }
 
 function supervision(
@@ -158,8 +185,11 @@ function validateInput(input: StopSignExpertInput) {
             throw new RangeError(`${label} must be finite`);
         }
     }
-    if (input.remainingDistanceM < 0 || input.measuredSpeedMps < 0 || input.targetSpeedMps <= 0) {
+    if (input.remainingDistanceM < 0 || input.distanceFromStartM < 0 || input.measuredSpeedMps < 0 || input.targetSpeedMps <= 0) {
         throw new RangeError("distance and speeds must be non-negative, with a positive targetSpeedMps");
+    }
+    if (Math.abs(input.previousDesiredWheelSteerNormalized) > maximumSteeringCommand) {
+        throw new RangeError(`previousDesiredWheelSteerNormalized must be within [-${maximumSteeringCommand}, ${maximumSteeringCommand}]`);
     }
     if (input.brakingDecelerationMps2 <= 0 || input.releaseAccelerationMps2 <= 0) {
         throw new RangeError("braking and release accelerations must be positive");

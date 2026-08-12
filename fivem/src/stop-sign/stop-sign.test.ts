@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
+import {approachTrackingError, gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
     classifyStopSignPhase,
     planStopSignExpert,
@@ -37,6 +37,22 @@ function testGeometryUsesGtaHeadingConvention() {
     assert.equal(relative.lateralM, 0);
 }
 
+function testApproachTrackingStartsOnCapturedTangent() {
+    const startPose = {x: 2.4, y: -68, z: 3, heading: 358};
+    const stopPose = {x: 0, y: 0, z: 3, heading: 0};
+    const directStopError = relativeStopLinePose(startPose, stopPose);
+    assert.equal(directStopError.lateralM, 2.4);
+    assert.equal(directStopError.headingErrorDeg, 2);
+
+    const launchError = approachTrackingError(startPose, startPose, stopPose);
+    assert.deepEqual(launchError, {lateralErrorM: 0, headingErrorDeg: 0, blend: 0});
+
+    const joinedError = approachTrackingError({x: 0, y: -40, z: 3, heading: 0}, startPose, stopPose);
+    assert.equal(joinedError.blend, 1);
+    assert.equal(joinedError.lateralErrorM, 0);
+    assert.equal(joinedError.headingErrorDeg, 0);
+}
+
 function testPhaseClassificationIsTemporalButNotSequenceDependent() {
     const common = {targetSpeedMps: 8, brakingDecelerationMps2: 3.8, dtSeconds: 0.05};
     assert.equal(classifyStopSignPhase({
@@ -62,6 +78,8 @@ function testPhaseClassificationIsTemporalButNotSequenceDependent() {
         ...brakingInput,
         phase,
         releaseAccelerationMps2: 3.5,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 20,
         lateralErrorM: 0,
         headingErrorDeg: 0,
     });
@@ -79,6 +97,8 @@ function testApproachTransitionsFromThrottleToBrake() {
         brakingDecelerationMps2: 3.8,
         releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 1,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 20,
         dtSeconds: 0.05,
         lateralErrorM: 0,
         headingErrorDeg: 0,
@@ -91,6 +111,8 @@ function testApproachTransitionsFromThrottleToBrake() {
         brakingDecelerationMps2: 3.8,
         releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 5,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 20,
         dtSeconds: 0.05,
         lateralErrorM: 0,
         headingErrorDeg: 0,
@@ -108,6 +130,8 @@ function testStopAndGoLabelsAreExplicit() {
         brakingDecelerationMps2: 3.8,
         releaseAccelerationMps2: 3.5,
         previousDesiredSpeedMps: 0,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 20,
         dtSeconds: 0.05,
         lateralErrorM: 0,
         headingErrorDeg: 0,
@@ -137,6 +161,8 @@ function testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile() {
         measuredSpeedMps: 0,
         targetSpeedMps: 8,
         previousDesiredSpeedMps: 0,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 20,
         brakingDecelerationMps2: 3.8,
         dtSeconds: 0.05,
         lateralErrorM: 0,
@@ -146,6 +172,36 @@ function testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile() {
     const faster = planStopSignExpert({...releaseCommon, releaseAccelerationMps2: 4.2});
     assert(faster.desiredSpeedMps > standard.desiredSpeedMps);
     assert(faster.throttle > standard.throttle);
+}
+
+function testLaunchSteeringIsBoundedAndRateLimited() {
+    const common = {
+        phase: "accelerate" as const,
+        remainingDistanceM: 60,
+        measuredSpeedMps: 0.2,
+        targetSpeedMps: 10,
+        brakingDecelerationMps2: 3.8,
+        releaseAccelerationMps2: 3.5,
+        previousDesiredSpeedMps: 0.2,
+        dtSeconds: 0.05,
+        lateralErrorM: 2.4,
+        headingErrorDeg: 2,
+    };
+    const first = planStopSignExpert({
+        ...common,
+        previousDesiredWheelSteerNormalized: 0,
+        distanceFromStartM: 0,
+    });
+    assert(first.desiredWheelSteerNormalized > 0);
+    assert(first.desiredWheelSteerNormalized <= 0.04 + 1e-9);
+
+    const second = planStopSignExpert({
+        ...common,
+        previousDesiredWheelSteerNormalized: first.desiredWheelSteerNormalized,
+        distanceFromStartM: 0.5,
+    });
+    assert(second.desiredWheelSteerNormalized - first.desiredWheelSteerNormalized <= 0.04 + 1e-9);
+    assert(second.desiredWheelSteerNormalized <= 0.081 + 1e-9);
 }
 
 function testEarlyStopScoringWaitsForActualDeparture() {
@@ -373,10 +429,12 @@ function baselineVariationProfile(configuredMotionVariancePct = 0) {
 }
 
 testGeometryUsesGtaHeadingConvention();
+testApproachTrackingStartsOnCapturedTangent();
 testPhaseClassificationIsTemporalButNotSequenceDependent();
 testApproachTransitionsFromThrottleToBrake();
 testStopAndGoLabelsAreExplicit();
 testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile();
+testLaunchSteeringIsBoundedAndRateLimited();
 testEarlyStopScoringWaitsForActualDeparture();
 testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
 testAttemptPreflightRejectsUnsafeStarts();

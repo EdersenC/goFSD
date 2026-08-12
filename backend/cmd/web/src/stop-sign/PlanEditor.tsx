@@ -197,7 +197,7 @@ export function PlanEditor({
                                         label={`${startRange.minimumM.toFixed(0)}–${startRange.maximumM.toFixed(0)} m generated Starts`}
                                     />}
                                     <Chip variant="outlined" label="15 measured dimensions" />
-                                    <Chip variant="outlined" label="At 25% · brake 3.80–4.05 m/s² · release 3.50–4.20 m/s²" />
+                                    <Chip variant="outlined" label="At 50% · brake 3.80–4.05 m/s² · release 3.50–4.20 m/s²" />
                                 </Stack>
                             </Stack>
                             <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "1fr 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>
@@ -261,7 +261,7 @@ export function PlanEditor({
                                     </Box>
                                 </Box>
                                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
-                                    The first run uses the minimum, {formatSpeed(entry.targetSpeedMps)}; the second guarantees the maximum, {formatSpeed(MAXIMUM_TARGET_SPEED_MPS)}; remaining runs sample between them. Start is recalculated from each exact speed and braking profile. The baseline minimum needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m plus your captured cruise buffer. Launch frames stay raw; training begins after one stable cruise second.
+                                    The first run preserves the baseline, {formatSpeed(entry.targetSpeedMps)}. Every later run randomly selects a seeded speed bucket from 22.4 through {formatSpeed(MAXIMUM_TARGET_SPEED_MPS)}, mostly in 2 mph steps. Start is recalculated from each exact speed and braking profile. The baseline minimum needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m plus your captured cruise buffer. Launch frames stay raw; training begins after one stable cruise second.
                                 </Typography>
                             </AccordionDetails>
                         </Accordion>

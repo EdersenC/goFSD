@@ -21,7 +21,7 @@ import {
     STOP_SIGN_STOP_POSITION_TOLERANCE_M,
     STOP_SIGN_STOP_SPEED_MPS,
 } from "./expert";
-import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
+import {approachTrackingError, gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
     advanceEarlyStopProgress,
     nextFixedIntervalDeadlineMs,
@@ -281,6 +281,7 @@ export class StopSignRunner {
         let stoppedAtDistanceM: number | null = null;
         let departureObserved = false;
         let previousDesiredSpeedMps = 0;
+        let previousDesiredWheelSteerNormalized = 0;
         let nextControlDeadlineMs = startedAtMs;
         while (true) {
             const nowMs = GetGameTimer();
@@ -351,20 +352,27 @@ export class StopSignRunner {
                 job.stopConfirmationMs,
                 frontDistanceM,
             );
-            const trackingError = phase === "release" ? exitError : centerError;
+            const trackingError = phase === "release"
+                ? {lateralErrorM: exitError.lateralM, headingErrorDeg: exitError.headingErrorDeg}
+                : approachTrackingError(pose, job.startPose, job.egoStopPose);
             const supervision = planStopSignExpert({
                 phase,
-                remainingDistanceM: Math.max(0, -trackingError.longitudinalM),
+                remainingDistanceM: phase === "release"
+                    ? Math.max(0, -exitError.longitudinalM)
+                    : remainingStopDistanceM,
                 measuredSpeedMps: speedMps,
                 targetSpeedMps: job.targetSpeedMps,
                 brakingDecelerationMps2: job.brakingDecelerationMps2,
                 releaseAccelerationMps2: job.releaseAccelerationMps2,
                 previousDesiredSpeedMps,
+                previousDesiredWheelSteerNormalized,
+                distanceFromStartM: startError.distanceM,
                 dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
-                lateralErrorM: trackingError.lateralM,
+                lateralErrorM: trackingError.lateralErrorM,
                 headingErrorDeg: trackingError.headingErrorDeg,
             });
             previousDesiredSpeedMps = supervision.desiredSpeedMps;
+            previousDesiredWheelSteerNormalized = supervision.desiredWheelSteerNormalized;
             applyExpertControl(ego.vehicle.id, supervision);
             this.egoService.collectStopSignData(ego, this.latestTelemetry, supervision);
             if (phase === "release" && reachedExitPose(exitError)) {
