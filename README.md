@@ -72,7 +72,7 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 9. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
 10. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
-The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` guarantees `10 m/s`, `auto-002` guarantees `15 m/s`, and later variants sample between them. Every resolved Start is coupled to speed; later variants also apply small route perturbations, centimeter-scale Stop jitter, and broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
+The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` is the unchanged scene baseline at `10 m/s`, `auto-002` guarantees `15 m/s`, and later variants sample between them. A generated run is a combination rather than a single-axis variant: its target speed and coupled Start, End distance, lane offsets, headings, Stop jitter, weather, time, and vehicle color can change together. Every resolved job stores exact deltas from `auto-001`, the canonical set of changed dimensions, and a normalized 13-dimension RMS combination score. The score is audit metadata—not a model input or statistical dataset variance—and is normalized against fixed supported ranges so increasing Motion variance produces measurably larger geometry changes. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
 
 ## Scene geometry contract
 
@@ -109,7 +109,7 @@ Fresh runs use scene `stop-sign:continuous-v2` and this layout:
     └── frames/
 ```
 
-`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, exact stage-transition timestamps, catalog/location identity, resolved variant, seed, attempt index, and synchronized telemetry. One variant produces one trip folder. `dataset.jsonl` assigns each anchor frame from the latest telemetry row at or before that RGB frame; causal history never borrows a future phase, while future targets may cross a stage boundary.
+`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, the resolved `variationProfile`, exact stage-transition timestamps, catalog/location identity, variant seed, attempt index, and synchronized telemetry. One variant produces one trip folder. `dataset.jsonl` assigns each anchor frame from the latest telemetry row at or before that RGB frame; causal history never borrows a future phase, while future targets may cross a stage boundary.
 
 The current model consumes five causal RGB frames plus current-speed history. Stop-sign pose, stop-line distance, ego error, and other oracle geometry are labels/scoring metadata only; they are not perception inputs. The primary outputs are:
 

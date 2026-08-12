@@ -42,6 +42,12 @@ func TestStopSignBatchHandlerQueuesOneDeterministicCommand(t *testing.T) {
 		t.Fatalf("unexpected deterministic jobs: %+v", body.Command.StopSignJobs)
 	}
 	job := body.Command.StopSignJobs[1]
+	if !body.Command.StopSignJobs[0].VariationProfile.Baseline || body.Command.StopSignJobs[0].VariationProfile.ChangeCount != 0 {
+		t.Fatalf("first job must be the explicit variation baseline: %+v", body.Command.StopSignJobs[0].VariationProfile)
+	}
+	if job.VariationProfile.Baseline || job.VariationProfile.ChangeCount < 5 || job.VariationProfile.CombinationMagnitudePct <= 0 {
+		t.Fatalf("varied job must report a measured multi-axis combination: %+v", job.VariationProfile)
+	}
 	if job.StopLinePose.X != 104 || job.EgoStopPose.X != 107 || job.StartPose.X != 167 || job.ExitPose.X != 92 || job.StopLinePose.Y != 200 || job.EgoCenterOffsetM != 3 || job.ExitDistanceM != 8 || job.TargetSpeedMPS != 7.5 || job.StopConfirmationMS != 500 || job.AttemptCount != 4 {
 		t.Fatalf("unexpected derived/varied job: %+v", job)
 	}

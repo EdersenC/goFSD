@@ -37,6 +37,7 @@ import {
 } from "./types";
 import {positionVehicleAtStopSignPose} from "./vehicle-positioning";
 import {deriveStopSignRouteWaypoint, StopSignRouteWaypoint} from "./route-waypoint";
+import {cloneStopSignVariationProfile} from "./variation-profile";
 
 export const STOP_SIGN_SCENE_ID = "stop-sign";
 export const STOP_SIGN_SCENE_VARIANT = "continuous-v2";
@@ -600,6 +601,7 @@ function buildGoal(job: StopSignJob, routeWaypoint: StopSignRouteWaypoint, attem
         attemptCount: job.attemptCount,
         seed: job.seed,
         variationId: job.variationId,
+        variationProfile: cloneStopSignVariationProfile(job.variationProfile),
     };
 }
 

@@ -182,7 +182,7 @@ export function PlanEditor({
                                 <Box>
                                     <Typography sx={{fontWeight: 850}}>Automatic seeded variants</Typography>
                                     <Typography variant="body2" color="text.secondary">
-                                        Target speed spans 10–15 m/s (22.4–33.6 mph) across the seeded runs. Faster runs start farther back while preserving the captured cruise buffer. Weather, clock time, color, and route conditions vary too; Stop stays exact.
+                                        Every run is a combination: speed, its coupled Start, End distance, lane offsets, headings, Stop jitter, weather, time, and color vary together. Each resolved job records exact deltas from auto-001 plus one normalized combination score.
                                     </Typography>
                                 </Box>
                                 <Stack direction="row" sx={{gap: .75, flexWrap: "wrap", justifyContent: "flex-end"}}>
@@ -196,6 +196,7 @@ export function PlanEditor({
                                         variant="outlined"
                                         label={`${startRange.minimumM.toFixed(0)}–${startRange.maximumM.toFixed(0)} m generated Starts`}
                                     />}
+                                    <Chip variant="outlined" label="13 measured dimensions" />
                                 </Stack>
                             </Stack>
                             <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "1fr 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>

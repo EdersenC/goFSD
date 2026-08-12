@@ -102,6 +102,7 @@ type StopSignTime = stopsignbatch.TimeOfDay
 type StopSignColor = stopsignbatch.RGBColor
 type StopSignVehicle = stopsignbatch.VehicleVariant
 type StopSignBatchJob = stopsignbatch.Job
+type StopSignVariationProfile = stopsignbatch.VariationProfile
 
 type StatusUpdate struct {
 	Status               RuntimeStatus          `json:"status"`
@@ -114,19 +115,20 @@ type StatusUpdate struct {
 }
 
 type StopSignBatchProgress struct {
-	BatchID            string                  `json:"batchId"`
-	PlanFingerprint    string                  `json:"planFingerprint,omitempty"`
-	State              string                  `json:"state"`
-	JobID              string                  `json:"jobId,omitempty"`
-	JobIndex           int                     `json:"jobIndex"`
-	JobCount           int                     `json:"jobCount"`
-	CompletedJobs      int                     `json:"completedJobs"`
-	AttemptIndex       int                     `json:"attemptIndex"`
-	AttemptCount       int                     `json:"attemptCount"`
-	Phase              string                  `json:"phase,omitempty"`
-	StartedAtMs        int64                   `json:"startedAtMs,omitempty"`
-	UpdatedAtMs        int64                   `json:"updatedAtMs,omitempty"`
-	LastAttemptOutcome *StopSignAttemptOutcome `json:"lastAttemptOutcome,omitempty"`
+	BatchID            string                    `json:"batchId"`
+	PlanFingerprint    string                    `json:"planFingerprint,omitempty"`
+	State              string                    `json:"state"`
+	JobID              string                    `json:"jobId,omitempty"`
+	JobIndex           int                       `json:"jobIndex"`
+	JobCount           int                       `json:"jobCount"`
+	CompletedJobs      int                       `json:"completedJobs"`
+	AttemptIndex       int                       `json:"attemptIndex"`
+	AttemptCount       int                       `json:"attemptCount"`
+	Phase              string                    `json:"phase,omitempty"`
+	VariationProfile   *StopSignVariationProfile `json:"variationProfile,omitempty"`
+	StartedAtMs        int64                     `json:"startedAtMs,omitempty"`
+	UpdatedAtMs        int64                     `json:"updatedAtMs,omitempty"`
+	LastAttemptOutcome *StopSignAttemptOutcome   `json:"lastAttemptOutcome,omitempty"`
 }
 
 type StopSignAttemptOutcome struct {
@@ -925,6 +927,14 @@ func normalizedStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBat
 	progress.AttemptCount = max(0, progress.AttemptCount)
 	progress.AttemptIndex = max(0, min(progress.AttemptIndex, progress.AttemptCount))
 	progress.Phase = normalizeStopSignPhase(progress.Phase)
+	if progress.VariationProfile != nil {
+		profile := stopsignbatch.CloneVariationProfile(*progress.VariationProfile)
+		if stopsignbatch.ValidateVariationProfile(profile) != nil {
+			progress.VariationProfile = nil
+		} else {
+			progress.VariationProfile = &profile
+		}
+	}
 	if progress.LastAttemptOutcome != nil {
 		outcome := *progress.LastAttemptOutcome
 		outcome.Status = strings.TrimSpace(outcome.Status)
@@ -943,6 +953,10 @@ func cloneStopSignBatchProgress(source *StopSignBatchProgress) *StopSignBatchPro
 		return nil
 	}
 	clone := *source
+	if source.VariationProfile != nil {
+		profile := stopsignbatch.CloneVariationProfile(*source.VariationProfile)
+		clone.VariationProfile = &profile
+	}
 	if source.LastAttemptOutcome != nil {
 		outcome := *source.LastAttemptOutcome
 		outcome.StoppedAtDistanceM = cloneFloatPtr(source.LastAttemptOutcome.StoppedAtDistanceM)
@@ -1142,6 +1156,7 @@ func cloneStopSignBatchJobs(source []StopSignBatchJob) []StopSignBatchJob {
 	}
 	clone := append([]StopSignBatchJob(nil), source...)
 	for index := range clone {
+		clone[index].VariationProfile = stopsignbatch.CloneVariationProfile(source[index].VariationProfile)
 		if source[index].CatalogPosition != nil {
 			position := *source[index].CatalogPosition
 			clone[index].CatalogPosition = &position

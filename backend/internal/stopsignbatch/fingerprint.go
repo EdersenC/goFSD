@@ -20,7 +20,7 @@ func PlanFingerprint(plan Plan) (string, error) {
 		Seed    string `json:"seed"`
 		Jobs    []Job  `json:"jobs"`
 	}{
-		Version: "stop-sign-plan-fingerprint-v4",
+		Version: "stop-sign-plan-fingerprint-v5",
 		ID:      strings.TrimSpace(plan.ID),
 		Seed:    strings.TrimSpace(plan.Seed),
 		Jobs:    jobs,

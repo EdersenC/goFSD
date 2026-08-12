@@ -214,6 +214,7 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
         time: {hour: 12, minute: 0},
         vehicle: {model: "sultan"},
         seed: "fresh:alta:base",
+        variationProfile: baselineVariationProfile(),
     };
     assert.equal(parseStopSignJobs([job])[0]?.id, job.id);
     assert.equal(parseStopSignJobs([job])[0]?.targetSpeedMps, 15);
@@ -229,6 +230,10 @@ function testExpandedJobsKeepBackendAndFiveMGeometryCoherent() {
     assert.throws(
         () => parseStopSignJobs([{...job, exitPose: {...exitPose, x: exitPose.x + 1}}]),
         /contradicts the sign-relative distance contract/,
+    );
+    assert.throws(
+        () => parseStopSignJobs([{...job, variationProfile: {...job.variationProfile, combinationMagnitudePct: 10}}]),
+        /baseline must have zero changes/,
     );
 }
 
@@ -293,7 +298,33 @@ function capturedSceneJobFixture() {
         time: {hour: 12, minute: 0},
         vehicle: {model: "sultan"},
         seed: "fresh:catalog-23:auto-001",
+        variationProfile: baselineVariationProfile(20),
     }])[0]!;
+}
+
+function baselineVariationProfile(configuredMotionVariancePct = 0) {
+    return {
+        contract: "stop-sign-variation-profile.v1",
+        baseline: true,
+        configuredMotionVariancePct,
+        changedDimensions: [],
+        changeCount: 0,
+        combinationMagnitudePct: 0,
+        targetSpeedDeltaMps: 0,
+        targetSpeedDeltaPct: 0,
+        startDistanceDeltaM: 0,
+        exitDistanceDeltaM: 0,
+        stopOffsetM: 0,
+        stopHeadingDeltaDeg: 0,
+        startLaneOffsetDeltaM: 0,
+        startHeadingDeltaDeg: 0,
+        exitLaneOffsetDeltaM: 0,
+        exitHeadingDeltaDeg: 0,
+        timeDeltaMinutes: 0,
+        weatherChanged: false,
+        vehicleModelChanged: false,
+        vehicleColorDeltaPct: 0,
+    };
 }
 
 testGeometryUsesGtaHeadingConvention();

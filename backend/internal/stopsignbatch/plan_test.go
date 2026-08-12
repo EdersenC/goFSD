@@ -124,8 +124,13 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		baseline.CatalogPosition == nil || baseline.StartPose != start || baseline.EgoStopPose != stop || baseline.ExitPose != exit {
 		t.Fatalf("baseline did not preserve captured scene: %+v", baseline)
 	}
+	if baseline.VariationProfile.Contract != VariationProfileContract || !baseline.VariationProfile.Baseline ||
+		baseline.VariationProfile.ChangeCount != 0 || baseline.VariationProfile.CombinationMagnitudePct != 0 {
+		t.Fatalf("baseline variation profile must be an explicit zero reference: %+v", baseline.VariationProfile)
+	}
 	minimumSpeedJob := baseline
 	maximumSpeedJob := baseline
+	maximumCombinationChanges := 0
 	for index, job := range first {
 		if err := ValidateExpandedJob(job); err != nil {
 			t.Fatalf("generated job %d is invalid: %v", index, err)
@@ -148,6 +153,7 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		if job.TargetSpeedMPS > maximumSpeedJob.TargetSpeedMPS {
 			maximumSpeedJob = job
 		}
+		maximumCombinationChanges = max(maximumCombinationChanges, job.VariationProfile.ChangeCount)
 		if planarDistance(job.EgoStopPose, stop) > .35 {
 			t.Fatalf("stop target jitter is too large: %+v", job.EgoStopPose)
 		}
@@ -158,8 +164,41 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 	if minimumSpeedJob.StartDistanceM >= maximumSpeedJob.StartDistanceM {
 		t.Fatalf("faster target must produce a farther start: min=%+v max=%+v", minimumSpeedJob, maximumSpeedJob)
 	}
+	if maximumSpeedJob.VariationProfile.TargetSpeedDeltaMPS != 5 || maximumSpeedJob.VariationProfile.TargetSpeedDeltaPct != 50 ||
+		maximumSpeedJob.VariationProfile.StartDistanceDeltaM <= 40 || maximumSpeedJob.VariationProfile.CombinationMagnitudePct <= 0 {
+		t.Fatalf("maximum-speed combination did not measure its exact change from baseline: %+v", maximumSpeedJob.VariationProfile)
+	}
+	if maximumCombinationChanges < 8 {
+		t.Fatalf("seeded jobs did not combine enough independent dimensions: max changed dimensions=%d", maximumCombinationChanges)
+	}
 	if first[1].Weather == baseline.Weather && first[1].Time == baseline.Time && reflect.DeepEqual(first[1].Vehicle.Color, baseline.Vehicle.Color) {
 		t.Fatalf("generated conditions did not vary: %+v", first[1])
+	}
+
+	lowVariancePlan := plan
+	lowVariancePlan.Entries = append([]Entry(nil), plan.Entries...)
+	lowVarianceSpec := *plan.Entries[0].AutoVariations
+	lowVarianceSpec.MotionVariancePct = 5
+	lowVariancePlan.Entries[0].AutoVariations = &lowVarianceSpec
+	lowVarianceJobs, err := Expand(lowVariancePlan)
+	if err != nil {
+		t.Fatalf("Expand low-variance scene: %v", err)
+	}
+	highVariancePlan := plan
+	highVariancePlan.Entries = append([]Entry(nil), plan.Entries...)
+	highVarianceSpec := *plan.Entries[0].AutoVariations
+	highVarianceSpec.MotionVariancePct = 25
+	highVariancePlan.Entries[0].AutoVariations = &highVarianceSpec
+	highVarianceJobs, err := Expand(highVariancePlan)
+	if err != nil {
+		t.Fatalf("Expand high-variance scene: %v", err)
+	}
+	if highVarianceJobs[1].VariationProfile.CombinationMagnitudePct <= lowVarianceJobs[1].VariationProfile.CombinationMagnitudePct {
+		t.Fatalf(
+			"fixed-range combination score must expose increased motion variance: low=%+v high=%+v",
+			lowVarianceJobs[1].VariationProfile,
+			highVarianceJobs[1].VariationProfile,
+		)
 	}
 }
 
@@ -327,6 +366,11 @@ func TestValidateExpandedJobRejectsContradictoryGeometry(t *testing.T) {
 	tampered.ExitPose.Y += 0.25
 	if err := ValidateExpandedJob(tampered); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "exitPose") {
 		t.Fatalf("expected contradictory exit rejection, got=%v", err)
+	}
+	tampered = jobs[0]
+	tampered.VariationProfile.CombinationMagnitudePct = 10
+	if err := ValidateExpandedJob(tampered); !errors.Is(err, ErrInvalidPlan) || !strings.Contains(err.Error(), "baseline variationProfile") {
+		t.Fatalf("expected tampered variation profile rejection, got=%v", err)
 	}
 }
 

@@ -7,7 +7,7 @@ import {normalizeScenePayload, SceneType} from "./sceneManger";
 import {WaypointCompleted} from "./egoService";
 import {isActuatorStateNeutral, isInferenceCleanupComplete} from "./expertNeutral";
 import {RECONNECT_CAPTURE_STOP_REQUEST} from "./captureLifecycle";
-import {StopSignJob, StopSignPose} from "./stop-sign/types";
+import {StopSignJob, StopSignPose, StopSignVariationProfile} from "./stop-sign/types";
 import {
     ControlSessionFrontier,
     matchesControlSafetySyncAck,
@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-calibrated-speed-profile-v18";
+const SERVER_BUILD_ID = "2026-08-11-variant-combinations-v20";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
@@ -168,6 +168,7 @@ type ControlStatusUpdate = {
         attemptIndex: number
         attemptCount: number
         phase: string
+        variationProfile?: StopSignVariationProfile
         startedAtMs: number
         updatedAtMs: number
         lastAttemptOutcome?: {

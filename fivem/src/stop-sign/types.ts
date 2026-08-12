@@ -23,6 +23,29 @@ export type StopSignTimeVariant = {
     minute: number
 };
 
+export type StopSignVariationProfile = {
+    contract: "stop-sign-variation-profile.v1"
+    baseline: boolean
+    configuredMotionVariancePct: number
+    changedDimensions: string[]
+    changeCount: number
+    combinationMagnitudePct: number
+    targetSpeedDeltaMps: number
+    targetSpeedDeltaPct: number
+    startDistanceDeltaM: number
+    exitDistanceDeltaM: number
+    stopOffsetM: number
+    stopHeadingDeltaDeg: number
+    startLaneOffsetDeltaM: number
+    startHeadingDeltaDeg: number
+    exitLaneOffsetDeltaM: number
+    exitHeadingDeltaDeg: number
+    timeDeltaMinutes: number
+    weatherChanged: boolean
+    vehicleModelChanged: boolean
+    vehicleColorDeltaPct: number
+};
+
 export type StopSignJob = {
     id: string
     entryId: string
@@ -45,6 +68,7 @@ export type StopSignJob = {
     time: StopSignTimeVariant
     vehicle: StopSignVehicleVariant
     seed: string
+    variationProfile: StopSignVariationProfile
 };
 
 export type StopSignBehaviorPhase =
@@ -88,6 +112,7 @@ export type StopSignGoal = {
     attemptCount: number
     seed: string
     variationId: string
+    variationProfile: StopSignVariationProfile
 };
 
 export type StopSignExpertSupervision = {

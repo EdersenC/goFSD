@@ -685,6 +685,25 @@ function CollectionControls({
                     <Button variant="outlined" color="warning" startIcon={<StopRounded />} disabled={!active || pending.has("end-collection")} onClick={onStop}>End collection</Button>
                 </Stack>
                 <Divider sx={{my: 2}} />
+                {batch?.variationProfile && (
+                    <Box sx={{border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1, mb: 1}}>
+                        <Stack direction="row" sx={{gap: .75, flexWrap: "wrap", alignItems: "center"}}>
+                            <Chip
+                                size="small"
+                                color={batch.variationProfile.baseline ? "default" : "secondary"}
+                                label={batch.variationProfile.baseline
+                                    ? "baseline · 0% difference"
+                                    : `${batch.variationProfile.combinationMagnitudePct.toFixed(1)}% combined difference`}
+                            />
+                            <Chip size="small" variant="outlined" label={`${batch.variationProfile.changeCount}/13 dimensions changed`} />
+                        </Stack>
+                        {!batch.variationProfile.baseline && (
+                            <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: .6}}>
+                                {batch.variationProfile.changedDimensions.join(" · ")}
+                            </Typography>
+                        )}
+                    </Box>
+                )}
                 <Stack direction="row" sx={{justifyContent: "space-between", mb: .7}}>
                     <Box sx={{minWidth: 0}}>
                         <Typography variant="caption" color="text.secondary">Batch · {batch?.completedJobs ?? 0}/{batch?.jobCount ?? jobCount} runs</Typography>

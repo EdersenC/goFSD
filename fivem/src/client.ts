@@ -9,7 +9,8 @@ import {CONTROL_TELEMETRY_SAMPLE_INTERVAL_MS} from "./controlTelemetry";
 import {resolveStopCommandStatus} from "./control-status";
 import {parseStopSignJobs} from "./stop-sign/batch";
 import {STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
-import {StopSignOutcome, StopSignPose} from "./stop-sign/types";
+import {StopSignOutcome, StopSignPose, StopSignVariationProfile} from "./stop-sign/types";
+import {cloneStopSignVariationProfile} from "./stop-sign/variation-profile";
 import {setStopSignCatalogWaypoint} from "./stop-sign/catalog-waypoint";
 import {
     canAcknowledgeControlSafetyEpochSync,
@@ -31,7 +32,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-calibrated-speed-profile-v18";
+const CLIENT_BUILD_ID = "2026-08-11-variant-combinations-v20";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -82,6 +83,7 @@ type ControlStopSignBatchProgress = {
     attemptIndex: number
     attemptCount: number
     phase: string
+    variationProfile?: StopSignVariationProfile
     lastAttemptOutcome?: StopSignOutcome
 };
 
@@ -389,6 +391,7 @@ async function executeStopSignBatchControl(
     let attemptIndex = 0;
     let attemptCount = 0;
     let lastAttemptOutcome: StopSignOutcome | undefined;
+    let currentVariationProfile: StopSignVariationProfile | undefined;
     const progress = (state: ControlStopSignBatchProgress["state"]): ControlStopSignBatchProgress => ({
         batchId,
         planFingerprint,
@@ -400,6 +403,7 @@ async function executeStopSignBatchControl(
         attemptIndex,
         attemptCount,
         phase: sceneManager.currentEgoControlTelemetry().stopSignPhase,
+        variationProfile: currentVariationProfile ? cloneStopSignVariationProfile(currentVariationProfile) : undefined,
         lastAttemptOutcome: lastAttemptOutcome ? {...lastAttemptOutcome} : undefined,
         startedAtMs,
         updatedAtMs: Date.now(),
@@ -422,6 +426,7 @@ async function executeStopSignBatchControl(
                 currentJobIndex = jobIndex;
                 attemptIndex = 0;
                 attemptCount = job.attemptCount;
+                currentVariationProfile = cloneStopSignVariationProfile(job.variationProfile);
                 publishProgress("running");
             },
             onAttemptComplete: (_job, completedAttempt, outcome) => {

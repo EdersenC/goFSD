@@ -1,5 +1,6 @@
 import {StopSignCatalogPosition, StopSignJob, StopSignPose} from "./types";
 import {poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
+import {parseStopSignVariationProfile} from "./variation-profile";
 
 const derivedPoseToleranceM = 1e-4;
 
@@ -66,6 +67,7 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
             color,
         },
         seed: requiredString(raw.seed, `stopSignJobs[${index}].seed`),
+        variationProfile: parseStopSignVariationProfile(raw.variationProfile, `stopSignJobs[${index}].variationProfile`),
     };
     rejectUncalibratedSignPose(job.signPose, index);
     validateDerivedGeometry(job, index);

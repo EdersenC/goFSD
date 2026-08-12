@@ -12,6 +12,28 @@ export type StopSignColor = {r: number, g: number, b: number};
 export type StopSignVehicle = {model?: string, color?: StopSignColor};
 export type StopSignCatalogPosition = {x: number, y: number, z: number};
 export type StopSignAutoVariations = {count: number, motionVariancePct: number};
+export type StopSignVariationProfile = {
+    contract: "stop-sign-variation-profile.v1"
+    baseline: boolean
+    configuredMotionVariancePct: number
+    changedDimensions: string[]
+    changeCount: number
+    combinationMagnitudePct: number
+    targetSpeedDeltaMps: number
+    targetSpeedDeltaPct: number
+    startDistanceDeltaM: number
+    exitDistanceDeltaM: number
+    stopOffsetM: number
+    stopHeadingDeltaDeg: number
+    startLaneOffsetDeltaM: number
+    startHeadingDeltaDeg: number
+    exitLaneOffsetDeltaM: number
+    exitHeadingDeltaDeg: number
+    timeDeltaMinutes: number
+    weatherChanged: boolean
+    vehicleModelChanged: boolean
+    vehicleColorDeltaPct: number
+};
 
 export type StopSignVariation = {
     id: string
@@ -78,6 +100,7 @@ export type StopSignBatchJob = {
     time: StopSignTime
     vehicle: StopSignVehicle
     seed: string
+    variationProfile: StopSignVariationProfile
 };
 
 export type QueueStopSignBatchResponse = {
@@ -100,6 +123,7 @@ export type BatchProgress = {
     attemptIndex: number
     attemptCount: number
     phase: string
+    variationProfile?: StopSignVariationProfile
     startedAtMs?: number
     updatedAtMs?: number
     lastAttemptOutcome?: {

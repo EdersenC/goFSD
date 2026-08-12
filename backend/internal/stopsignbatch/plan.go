@@ -152,27 +152,28 @@ type Plan struct {
 // Job is a fully explicit collection unit. Catalog scenes preserve the three
 // operator-captured poses; compatibility scenes remain sign-relative.
 type Job struct {
-	ID                 string         `json:"id"`
-	EntryID            string         `json:"entryId"`
-	VariationID        string         `json:"variationId"`
-	CatalogID          string         `json:"catalogId,omitempty"`
-	CatalogPosition    *WorldPosition `json:"catalogPosition,omitempty"`
-	SignPose           Pose           `json:"signPose"`
-	StopLinePose       Pose           `json:"stopLinePose"`
-	EgoStopPose        Pose           `json:"egoStopPose"`
-	StartPose          Pose           `json:"startPose"`
-	ExitPose           Pose           `json:"exitPose"`
-	StopDistanceM      float64        `json:"stopDistanceM"`
-	EgoCenterOffsetM   float64        `json:"egoCenterOffsetM"`
-	StartDistanceM     float64        `json:"startDistanceM"`
-	ExitDistanceM      float64        `json:"exitDistanceM"`
-	TargetSpeedMPS     float64        `json:"targetSpeedMps"`
-	StopConfirmationMS int            `json:"stopConfirmationMs"`
-	AttemptCount       int            `json:"attemptCount"`
-	Weather            string         `json:"weather"`
-	Time               TimeOfDay      `json:"time"`
-	Vehicle            VehicleVariant `json:"vehicle"`
-	Seed               string         `json:"seed"`
+	ID                 string           `json:"id"`
+	EntryID            string           `json:"entryId"`
+	VariationID        string           `json:"variationId"`
+	CatalogID          string           `json:"catalogId,omitempty"`
+	CatalogPosition    *WorldPosition   `json:"catalogPosition,omitempty"`
+	SignPose           Pose             `json:"signPose"`
+	StopLinePose       Pose             `json:"stopLinePose"`
+	EgoStopPose        Pose             `json:"egoStopPose"`
+	StartPose          Pose             `json:"startPose"`
+	ExitPose           Pose             `json:"exitPose"`
+	StopDistanceM      float64          `json:"stopDistanceM"`
+	EgoCenterOffsetM   float64          `json:"egoCenterOffsetM"`
+	StartDistanceM     float64          `json:"startDistanceM"`
+	ExitDistanceM      float64          `json:"exitDistanceM"`
+	TargetSpeedMPS     float64          `json:"targetSpeedMps"`
+	StopConfirmationMS int              `json:"stopConfirmationMs"`
+	AttemptCount       int              `json:"attemptCount"`
+	Weather            string           `json:"weather"`
+	Time               TimeOfDay        `json:"time"`
+	Vehicle            VehicleVariant   `json:"vehicle"`
+	Seed               string           `json:"seed"`
+	VariationProfile   VariationProfile `json:"variationProfile"`
 }
 
 type settings struct {
@@ -240,6 +241,7 @@ func Expand(plan Plan) ([]Job, error) {
 		if err := applyEntrySettings(&base, entry, fmt.Sprintf("entries[%d]", entryIndex)); err != nil {
 			return nil, err
 		}
+		entryJobStart := len(jobs)
 		variations := entry.Variations
 		if len(variations) == 0 {
 			variations = []Variation{{ID: "base"}}
@@ -307,6 +309,7 @@ func Expand(plan Plan) ([]Job, error) {
 				return nil, invalid("plan expands to more than %d jobs", MaximumExpandedJobs)
 			}
 		}
+		applyVariationProfiles(jobs[entryJobStart:], 0)
 	}
 
 	return jobs, nil
@@ -418,6 +421,7 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 			Seed:               variantSeed,
 		})
 	}
+	applyVariationProfiles(jobs, spec.MotionVariancePct)
 	return jobs, nil
 }
 
@@ -646,6 +650,9 @@ func ValidateExpandedJob(job Job) error {
 		vehicle:            cloneVehicle(job.Vehicle),
 	}
 	if err := validateSettings(resolved, "expanded job"); err != nil {
+		return err
+	}
+	if err := ValidateVariationProfile(job.VariationProfile); err != nil {
 		return err
 	}
 	if job.Weather != strings.ToUpper(strings.TrimSpace(job.Weather)) {

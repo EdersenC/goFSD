@@ -5,6 +5,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"awesomeProject/internal/stopsignbatch"
 )
 
 func TestEnqueueValidatesStartSceneRequiresName(t *testing.T) {
@@ -544,13 +546,19 @@ func TestStopSignBatchProgressUsesCanonicalPhasesAndSafetyStatusOrdering(t *test
 			BatchID: "  city-stops  ", PlanFingerprint: "  sha256:abc  ", State: " running ",
 			JobID: " alta:rain ", JobIndex: 1, JobCount: 2, CompletedJobs: 1,
 			AttemptIndex: 2, AttemptCount: 4, Phase: StopSignPhaseDecelerate,
+			VariationProfile: &StopSignVariationProfile{
+				Contract: stopsignbatch.VariationProfileContract, ConfiguredMotionVariancePct: 20,
+				ChangedDimensions: []string{"target_speed"}, ChangeCount: 1, CombinationMagnitudePct: 27.735,
+				TargetSpeedDeltaMPS: 5, TargetSpeedDeltaPct: 50,
+			},
 		},
 		AppliedSafetyEpoch:   epoch,
 		InFlightSafetyStarts: 1,
 		SafetyStatusSequence: 4,
 	})
 	progress := runtimeState.StopSignBatch
-	if progress == nil || progress.BatchID != "city-stops" || progress.JobID != "alta:rain" || progress.Phase != StopSignPhaseDecelerate {
+	if progress == nil || progress.BatchID != "city-stops" || progress.JobID != "alta:rain" || progress.Phase != StopSignPhaseDecelerate ||
+		progress.VariationProfile == nil || progress.VariationProfile.ChangeCount != 1 {
 		t.Fatalf("unexpected stop-sign progress: %+v", progress)
 	}
 
@@ -1075,6 +1083,10 @@ func validStopSignBatchCommandRequest(safetyEpoch *uint64) CommandRequest {
 				Color: &StopSignColor{R: 255, G: 128, B: 64},
 			},
 			Seed: "fresh:alta:base",
+			VariationProfile: StopSignVariationProfile{
+				Contract: stopsignbatch.VariationProfileContract,
+				Baseline: true,
+			},
 		}},
 	}
 }
