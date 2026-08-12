@@ -10,6 +10,12 @@ import {
     stopSignPlanStats,
     validateStopSignPlan,
 } from "./stop-sign-plan";
+import {
+    deriveRouteWaypoint,
+    ROUTE_WAYPOINT_MAX_FORWARD_M,
+    ROUTE_WAYPOINT_MAX_LATERAL_M,
+    ROUTE_WAYPOINT_MIN_FORWARD_M,
+} from "./stop-sign/route-waypoint";
 
 const location = {id: "gta-v-sign-0023", x: -1830.7697, y: 3206.3914, z: 31.846758};
 const staged = stageStopSignCatalogLocation(createStopSignPlan(), location);
@@ -56,6 +62,12 @@ assertEqual(migrated.entries[0]?.catalogId, location.id);
 const backward = captureScenePose(plan, 0, "exitPose", {x: 0, y: -10, z: 30, heading: 0});
 assert(validateStopSignPlan(backward).some((error) => error.includes("End must be")));
 assertEqual(parseStoredStopSignPlan(JSON.stringify({...plan, version: "stop-sign-plan.v2"})), null);
+
+const waypoint = deriveRouteWaypoint(plan.entries[0]!.exitPose!, `${plan.seed}:${location.id}:saved-scene-waypoint`);
+const repeatedWaypoint = deriveRouteWaypoint(plan.entries[0]!.exitPose!, `${plan.seed}:${location.id}:saved-scene-waypoint`);
+assertEqual(JSON.stringify(waypoint), JSON.stringify(repeatedWaypoint));
+assert(waypoint.forwardM >= ROUTE_WAYPOINT_MIN_FORWARD_M && waypoint.forwardM <= ROUTE_WAYPOINT_MAX_FORWARD_M);
+assert(Math.abs(waypoint.lateralM) <= ROUTE_WAYPOINT_MAX_LATERAL_M);
 
 console.log("stop-sign scene plan tests passed");
 

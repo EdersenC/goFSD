@@ -62,6 +62,7 @@ Expansion is deterministic. Each generated job uses seed `<plan-seed>:<entry-id>
 - Start/End lateral position and heading within small bounded tolerances.
 - Stop by only a small centimeter-scale longitudinal/lateral tolerance and a small heading tolerance.
 - Weather, time of day, and vehicle color broadly across their supported pools.
+- A visual route waypoint `120–300 m` beyond End with a seeded `-75–75 m` lateral offset. This marker does not move End or change the controller's completion target; its resolved pose and offsets are stored in `stopSignGoal`.
 
 The default is `50` variants with `20%` motion variance. The accepted motion range is `0–25%`. Changing the seed intentionally creates a different deterministic set; restoring the old seed reproduces the old set. Manual variation entry is not part of the normal operator workflow.
 

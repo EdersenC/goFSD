@@ -12,6 +12,12 @@ import {
     nextFixedIntervalDeadlineMs,
     validateStopSignAttemptVehicleState,
 } from "./attempt-progress";
+import {
+    deriveStopSignRouteWaypoint,
+    STOP_SIGN_ROUTE_WAYPOINT_MAX_FORWARD_M,
+    STOP_SIGN_ROUTE_WAYPOINT_MAX_LATERAL_M,
+    STOP_SIGN_ROUTE_WAYPOINT_MIN_FORWARD_M,
+} from "./route-waypoint";
 
 function testGeometryUsesGtaHeadingConvention() {
     const north = gtaForwardVector(0);
@@ -217,6 +223,21 @@ function testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture() {
     assert.equal(logicalClipStageForPhase("release"), "release");
 }
 
+function testRouteWaypointVariesReproduciblyBeyondEnd() {
+    const exitPose = {x: 100, y: 200, z: 8, heading: 90};
+    const first = deriveStopSignRouteWaypoint(exitPose, "scene:auto-001:attempt:1");
+    const repeated = deriveStopSignRouteWaypoint(exitPose, "scene:auto-001:attempt:1");
+    const different = deriveStopSignRouteWaypoint(exitPose, "scene:auto-002:attempt:1");
+    assert.deepEqual(repeated, first);
+    assert.notDeepEqual(different, first);
+    assert(first.forwardM >= STOP_SIGN_ROUTE_WAYPOINT_MIN_FORWARD_M);
+    assert(first.forwardM <= STOP_SIGN_ROUTE_WAYPOINT_MAX_FORWARD_M);
+    assert(Math.abs(first.lateralM) <= STOP_SIGN_ROUTE_WAYPOINT_MAX_LATERAL_M);
+    const relative = relativeStopLinePose(first.pose, exitPose);
+    assert(Math.abs(relative.longitudinalM - first.forwardM) < 1e-9);
+    assert(Math.abs(relative.lateralM - first.lateralM) < 1e-9);
+}
+
 function capturedSceneJobFixture() {
     const egoStopPose = {x: 100, y: 200, z: 8, heading: 0};
     const stopLinePose = {x: 100, y: 202.5, z: 8, heading: 0};
@@ -258,4 +279,5 @@ testAttemptPreflightRejectsUnsafeStarts();
 testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
 testCapturedSceneJobsPreserveExactStartStopEndGeometry();
 testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture();
+testRouteWaypointVariesReproduciblyBeyondEnd();
 console.log("stop-sign expert tests passed");

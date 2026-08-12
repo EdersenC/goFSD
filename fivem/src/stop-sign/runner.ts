@@ -36,6 +36,7 @@ import {
     StopSignTelemetry,
 } from "./types";
 import {positionVehicleAtStopSignPose} from "./vehicle-positioning";
+import {deriveStopSignRouteWaypoint, StopSignRouteWaypoint} from "./route-waypoint";
 
 export const STOP_SIGN_SCENE_ID = "stop-sign";
 export const STOP_SIGN_SCENE_VARIANT = "continuous-v2";
@@ -43,7 +44,6 @@ export const STOP_SIGN_SCENE_NAME = `${STOP_SIGN_SCENE_ID}:${STOP_SIGN_SCENE_VAR
 
 const captureWarmupMs = 750;
 const maximumAttemptDurationMs = 90_000;
-const exitWaypointLeadM = 125;
 
 export type StopSignBatchHooks = {
     stopRequested: () => boolean
@@ -205,19 +205,23 @@ export class StopSignRunner {
     }
 
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
-        const routeWaypoint = poseAhead(job.exitPose, exitWaypointLeadM);
-        SetNewWaypoint(routeWaypoint.x, routeWaypoint.y);
+        const routeWaypoint = deriveStopSignRouteWaypoint(
+            job.exitPose,
+            `${job.seed}:attempt:${this.attemptIndex}:route-waypoint`,
+        );
+        SetNewWaypoint(routeWaypoint.pose.x, routeWaypoint.pose.y);
         await prepareAttemptVehicle(this.egoService, ego, job.startPose);
-        return this.recordContinuousAttempt(ego, job, runId, tripIndex);
+        return this.recordContinuousAttempt(ego, job, routeWaypoint, runId, tripIndex);
     }
 
     private async recordContinuousAttempt(
         ego: Ego,
         job: StopSignJob,
+        routeWaypoint: StopSignRouteWaypoint,
         runId: string,
         tripIndex: number,
     ): Promise<StopSignOutcome> {
-        const goal = buildGoal(job, this.attemptIndex);
+        const goal = buildGoal(job, routeWaypoint, this.attemptIndex);
         const capturePayload = {
             runId,
             tripIndex,
@@ -558,7 +562,7 @@ function buildTripProfile(job: StopSignJob): TripProfileSnapshot {
     };
 }
 
-function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
+function buildGoal(job: StopSignJob, routeWaypoint: StopSignRouteWaypoint, attemptIndex: number): StopSignGoal {
     return {
         task: "stop-sign",
         contract: "stop-sign-goal.v3",
@@ -573,6 +577,9 @@ function buildGoal(job: StopSignJob, attemptIndex: number): StopSignGoal {
         startPose: clonePose(job.startPose),
         exitPose: clonePose(job.exitPose),
         exitDistanceM: job.exitDistanceM,
+        routeWaypointPose: clonePose(routeWaypoint.pose),
+        routeWaypointForwardM: routeWaypoint.forwardM,
+        routeWaypointLateralM: routeWaypoint.lateralM,
         targetSpeedMps: job.targetSpeedMps,
         stopConfirmationMs: job.stopConfirmationMs,
         attemptIndex,

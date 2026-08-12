@@ -59,6 +59,7 @@ import {PlanEditor} from "./stop-sign/PlanEditor";
 import {TelemetryPanel} from "./stop-sign/TelemetryPanel";
 import {StopSignCatalog} from "./stop-sign/StopSignCatalog";
 import type {StopSignCatalogLocation} from "./stop-sign/catalog";
+import {deriveRouteWaypoint} from "./stop-sign/route-waypoint";
 import type {ControlState, InferenceModel, InferenceStatus, Pose, ProcessingReadiness, StopSignPlan, TrainingJob, TrainingJobSpec} from "./types";
 import {requireCurrentSafetyEpoch, runSafetyStartWithHoldBarrier} from "./workspace/safetyStartBarrier";
 import {ArchitectureOverview} from "./ArchitectureOverview";
@@ -281,8 +282,12 @@ export function App() {
                 stopSignStartPose: scene.startPose,
             }, signal));
             await waitForSavedStart(scene.startPose, catalogId);
+            const routeWaypoint = deriveRouteWaypoint(
+                scene.exitPose,
+                `${plan.seed}:${catalogId}:saved-scene-waypoint`,
+            );
             await sendControlCommand("setStopSignCatalogWaypoint", {
-                stopSignCatalogPosition: waypointAheadOfPose(scene.exitPose),
+                stopSignCatalogPosition: routeWaypoint.pose,
             });
             setNotice({message: `${catalogId} opened. The setup car and player are at its saved Start position.`, severity: "success"});
             await control.refresh();
@@ -787,15 +792,6 @@ async function waitForSavedStart(pose: Pose, catalogId: string, timeoutMs = 20_0
         const headingErrorDeg = Math.abs((((telemetry.currentYaw - pose.heading) + 540) % 360) - 180);
         return horizontalErrorM <= 1.5 && headingErrorDeg <= 10 ? state : null;
     });
-}
-
-function waypointAheadOfPose(pose: Pose, distanceM = 125): {x: number, y: number, z: number} {
-    const headingRadians = pose.heading * Math.PI / 180;
-    return {
-        x: pose.x - Math.sin(headingRadians) * distanceM,
-        y: pose.y + Math.cos(headingRadians) * distanceM,
-        z: pose.z,
-    };
 }
 
 async function waitForControlState(

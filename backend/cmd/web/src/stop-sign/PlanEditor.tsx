@@ -166,7 +166,7 @@ export function PlanEditor({
                                 <Box>
                                     <Typography sx={{fontWeight: 850}}>Automatic seeded variants</Typography>
                                     <Typography variant="body2" color="text.secondary">
-                                        Weather, clock time, and color vary broadly. Route distances and speed stay within the bound below. The Stop target only jitters by centimeters.
+                                        Weather, clock time, and color vary broadly. Route distances and speed stay within the bound below. The visual waypoint is seeded 120–300 m ahead with up to 75 m of left/right offset; End and the Stop target stay exact.
                                     </Typography>
                                 </Box>
                                 <Chip

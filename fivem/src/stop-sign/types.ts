@@ -79,6 +79,9 @@ export type StopSignGoal = {
     startPose: StopSignPose
     exitPose: StopSignPose
     exitDistanceM: number
+    routeWaypointPose: StopSignPose
+    routeWaypointForwardM: number
+    routeWaypointLateralM: number
     targetSpeedMps: number
     stopConfirmationMs: number
     attemptIndex: number
