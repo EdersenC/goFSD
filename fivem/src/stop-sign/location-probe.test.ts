@@ -25,6 +25,9 @@ function operations(overrides: Partial<StopSignLocationProbeOperations> = {}): S
         setVehicleOnGround: () => true,
         setFocus: () => undefined,
         clearFocus: () => undefined,
+        startSceneLoad: () => undefined,
+        stopSceneLoad: () => undefined,
+        requestPaths: () => undefined,
         requestCollision: () => undefined,
         collisionLoaded: () => true,
         wait: async () => {
@@ -51,6 +54,24 @@ async function main() {
     assert.equal(result.settledPose.z, 8);
     assert(result.distanceFromCatalogM < 3);
 
+    let nodeAttempt = 0;
+    let sceneLoadStarted = false;
+    let sceneLoadStopped = false;
+    const streamed = await placeVehicleAtStopSignLocation(12, parsed, operations({
+        closestVehicleNode: () => {
+            nodeAttempt += 1;
+            return nodeAttempt < 3
+                ? [true, [1800, 200, 8], 0]
+                : [true, [102, 201, 8], 90];
+        },
+        startSceneLoad: () => { sceneLoadStarted = true; },
+        stopSceneLoad: () => { sceneLoadStopped = true; },
+    }));
+    assert.equal(streamed.distanceFromCatalogM < 3, true);
+    assert.equal(nodeAttempt, 3);
+    assert.equal(sceneLoadStarted, true);
+    assert.equal(sceneLoadStopped, true);
+
     await assert.rejects(
         () => placeVehicleAtStopSignLocation(12, {...parsed, headingOffsetDeg: 45}, operations()),
         /either 0 or 180/,
@@ -61,7 +82,7 @@ async function main() {
     );
     await assert.rejects(
         () => placeVehicleAtStopSignLocation(12, parsed, operations({closestVehicleNode: () => [true, [200, 300, 8], 90]})),
-        /maximum is 30m/,
+        /within 30m.*nearest GTA result/,
     );
 
     console.log("stop-sign location probe tests passed");

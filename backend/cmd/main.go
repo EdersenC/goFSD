@@ -30,7 +30,7 @@ func main() {
 }
 
 func runBackend(args []string, output io.Writer) error {
-	const backendBuildID = "2026-08-11-multi-scene-rolling-capture-v16"
+	const backendBuildID = "2026-08-11-streamed-stop-sign-probe-v17"
 	handled, err := dispatchBackendCommand(args, output)
 	if err != nil {
 		return err
@@ -685,7 +685,13 @@ func decodeJSONBody(r *http.Request, dest any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dest); err != nil {
-		return errors.New("invalid json body")
+		return fmt.Errorf("invalid json body: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("invalid json body: only one JSON value is allowed")
+		}
+		return fmt.Errorf("invalid json body: %w", err)
 	}
 	return nil
 }

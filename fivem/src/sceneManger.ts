@@ -47,6 +47,19 @@ const stopSignLocationProbeOperations: StopSignLocationProbeOperations = {
     setVehicleOnGround: (vehicle) => SetVehicleOnGroundProperly(vehicle),
     setFocus: ([x, y, z]) => SetFocusPosAndVel(x, y, z, 0, 0, 0),
     clearFocus: () => ClearFocus(),
+    startSceneLoad: ([x, y, z]) => {
+        SetHdArea(x, y, z, 120);
+        NewLoadSceneStartSphere(x, y, z, 120, 0);
+    },
+    stopSceneLoad: () => {
+        if (IsNewLoadSceneActive()) {
+            NewLoadSceneStop();
+        }
+        ClearHdArea();
+    },
+    requestPaths: ({x, y}) => {
+        RequestPathsPreferAccurateBoundingstruct(x - 80, y - 80, x + 80, y + 80);
+    },
     requestCollision: ([x, y, z]) => RequestCollisionAtCoord(x, y, z),
     collisionLoaded: (entity) => HasCollisionLoadedAroundEntity(entity),
     wait,

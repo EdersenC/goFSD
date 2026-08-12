@@ -16,6 +16,7 @@ import {
     TrainingState,
 } from "./types";
 import {parseStopSignCatalogCsv, type StopSignCatalogLocation} from "./stop-sign/catalog";
+import {cloneStopSignPlan} from "./stop-sign-plan";
 
 export class ApiError extends Error {
     constructor(
@@ -61,7 +62,7 @@ export function sendControlCommand(type: string, payload: Record<string, unknown
 }
 
 export function queueStopSignPlan(plan: StopSignPlan, safetyEpoch: number, signal?: AbortSignal): Promise<QueueStopSignBatchResponse> {
-    const {version: _localVersion, ...requestPlan} = plan;
+    const {version: _localVersion, ...requestPlan} = cloneStopSignPlan(plan);
     return requestJSON<QueueStopSignBatchResponse>("/control/stop-sign-batches", {
         method: "POST",
         headers: {"Content-Type": "application/json"},

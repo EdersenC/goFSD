@@ -45,6 +45,17 @@ assertEqual(queued.entries[0]?.startPose?.y, -40);
 assertEqual(queued.entries[0]?.egoStopPose?.y, 0);
 assertEqual(queued.entries[0]?.exitPose?.y, 12);
 assertEqual(parseStoredStopSignPlan(JSON.stringify(plan))?.entries[0]?.catalogId, location.id);
+const staleStoredPlan = parseStoredStopSignPlan(JSON.stringify({
+    ...plan,
+    entries: [{
+        ...plan.entries[0],
+        dwellMs: 5000,
+        variations: [{id: "stale", clipStage: "approach"}],
+    }],
+}));
+assert(staleStoredPlan);
+assertEqual("dwellMs" in staleStoredPlan.entries[0]!, false);
+assertEqual("clipStage" in staleStoredPlan.entries[0]!.variations[0]!, false);
 
 const secondLocation = {id: "gta-v-sign-0042", x: -1800, y: 3220, z: 31};
 const secondStaged = stageStopSignCatalogLocation(plan, secondLocation);

@@ -106,6 +106,26 @@ func TestStopSignBatchHandlerRejectsInvalidPlanWithoutQueueing(t *testing.T) {
 	}
 }
 
+func TestStopSignBatchHandlerReportsUnknownJSONField(t *testing.T) {
+	store := control.NewStore()
+	mux := http.NewServeMux()
+	registerStopSignBatchHandlers(mux, store)
+	payload := bytes.Replace(
+		validStopSignBatchPayload(store.State().SafetyEpoch),
+		[]byte(`"id":"alta",`),
+		[]byte(`"id":"alta","dwellMs":5000,`),
+		1,
+	)
+	req := httptest.NewRequest(http.MethodPost, "/control/stop-sign-batches", bytes.NewReader(payload))
+	res := httptest.NewRecorder()
+
+	mux.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest || !bytes.Contains(res.Body.Bytes(), []byte(`unknown field \"dwellMs\"`)) {
+		t.Fatalf("expected actionable unknown-field error, status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
 func validStopSignBatchPayload(safetyEpoch uint64) []byte {
 	return []byte(fmt.Sprintf(`{
 		"safetyEpoch":%d,

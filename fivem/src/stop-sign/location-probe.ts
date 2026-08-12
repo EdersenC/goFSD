@@ -36,6 +36,9 @@ export type StopSignLocationProbeOperations = {
     setVehicleOnGround: (vehicle: number) => boolean
     setFocus: (position: [number, number, number]) => void
     clearFocus: () => void
+    startSceneLoad: (position: [number, number, number]) => void
+    stopSceneLoad: () => void
+    requestPaths: (position: StopSignCatalogPosition) => void
     requestCollision: (position: [number, number, number]) => void
     collisionLoaded: (entity: number) => boolean
     wait: (milliseconds: number) => Promise<void>
@@ -48,6 +51,8 @@ const COLLISION_ATTEMPTS = 40;
 const COLLISION_WAIT_MS = 50;
 const SETTLE_WAIT_MS = 600;
 const NODE_HEIGHT_CLEARANCE_M = 1;
+const ROAD_NODE_STREAM_ATTEMPTS = 60;
+const ROAD_NODE_STREAM_WAIT_MS = 100;
 
 export async function placeVehicleAtStopSignLocation(
     vehicle: number,
@@ -61,28 +66,27 @@ export async function placeVehicleAtStopSignLocation(
     const request = parseStopSignLocationProbeRequest(rawRequest);
     assertCurrent();
 
-    const [foundNode, nodePosition, nodeHeading] = operations.closestVehicleNode(request.catalogPosition);
-    if (!foundNode || !isFinitePosition(nodePosition) || !Number.isFinite(nodeHeading)) {
-        throw new Error(`Stop-sign probe could not resolve a drivable road node for ${request.catalogId}`);
-    }
-    const distanceFromCatalogM = distance3D(request.catalogPosition, nodePosition);
-    if (distanceFromCatalogM > MAX_CATALOG_TO_ROAD_NODE_METERS) {
-        throw new Error(
-            `Stop-sign probe road node is ${distanceFromCatalogM.toFixed(1)}m from ${request.catalogId}; maximum is ${MAX_CATALOG_TO_ROAD_NODE_METERS}m`,
-        );
-    }
-
-    const heading = normalizeHeading(nodeHeading + request.headingOffsetDeg);
-    const destination: [number, number, number] = [
-        nodePosition[0],
-        nodePosition[1],
-        nodePosition[2] + NODE_HEIGHT_CLEARANCE_M,
-    ];
-
     operations.freezeEntity(vehicle, true);
-    operations.setFocus(destination);
+    const catalogDestination: [number, number, number] = [
+        request.catalogPosition.x,
+        request.catalogPosition.y,
+        request.catalogPosition.z,
+    ];
+    operations.setFocus(catalogDestination);
+    operations.startSceneLoad(catalogDestination);
     try {
-        assertCurrent();
+        const {nodePosition, nodeHeading, distanceFromCatalogM} = await resolveStreamedRoadNode(
+            request,
+            operations,
+            assertCurrent,
+        );
+        const heading = normalizeHeading(nodeHeading + request.headingOffsetDeg);
+        const destination: [number, number, number] = [
+            nodePosition[0],
+            nodePosition[1],
+            nodePosition[2] + NODE_HEIGHT_CLEARANCE_M,
+        ];
+
         operations.requestCollision(destination);
         operations.setEntityCoords(vehicle, destination);
         operations.setEntityHeading(vehicle, heading);
@@ -102,9 +106,44 @@ export async function placeVehicleAtStopSignLocation(
             assertCurrent,
         );
     } finally {
+        operations.stopSceneLoad();
         operations.clearFocus();
         operations.freezeEntity(vehicle, false);
     }
+}
+
+async function resolveStreamedRoadNode(
+    request: Required<StopSignLocationProbeRequest>,
+    operations: StopSignLocationProbeOperations,
+    assertCurrent: () => void,
+): Promise<{nodePosition: [number, number, number], nodeHeading: number, distanceFromCatalogM: number}> {
+    let nearestDistanceM = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < ROAD_NODE_STREAM_ATTEMPTS; attempt += 1) {
+        assertCurrent();
+        operations.requestCollision([
+            request.catalogPosition.x,
+            request.catalogPosition.y,
+            request.catalogPosition.z,
+        ]);
+        operations.requestPaths(request.catalogPosition);
+        await operations.wait(ROAD_NODE_STREAM_WAIT_MS);
+
+        const [found, position, heading] = operations.closestVehicleNode(request.catalogPosition);
+        if (!found || !isFinitePosition(position) || !Number.isFinite(heading)) {
+            continue;
+        }
+        const distanceM = distance3D(request.catalogPosition, position);
+        nearestDistanceM = Math.min(nearestDistanceM, distanceM);
+        if (distanceM <= MAX_CATALOG_TO_ROAD_NODE_METERS) {
+            return {nodePosition: position, nodeHeading: heading, distanceFromCatalogM: distanceM};
+        }
+    }
+    if (Number.isFinite(nearestDistanceM)) {
+        throw new Error(
+            `Stop-sign probe could not stream a road node within ${MAX_CATALOG_TO_ROAD_NODE_METERS}m of ${request.catalogId}; nearest GTA result was ${nearestDistanceM.toFixed(1)}m away`,
+        );
+    }
+    throw new Error(`Stop-sign probe could not resolve a drivable road node for ${request.catalogId} after destination streaming`);
 }
 
 export function parseStopSignLocationProbeRequest(raw: unknown): Required<StopSignLocationProbeRequest> {
