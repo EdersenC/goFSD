@@ -1,112 +1,159 @@
-# GTA Parking Lab
+# GTA Stop Sign Lab
 
-This repository is now centered on one honest first goal: collect clean forward-bay parking demonstrations, train a parking-aware planner, and inspect every attempt from one local control surface.
+This repository is a temporal-driving lab for one focused V0 behavior: approach a stop sign, brake to an exact stop, then continue through the intersection. Each generated variant is one uninterrupted physical recording with three synchronized logical stages.
 
-The first milestone is intentionally forward-only. Reverse and parallel parking need an explicit drive-direction/gear output plus a safe actuator interlock; the current steer/throttle/brake contract cannot represent reverse without ambiguity.
+The three clip stages are:
 
-## Back in five minutes
+1. **Approach** — reach target speed, retain a short stable cruise history, then approach the braking boundary.
+2. **Brake + Stop** — slow down and end immediately after a brief zero-speed confirmation.
+3. **Release** — continue from the confirmed Stop pose to the captured End pose.
 
-1. Open [`parking-lab.code-workspace`](parking-lab.code-workspace).
-2. Run the `Parking Lab: Doctor` task.
-3. Install dependencies, then build and deploy the FiveM resource. On the current machine the resource is at the path shown below; change it if the server moves:
+Capture starts once at Start and ends once at End. FiveM writes exact transition timestamps and a phase on every telemetry sample. Processing creates short logical stage windows whose histories and future targets may overlap a boundary, preserving the real slowing, stopping, and restarting motion. There is no long dwell recording or dwell control in the collection UI.
+
+## Start the lab
+
+1. Open [`stop-sign-lab.code-workspace`](stop-sign-lab.code-workspace).
+2. Run the **Stop Sign Lab: Start** task, or run:
 
    ```bash
-   npm --prefix fivem install
-   export FIVEM_RESOURCE_DIR=/home/eddy/Fivem/data/cfx-server-data/resources/FSD
-   npm --prefix fivem run build:deploy
+   npm start
    ```
 
-4. Start the Windows backend from PowerShell. Live screen capture and the virtual controller are Windows-only:
+3. Keep the backend and optional model-server terminals open. The launcher opens the workbench at [http://127.0.0.1:8080/](http://127.0.0.1:8080/) after the backend is ready.
 
-   ```powershell
-   .\scripts\dev-backend.ps1
-   ```
+Use `npm run start:collect` when you only need collection and data preparation. The model server is not required to collect expert demonstrations. The architecture view is available at [http://127.0.0.1:8080/architecture](http://127.0.0.1:8080/architecture).
 
-5. In the FiveM server console, run `restart FSD` after deploying. Join the session, then open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+### First-machine setup and FiveM deployment
 
-The workspace exposes **FiveM: Check deploy target**, **FiveM: Build and deploy resource**, and **FiveM: Watch and deploy resource** tasks. They prompt for the resource directory and default to the current machine's path. The deploy workflow validates an existing FiveM manifest, rejects filesystem roots and symbolic-link destinations, and copies only `dist/client.js`, `dist/server.js`, and `fxmanifest.lua`; it never restarts the server. `npm --prefix fivem run build` and the **FiveM: Build** task remain repository-only validation builds.
+Install the locked dependencies once:
 
-The backend binds to loopback by default because its control endpoints are not authenticated. Set `HOST` explicitly only when you intentionally need remote access on a trusted network.
-
-The Python model server is not required to collect expert demonstrations. Start it later when you want the Models page, training jobs, or inference:
-
-```powershell
-.\scripts\dev-model-server.ps1
+```bash
+npm run setup
 ```
 
-If you use a custom data root, pass the same `-DataRoot` to both PowerShell launchers (or set `FSD_DATA_ROOT` before using the workspace tasks). The WSL launchers accept either `/mnt/...` or Windows drive syntax and pass a Windows-native path to both services. That single root now owns captures, training jobs, checkpoints, and inference sample lookup.
+Build and deploy the FiveM resource whenever `fivem/` changes:
 
-## First parking session
+```bash
+export FIVEM_RESOURCE_DIR=/absolute/path/to/cfx-server-data/resources/FSD
+npm --prefix fivem run build:deploy
+```
 
-The Parking tab is the default workspace and keeps the workflow linear:
-
-1. Select **Start Setup Car**.
-2. Manually place the car in the exact final pose you want inside a parking bay.
-3. Select **Calibrate Current Bay**. The current vehicle position and heading become the target; no coordinates need to be copied.
-4. Choose `1–50` attempts and, optionally, a seed. Reusing a seed reproduces the same start-pose curriculum.
-5. Select **Collect Attempts**. FiveM creates varied forward approaches and uses GTA's native parking task as the expert.
-6. Watch longitudinal, lateral, heading, distance, alignment, and settled-state telemetry in the Parking tab. **Stop & Hold** ends the active run safely.
-
-A successful attempt must finish inside the calibrated bay, aligned with the goal, slow enough, settled for the required duration, and without a collision. Collision, timeout, stop, and invalid-vehicle outcomes remain in metadata for diagnosis. The Python dataset loader excludes those unsuccessful attempts from expert training by default.
-
-## Data layout
-
-Set `FSD_DATA_ROOT` when you do not want the Windows default of `S:\fsd_fivem_data`.
+The deploy command validates the existing resource directory and copies only `dist/client.js`, `dist/server.js`, and `fxmanifest.lua`. It does not restart FiveM. In the FiveM server console, run:
 
 ```text
-<data-root>/runs/<run-id>/parking-forward-bay_default/
-├── run.jsonl
-├── trip-000/
-│   ├── video.mkv
-│   ├── video.log
-│   ├── metadata.json
-│   ├── processing.json
-│   ├── dataset.jsonl
-│   └── frames/
-└── trip-001/
+restart FSD
 ```
 
-`metadata.json` and `run.jsonl` record the calibrated goal, deterministic start offset, tolerances, attempt index/seed, and final parking outcome. The existing Data page and `process-runs` command continue to work because parking attempts use the standard top-level `trip-*` format.
+Then join the session and confirm the workbench status strip reports the API online, FiveM linked, and Control synchronized. Do not run the deploy watcher with `sudo`; point `FIVEM_RESOURCE_DIR` at the resource owned by the normal FiveM user.
 
-Every fresh sample records `Steering` as normalized physical wheel steer in `[-1, 1]`, not as a thumbstick command. For diagnostics, `wheelAngle` retains FiveM's raw physical front-wheel angle in radians and `wheelSteeringFullLock` records the per-vehicle full-lock angle in radians used for normalization.
+## One operator workbench
+
+The Stop Sign Lab uses one persistent **Collect → Data → Train → Evaluate** workbench instead of multiple workflow shells:
+
+| Area | Purpose |
+|---|---|
+| **Collect** | Search all 463 verified main-map signs, teleport to one, capture Start → Stop → End, and replay the scene through deterministic auto-variants. |
+| **Data** | Process completed trips, inspect readiness and phase coverage, and keep failed attempts diagnosable but out of expert training by default. |
+| **Train** | Train from independent stop-sign locations, with phase-balanced sampling and a fixed temporal output contract. |
+| **Evaluate** | Load a compatible checkpoint, pass the guarded safety preflight, and compare predicted speed/stop intent with the closed-loop result. |
+
+The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is the keyboard shortcut. Hold stops collection, vehicle motion, and inference, invalidates stale motion-start epochs, and waits for FiveM to confirm a fresh idle safety state.
+
+## First stop-sign collection
+
+1. Search the **Stop-sign catalog** and press **Teleport** on any of the 463 signs. Teleport only previews the location and does not modify the scene library.
+2. Inspect the location and press **Use this stop sign** only when it is suitable.
+3. Move the car at least 16 m before Stop, aligned with the approach lane, and press **Capture Start**. This anchors direction and optional extra cruise distance; generated runs derive their exact reset point.
+4. Move it to the exact vehicle-center stopping point and press **Capture Stop**.
+5. Move it beyond the sign to the desired continuation point and press **Capture End**.
+6. Keep the default **50 variants** and **20% motion variance**, or adjust them. Target speed is selected from seeded-random `22.4–33.6 mph` buckets, and each selected speed recalculates its own Start distance; weather, clock time, and vehicle color vary broadly. Motion variance is capped at `50%`.
+7. In **Collection queue**, choose **All ready**, **Current only**, or a custom ordered subset of saved signs.
+8. Press **Collect**. The unattended batch runs signs in queue order and every variant produces one continuous attempt with `approach`, `brake_stop`, and `release` labels.
+9. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
+10. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
+
+The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` is the unchanged `10 m/s` (`22.4 mph` displayed) scene baseline. Later variants select randomly and reproducibly from `22.4`, `24.4`, `26.4`, `28.4`, `30.4`, `32.4`, and `33.6 mph`. A generated run is a combination rather than a single-axis variant: its target speed and coupled Start, End distance, lane offsets, headings, Stop jitter, weather, time, vehicle color, braking profile, and release acceleration can change together. Behavior variation is deliberately one-sided and small: at the maximum `50%` setting, braking spans the standard `3.80` through `4.05 m/s²`, while release acceleration spans `3.50` through `4.20 m/s²`. Every Start is recalculated from that run's exact speed and braking profile. Every resolved job stores exact deltas from `auto-001`, the canonical set of changed dimensions, and a normalized 15-dimension RMS combination score. The score is audit metadata—not a model input or statistical dataset variance—and is normalized against fixed supported ranges so increasing Motion variance produces measurably larger geometry and behavior changes. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
+
+## Scene geometry contract
+
+The operator directly captures the three poses that define behavior:
+
+```text
+Start  ── approach ──> braking boundary ── brake_stop ──> Stop ── release ──> End
+```
+
+- `Start` is the exact reset pose for the continuous attempt.
+- `Stop` is the exact target for the vehicle center at zero speed.
+- `End` is the exact destination where the continuous attempt finishes.
+- The selected catalog prop supplies stable physical-sign identity and navigation coordinates, not a model input.
+
+The captured Start defines the approach lane and optional extra cruise buffer; it must be at least `16 m` before Stop. It does not need to be manually positioned for the fastest run. Automatic target speed uses seeded-random `22.4–33.6 mph` buckets; `auto-001` remains the minimum baseline and later variants choose one bucket independently. Every job derives a Start far enough back for its exact speed and preserves any captured distance beyond the minimum-speed requirement. FiveM receives explicit validated poses for every generated variant.
+
+The raw recording still includes launch for auditability. Dataset processing discards launch-heavy anchors and begins the training index only after the desired speed has remained within 2% of the approach peak for one second. The temporal history then contains cruise before `decelerate`, without splicing or fabricating frames.
+
+## Data and model contract
+
+Set `FSD_DATA_ROOT` to choose the shared capture/training root. Without an override, the Windows runtime defaults to `S:\fsd_fivem_data`; use the same root for the backend and model server.
+
+Fresh runs use scene `stop-sign:continuous-v2` and this layout:
+
+```text
+<data-root>/runs/<run-id>/stop-sign_continuous-v2/
+├── run.jsonl
+└── trip-000/
+    ├── video.mkv
+    ├── video.log
+    ├── metadata.json
+    ├── processing.json
+    ├── dataset.jsonl
+    └── frames/
+```
+
+`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, the resolved `variationProfile`, exact stage-transition timestamps, catalog/location identity, variant seed, attempt index, and synchronized telemetry. One variant produces one trip folder. `dataset.jsonl` assigns each anchor frame from the latest telemetry row at or before that RGB frame; causal history never borrows a future phase, while future targets may cross a stage boundary.
+
+The current model consumes five causal RGB frames plus current-speed history. Stop-sign pose, stop-line distance, ego error, and other oracle geometry are labels/scoring metadata only; they are not perception inputs. The primary outputs are:
+
+- `future_speed_mps`
+- `stop_intent`
+
+They are predicted at short fixed horizons of `100, 250, 500, 1000 ms`. Samples carry the stage of their anchor frame, but the causal history and target horizon remain continuous across transitions. A deterministic controller converts the nearest motion target into slew-limited, mutually exclusive throttle or brake, then the virtual controller applies it to GTA. Recorded expert throttle, expert brake, and physical brake pressure are auxiliary diagnostics—not the model-to-game interface.
+
+See [`docs/stop-sign-model-control.md`](docs/stop-sign-model-control.md) for the complete data, training, controller, and safety boundary.
 
 ## Training from a clean slate
 
-The checked-in [`fsd_trainer/train_config.toml`](fsd_trainer/train_config.toml) has no old checkpoint or run IDs. It enables target presence, current speed, and signed longitudinal/lateral/heading error inputs; caps speed at parking pace; and disables road-turn oversampling.
+The checked-in [`fsd_trainer/train_config.toml`](fsd_trainer/train_config.toml) intentionally contains no run IDs or checkpoint. A fresh workspace showing zero runs and zero checkpoints is expected.
 
-Create the Python environment if the existing local `.venv` is unavailable:
+Training admits successful, complete continuous attempts by default, balances the observed `(logical stage, fine phase)` groups, and prevents a physical stop-sign location from appearing in both training and validation. Failed attempts remain inspectable but are excluded from expert training by default. A few attempts prove the pipeline, not model readiness; collect many variants across many independent physical signs before training a useful checkpoint.
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r fsd_trainer\requirements.txt
+Before training, run the contract audit. It verifies every referenced RGB image, dense 50 ms telemetry ordering, frame spacing, phase/variant/location labels, horizon target alignment, and stable RGB-to-game-time offset:
+
+```bash
+npm run data:audit
 ```
 
-For GPU training, install the PyTorch build matching the machine's CUDA runtime before the remaining requirements. Then:
+With the full lab running, one command reconciles pending processing, chooses a location-disjoint train/validation split, and queues the job:
 
-1. Start the model server.
-2. Use **Data** to inspect/process collected runs.
-3. Use **Models** to select train and validation run IDs and queue training.
-4. Load a resulting checkpoint explicitly from **Advanced**.
-5. Return to **Parking**, reuse a seed if you want a direct comparison, and select **Prepare Model Evaluation Start**.
-6. In **Advanced**, select **Start Inference**, then return to **Parking** to watch the live score and terminal result.
-7. Stop the completed inference session and prepare a fresh evaluation start before the next attempt.
+```bash
+npm run train:stop-sign -- --epochs 150
+```
 
-Inference refuses to start unless the virtual controller is ready, a measured parking calibration is explicitly verified, telemetry is fresh, the checkpoint exposes the exact v2 parking setpoint contract, and the car is inside the complete forward-curriculum envelope. Parking ownership holds the car until the first valid plan. A success, collision, reverse motion, unsafe pose, stale or misaligned telemetry, model/controller error, timeout, or manual stop latches an actuator-owned service-brake-to-handbrake stop before model control ends.
+Use `npm run train:stop-sign -- --dry-run` to print the exact split without starting training.
+
+Do not process or rebuild paths while a training job is actively reading them. The normal workflow is to finish collection, use **Data** to make processing current, then queue training from **Train**.
 
 ## Components
 
 | Area | Responsibility |
 |---|---|
-| `fivem/` | Vehicle setup, bay calibration, deterministic parking curriculum, expert execution, telemetry, and trip metadata |
-| `backend/` | Capture/process API, command queue, embedded Parking/Data/Models UI, inference bridge, and virtual-controller safety |
-| `fsd_trainer/` | Dataset loading, parking state normalization, temporal planner training, checkpoint serving, and inference |
-| `scripts/` | Environment checks, service launchers, and full validation |
-
-The old general-driving controls remain under **Advanced** for reference and gradual reuse. They are no longer the default mental model or primary workflow.
+| `fivem/` | Stop-sign scene replay, continuous expert capture, stage-transition telemetry, world/vehicle execution, and trip metadata. |
+| `backend/` | Capture and processing, guarded command queue, Stop Sign Lab web UI, training bridge, and deterministic controller safety. |
+| `fsd_trainer/` | Stop-sign dataset loading, phase balancing, temporal planner training, checkpoint contract, and inference serving. |
+| `scripts/` | Setup, diagnostics, launchers, deployment support, and repository validation. |
 
 ## Validation
 
-Run everything from the repository root:
+Run the repository validation from the root:
 
 ```bash
 bash scripts/validate.sh
@@ -115,10 +162,13 @@ bash scripts/validate.sh
 Or run the layers independently:
 
 ```bash
+npm --prefix backend/cmd/web test
+npm --prefix backend/cmd/web run build
+npm --prefix fivem run typecheck
 npm --prefix fivem test
 npm --prefix fivem run build
 (cd backend && ../scripts/go.sh test ./...)
 (cd fsd_trainer/src/gta_fsd && ../../../scripts/python.sh -B -m unittest discover -p 'test_*.py')
 ```
 
-The live acceptance check still requires FiveM and the Windows capture stack: verify that left/right manual steering has the same sign in normalized telemetry, calibrate a real bay, collect at least one successful and one failed attempt, then verify both trip metadata and the successful attempt's processed frames/dataset. Finally, run one prepared model evaluation and confirm that success or a deliberately induced safety failure holds the vehicle and ends model control.
+Automated validation does not prove live GTA behavior, capture-source selection, controller calibration, or a checkpoint's closed-loop performance. Complete [`docs/stop-sign-live-acceptance.md`](docs/stop-sign-live-acceptance.md) before calling the V0 loop accepted.

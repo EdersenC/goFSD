@@ -6,18 +6,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$parkingProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$parkingPython = Join-Path $parkingProjectRoot ".venv\Scripts\python.exe"
-$parkingServer = Join-Path $parkingProjectRoot "fsd_trainer\src\gta_fsd\server.py"
-$parkingConfig = Join-Path $parkingProjectRoot "fsd_trainer\train_config.toml"
+$stopSignProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$stopSignPython = Join-Path $stopSignProjectRoot ".venv\Scripts\python.exe"
+$stopSignServer = Join-Path $stopSignProjectRoot "fsd_trainer\src\gta_fsd\server.py"
+$stopSignConfig = Join-Path $stopSignProjectRoot "fsd_trainer\train_config.toml"
 
 if ($DataRoot.Trim()) {
     $env:FSD_DATA_ROOT = $DataRoot.Trim()
 }
 
-if (-not (Test-Path -LiteralPath $parkingPython -PathType Leaf)) {
-    throw "Python environment not found at $parkingPython"
+if (-not (Test-Path -LiteralPath $stopSignPython -PathType Leaf)) {
+    throw "Python environment not found at $stopSignPython"
 }
 
-& $parkingPython $parkingServer --config $parkingConfig @ServerArgs
+& $stopSignPython $stopSignServer --config $stopSignConfig @ServerArgs
 exit $LASTEXITCODE

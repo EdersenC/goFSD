@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import re
+from collections import Counter
 from dataclasses import dataclass
 from io import BufferedReader
 from pathlib import Path
@@ -20,11 +22,13 @@ from config import (
     DEFAULT_IMAGE_OFFSETS,
     DEFAULT_TELEMETRY_FEATURE_NAMES,
     DEFAULT_TELEMETRY_OFFSETS,
+    STOP_SIGN_AUX_TARGET_NAMES,
 )
 from control_contract import (
-    DESIRED_SPEED_MPS,
-    DESIRED_WHEEL_STEER_NORMALIZED,
-    STOP_PROBABILITY,
+    DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
+    FUTURE_SPEED_MPS,
+    MAX_DESIRED_SPEED_MPS,
+    STOP_INTENT,
 )
 from image_io import load_rgb_uint8_tensor_from_path
 from target_transforms import (
@@ -33,6 +37,12 @@ from target_transforms import (
     normalize_target_tensor,
 )
 from state_inputs import build_state_input_vector_from_mapping, state_input_config_from_metadata
+from stop_sign_contract import (
+    normalize_stop_sign_clip_stage,
+    stop_sign_clip_stage_for_phase,
+    stop_location_key_from_metadata,
+    stop_sign_phase_from_telemetry,
+)
 
 
 DatasetImages = Tensor
@@ -43,7 +53,224 @@ DatasetTargetAux = Tensor
 DatasetItem = tuple[DatasetImages, DatasetTelemetry, DatasetStateInputs, DatasetTargetControls, DatasetTargetAux]
 
 TelemetryMap = dict[str, Any]
-PARKING_SETTLING_MAX_SPEED_MPS = 0.15
+PROCESSING_FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+NUMBERED_JPEG_NAME_PATTERN = re.compile(r"[0-9]{6}\.jpg")
+
+
+def _processing_integer_list(status: Mapping[str, Any], key: str, processing_path: Path) -> tuple[int, ...]:
+    raw_values = status.get(key)
+    if not isinstance(raw_values, list) or not raw_values:
+        raise ValueError(f"processed dataset contract is missing {key}: {processing_path}")
+    values: list[int] = []
+    for index, value in enumerate(raw_values):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"processed dataset contract {key}[{index}] must be an integer: {processing_path}")
+        values.append(value)
+    return tuple(values)
+
+
+def _processing_count(
+    status: Mapping[str, Any],
+    key: str,
+    processing_path: Path,
+    *,
+    minimum: int,
+) -> int:
+    value = status.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(
+            f"processed dataset contract {key} must be an integer >= {minimum}: {processing_path}"
+        )
+    return value
+
+
+def _validate_numbered_frame_set(trip_dir: Path, frame_count: int) -> None:
+    frames_dir = trip_dir / "frames"
+    try:
+        regular_files = {
+            entry.name: entry.stat().st_size
+            for entry in frames_dir.iterdir()
+            if not entry.is_symlink() and entry.is_file()
+        }
+    except OSError as exc:
+        raise ValueError(f"failed to inspect processed frame set: {frames_dir}") from exc
+
+    expected_files = {f"{index:06d}.jpg" for index in range(1, frame_count + 1)}
+    if set(regular_files) != expected_files or any(size < 1 for size in regular_files.values()):
+        raise ValueError(
+            "processed frame set must contain exactly the contiguous numbered files "
+            f"000001.jpg..{frame_count:06d}.jpg: {frames_dir}"
+        )
+
+
+def _dataset_frame_name(raw_path: Any, *, dataset_path: Path, line_number: int) -> str:
+    if not isinstance(raw_path, str):
+        raise ValueError(
+            f"processed dataset frame_paths must contain strings at line {line_number}: {dataset_path}"
+        )
+    parts = raw_path.split("/")
+    if (
+        "\\" in raw_path
+        or len(parts) != 2
+        or parts[0] != "frames"
+        or NUMBERED_JPEG_NAME_PATTERN.fullmatch(parts[1]) is None
+        or parts[1] == "000000.jpg"
+    ):
+        raise ValueError(
+            f"processed dataset has invalid frame path {raw_path!r} at line {line_number}: {dataset_path}"
+        )
+    return parts[1]
+
+
+def _read_dataset_frame_references(dataset_path: Path) -> tuple[int, set[str]]:
+    row_count = 0
+    referenced_frames: set[str] = set()
+    try:
+        with dataset_path.open("r", encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"processed dataset contains invalid JSON at line {line_number}: {dataset_path}"
+                    ) from exc
+                if not isinstance(row, dict):
+                    raise ValueError(
+                        f"processed dataset row must be a JSON object at line {line_number}: {dataset_path}"
+                    )
+                frame_paths = row.get("frame_paths")
+                if not isinstance(frame_paths, list) or not frame_paths:
+                    raise ValueError(
+                        f"processed dataset row is missing non-empty frame_paths at line {line_number}: {dataset_path}"
+                    )
+                for frame_path in frame_paths:
+                    referenced_frames.add(
+                        _dataset_frame_name(
+                            frame_path,
+                            dataset_path=dataset_path,
+                            line_number=line_number,
+                        )
+                    )
+                row_count += 1
+    except FileNotFoundError as exc:
+        raise ValueError(f"processed dataset is missing: {dataset_path}") from exc
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"failed to read processed dataset: {dataset_path}") from exc
+    return row_count, referenced_frames
+
+
+def _validate_referenced_frame_set(
+    trip_dir: Path,
+    referenced_frames: set[str],
+    frame_count: int,
+) -> None:
+    frames_dir = trip_dir / "frames"
+    if len(referenced_frames) != frame_count:
+        raise ValueError(
+            "processed dataset referenced frame count mismatch: "
+            f"expected={frame_count} actual={len(referenced_frames)} path={frames_dir}"
+        )
+
+    try:
+        jpeg_entries = {
+            entry.name: entry
+            for entry in frames_dir.iterdir()
+            if entry.name.endswith(".jpg")
+        }
+    except OSError as exc:
+        raise ValueError(f"failed to inspect processed frame set: {frames_dir}") from exc
+
+    if set(jpeg_entries) != referenced_frames:
+        missing = sorted(referenced_frames - set(jpeg_entries))
+        extra = sorted(set(jpeg_entries) - referenced_frames)
+        raise ValueError(
+            "processed frame set must contain exactly the dataset-referenced JPEG files: "
+            f"missing={missing} extra={extra} path={frames_dir}"
+        )
+
+    for name, entry in jpeg_entries.items():
+        try:
+            if entry.is_symlink() or not entry.is_file() or entry.stat().st_size < 1:
+                raise ValueError(
+                    "processed frame set must contain only non-empty regular dataset-referenced JPEG files: "
+                    f"{frames_dir / name}"
+                )
+        except OSError as exc:
+            raise ValueError(f"failed to inspect processed frame: {frames_dir / name}") from exc
+
+
+def _validate_processed_dataset_contract(
+    trip_dir: Path,
+    *,
+    image_size: tuple[int, int],
+    image_offsets: tuple[int, ...],
+    telemetry_offsets: tuple[int, ...],
+    future_offsets: tuple[int, ...],
+    telemetry_sample_interval_ms: int,
+) -> None:
+    processing_path = trip_dir / "processing.json"
+    try:
+        status = json.loads(processing_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"processed dataset contract is missing: {processing_path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"failed to read processed dataset contract: {processing_path}") from exc
+    if not isinstance(status, dict):
+        raise ValueError(f"processed dataset contract must be a JSON object: {processing_path}")
+
+    state = str(status.get("state", "")).strip().lower()
+    if state not in {"completed", "skipped"}:
+        raise ValueError(f"processed dataset contract is not terminal: state={state or 'missing'} path={processing_path}")
+    fingerprint = status.get("configFingerprint")
+    if not isinstance(fingerprint, str) or PROCESSING_FINGERPRINT_PATTERN.fullmatch(fingerprint) is None:
+        raise ValueError(f"processed dataset contract has no valid config fingerprint: {processing_path}")
+
+    expected_contract = {
+        "imageOffsets": image_offsets,
+        "telemetryOffsets": telemetry_offsets,
+        "futureOffsets": future_offsets,
+    }
+    for key, expected in expected_contract.items():
+        actual = _processing_integer_list(status, key, processing_path)
+        if actual != expected:
+            raise ValueError(
+                f"processed dataset contract {key} mismatch: expected={list(expected)} "
+                f"actual={list(actual)} path={processing_path}"
+            )
+
+    raw_interval = status.get("telemetrySampleIntervalMs")
+    if isinstance(raw_interval, bool) or not isinstance(raw_interval, int):
+        raise ValueError(f"processed dataset contract telemetrySampleIntervalMs must be an integer: {processing_path}")
+    if raw_interval != telemetry_sample_interval_ms:
+        raise ValueError(
+            "processed dataset contract telemetrySampleIntervalMs mismatch: "
+            f"expected={telemetry_sample_interval_ms} actual={raw_interval} path={processing_path}"
+        )
+
+    for key, expected in (("imageWidth", image_size[0]), ("imageHeight", image_size[1])):
+        actual = status.get(key)
+        if isinstance(actual, bool) or not isinstance(actual, int) or actual != expected:
+            raise ValueError(
+                f"processed dataset contract {key} mismatch: expected={expected} "
+                f"actual={actual!r} path={processing_path}"
+            )
+
+    frame_count = _processing_count(status, "frameCount", processing_path, minimum=0)
+    sample_count = _processing_count(status, "sampleCount", processing_path, minimum=0)
+    dataset_path = trip_dir / "dataset.jsonl"
+    actual_sample_count, referenced_frames = _read_dataset_frame_references(dataset_path)
+    if actual_sample_count != sample_count:
+        raise ValueError(
+            "processed dataset sampleCount mismatch: "
+            f"expected={sample_count} actual={actual_sample_count} path={dataset_path}"
+        )
+    if sample_count == 0:
+        _validate_numbered_frame_set(trip_dir, frame_count)
+        return
+    _validate_referenced_frame_set(trip_dir, referenced_frames, frame_count)
 
 
 def _attach_sample_context(
@@ -68,6 +295,9 @@ class DatasetSampleRef:
     trip_dir: Path
     run_path: Path
     trip_key: str
+    phase: str
+    clip_stage: str
+    stop_location_key: str
 
     def load(self) -> dict[str, Any]:
         with self.dataset_path.open("rb") as handle:
@@ -169,19 +399,63 @@ def _load_trip_metadata_for_filtering(trip_dir: Path) -> dict[str, Any] | None:
     return metadata
 
 
-def _is_successful_parking_attempt(trip_dir: Path) -> bool:
+def _is_successful_stop_sign_attempt(trip_dir: Path) -> bool:
     metadata = _load_trip_metadata_for_filtering(trip_dir)
     if metadata is None:
         return False
-    parking_goal = metadata.get("parkingGoal")
-    outcome = metadata.get("parkingOutcome")
+    goal = metadata.get("stopSignGoal")
+    outcome = metadata.get("stopSignOutcome")
     return (
-        isinstance(parking_goal, Mapping)
-        and str(parking_goal.get("task", "")).strip().lower() == "parking"
-        and str(parking_goal.get("maneuver", "")).strip().lower() == "forward-bay"
+        str(metadata.get("sceneId", "")).strip().lower() == "stop-sign"
+        and str(metadata.get("sceneVariant", "")).strip().lower() == "continuous-v2"
+        and isinstance(goal, Mapping)
+        and str(goal.get("task", "")).strip().lower() == "stop-sign"
+        and str(goal.get("contract", "")).strip().lower() == "stop-sign-goal.v3"
+        and str(goal.get("captureMode", "")).strip().lower() == "continuous"
+        and _has_exact_logical_clip_stages(goal.get("logicalClipStages"))
+        and all(
+            _is_complete_stop_sign_pose(goal.get(key))
+            for key in ("signPose", "stopLinePose", "egoStopPose", "startPose", "exitPose")
+        )
         and isinstance(outcome, Mapping)
         and outcome.get("success") is True
         and str(outcome.get("status", "")).strip().lower() == "succeeded"
+        and _ordered_stage_transitions(outcome.get("stageTransitions"))
+    )
+
+
+def _is_finite_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _has_exact_logical_clip_stages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(isinstance(stage, str) for stage in value)
+        and set(value) == {"approach", "brake_stop", "release"}
+    )
+
+
+def _is_complete_stop_sign_pose(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return all(_is_finite_number(value.get(key)) for key in ("x", "y", "z", "heading"))
+
+
+def _ordered_stage_transitions(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    keys = (
+        "approachStartedGameTimeMs",
+        "brakeStopStartedGameTimeMs",
+        "stopConfirmedGameTimeMs",
+        "releaseStartedGameTimeMs",
+        "completedGameTimeMs",
+    )
+    timestamps = tuple(value.get(key) for key in keys)
+    return all(_is_finite_number(timestamp) for timestamp in timestamps) and all(
+        current <= following for current, following in zip(timestamps, timestamps[1:])
     )
 
 
@@ -198,21 +472,6 @@ def _coerce_float(mapping: TelemetryMap, key: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"telemetry key '{key}' must be finite")
     return result
-
-
-def _coerce_bool(mapping: TelemetryMap, key: str) -> bool:
-    if key not in mapping:
-        raise KeyError(f"missing telemetry key '{key}'")
-    value = mapping[key]
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return bool(value)
-    raise TypeError(f"telemetry key '{key}' must be boolean")
-
-
-def wrap_degrees_delta(current_yaw: float, future_yaw: float) -> float:
-    return ((future_yaw - current_yaw + 180.0) % 360.0) - 180.0
 
 
 def flatten_grouped_mapping(mapping: TelemetryMap) -> TelemetryMap:
@@ -234,112 +493,58 @@ def flatten_grouped_mapping(mapping: TelemetryMap) -> TelemetryMap:
 
 def build_telemetry_features(telemetry: TelemetryMap, feature_names: tuple[str, ...]) -> Tensor:
     telemetry = flatten_grouped_mapping(telemetry)
-    current_speed = _coerce_float(telemetry, "currentSpeed")
-    yaw_degrees = _coerce_float(telemetry, "yaw")
-    yaw_radians = math.radians(yaw_degrees)
-    yaw_rate = _coerce_float(telemetry, "yawRate")
-    steering = _coerce_float(telemetry, "Steering")
-    acceleration = _coerce_float(telemetry, "acceleration")
-
-    feature_map = {
-        "current_speed": current_speed,
-        "yaw_sin": math.sin(yaw_radians),
-        "yaw_cos": math.cos(yaw_radians),
-        "yaw_rate": yaw_rate,
-        "steering": steering,
-        "acceleration": acceleration,
-    }
-    return torch.tensor([feature_map[name] for name in feature_names], dtype=torch.float32)
+    if feature_names != DEFAULT_TELEMETRY_FEATURE_NAMES:
+        raise ValueError(
+            "stop-sign telemetry features must be exactly ['current_speed']"
+        )
+    return torch.tensor(
+        [_coerce_float(telemetry, "currentSpeed")],
+        dtype=torch.float32,
+    )
 
 
 def build_control_targets(telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
     telemetry = flatten_grouped_mapping(telemetry)
-    # Full-lock calibration is the capture-version marker that makes Steering's [-1, 1] meaning unambiguous.
-    full_lock_radians = _coerce_float(telemetry, "wheelSteeringFullLock")
-    if full_lock_radians <= 0.0:
+    desired_speed = _coerce_float(telemetry, "expertDesiredSpeedMps")
+    if desired_speed < 0.0 or desired_speed > MAX_DESIRED_SPEED_MPS:
         raise ValueError(
-            "wheelSteeringFullLock must be positive; recapture parking data with the normalized steering contract"
+            "expertDesiredSpeedMps must be within "
+            f"[0, {MAX_DESIRED_SPEED_MPS}], got {desired_speed}"
         )
-    desired_steer = _coerce_float(telemetry, "Steering")
-    if desired_steer < -1.0 or desired_steer > 1.0:
-        raise ValueError(
-            f"Steering must be normalized to [-1, 1], got {desired_steer}; "
-            "recapture parking data with the normalized steering contract"
-        )
-    desired_speed = _coerce_float(telemetry, "currentSpeed")
-    if desired_speed < 0.0:
-        raise ValueError(f"desired parking speed must be non-negative, got {desired_speed}")
     target_map = {
-        DESIRED_WHEEL_STEER_NORMALIZED: desired_steer,
-        DESIRED_SPEED_MPS: desired_speed,
-        STOP_PROBABILITY: derive_stop_probability(telemetry),
+        FUTURE_SPEED_MPS: desired_speed,
+        STOP_INTENT: derive_stop_intent(telemetry),
     }
     return torch.tensor([target_map[name] for name in target_names], dtype=torch.float32)
 
 
-def derive_stop_probability(telemetry: TelemetryMap) -> float:
+def derive_stop_intent(telemetry: TelemetryMap) -> float:
     telemetry = flatten_grouped_mapping(telemetry)
-    parked = _coerce_bool(telemetry, "parkingParked") if "parkingParked" in telemetry else False
-    raw_phase = telemetry.get("parkingPhase")
-    if raw_phase is None:
-        if "parkingParked" not in telemetry:
-            raise KeyError(
-                "missing parking stop supervision: expected parkingPhase or parkingParked telemetry"
-            )
-        return 1.0 if parked else 0.0
-    if not isinstance(raw_phase, str) or not raw_phase.strip():
-        raise TypeError("telemetry key 'parkingPhase' must be a non-empty string")
-
-    phase = raw_phase.strip().lower()
-    known_phases = {
-        "idle",
-        "ready",
-        "spawning",
-        "recording",
-        "parking",
-        "settling",
-        "succeeded",
-        "failed",
-        "stopping",
-    }
-    if phase not in known_phases:
-        raise ValueError(f"unsupported parkingPhase for stop supervision: {raw_phase}")
-    if phase in {"failed", "stopping"}:
-        if parked:
-            raise ValueError(
-                f"contradictory parking stop supervision: phase={phase!r} cannot be parked"
-            )
-        return 0.0
-    if parked:
-        return 1.0
-    if phase != "settling":
-        return 0.0
-
-    inside_bay = _coerce_bool(telemetry, "parkingInsideBay")
-    aligned = _coerce_bool(telemetry, "parkingAligned")
-    speed_mps = _coerce_float(telemetry, "currentSpeed")
-    valid_settling = (
-        inside_bay
-        and aligned
-        and abs(speed_mps) <= PARKING_SETTLING_MAX_SPEED_MPS
-    )
-    return 1.0 if valid_settling else 0.0
+    stop_probability = _coerce_float(telemetry, "expertStopProbability")
+    if stop_probability < 0.0 or stop_probability > 1.0:
+        raise ValueError(
+            "expertStopProbability must be within [0, 1], "
+            f"got {stop_probability}"
+        )
+    return stop_probability
 
 
 def build_aux_targets(current_telemetry: TelemetryMap, future_telemetry: TelemetryMap, target_names: tuple[str, ...]) -> Tensor:
-    current_telemetry = flatten_grouped_mapping(current_telemetry)
+    del current_telemetry
     future_telemetry = flatten_grouped_mapping(future_telemetry)
-    current_yaw = _coerce_float(current_telemetry, "yaw")
-    future_yaw = _coerce_float(future_telemetry, "yaw")
-    current_speed = _coerce_float(current_telemetry, "currentSpeed")
-    future_speed = _coerce_float(future_telemetry, "currentSpeed")
-    target_map = {
-        "future_speed": future_speed,
-        "future_speed_delta": future_speed - current_speed,
-        "future_yaw_delta": wrap_degrees_delta(current_yaw, future_yaw),
-        "future_yaw_rate": _coerce_float(future_telemetry, "yawRate"),
+    target_builders = {
+        "expert_throttle": lambda: _bounded_unit_interval(future_telemetry, "expertThrottle"),
+        "expert_brake": lambda: _bounded_unit_interval(future_telemetry, "expertBrake"),
+        "actual_brake_pressure": lambda: _bounded_unit_interval(future_telemetry, "brakePressureAvg"),
     }
-    return torch.tensor([target_map[name] for name in target_names], dtype=torch.float32)
+    return torch.tensor([target_builders[name]() for name in target_names], dtype=torch.float32)
+
+
+def _bounded_unit_interval(telemetry: TelemetryMap, key: str) -> float:
+    value = _coerce_float(telemetry, key)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"telemetry key '{key}' must be within [0, 1], got {value}")
+    return value
 
 
 class FsdDataset(Dataset[DatasetItem]):
@@ -354,34 +559,57 @@ class FsdDataset(Dataset[DatasetItem]):
         image_offsets: tuple[int, ...] = DEFAULT_IMAGE_OFFSETS,
         telemetry_offsets: tuple[int, ...] = DEFAULT_TELEMETRY_OFFSETS,
         future_offsets: tuple[int, ...] = DEFAULT_FUTURE_OFFSETS,
+        telemetry_sample_interval_ms: int = DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
         telemetry_feature_names: tuple[str, ...] = DEFAULT_TELEMETRY_FEATURE_NAMES,
         control_target_names: tuple[str, ...] = DEFAULT_CONTROL_TARGET_NAMES,
         aux_target_names: tuple[str, ...] = DEFAULT_AUX_TARGET_NAMES,
         target_transforms: Mapping[str, TargetTransform] | None = None,
         state_input_config: Any | None = None,
-        include_failed_or_nonparking_trips: bool = False,
+        include_failed_or_non_stop_sign_trips: bool = False,
     ):
         if expected_window_size is not None and expected_window_size != len(image_offsets):
             raise ValueError(
                 "expected_window_size must match the configured sparse image offset count: "
                 f"expected_window_size={expected_window_size} image_offsets={len(image_offsets)}"
             )
+        if (
+            isinstance(telemetry_sample_interval_ms, bool)
+            or not isinstance(telemetry_sample_interval_ms, int)
+            or telemetry_sample_interval_ms <= 0
+        ):
+            raise ValueError("telemetry_sample_interval_ms must be a positive integer")
 
         self.image_offsets = tuple(image_offsets)
         self.telemetry_offsets = tuple(telemetry_offsets)
         self.future_offsets = tuple(future_offsets)
+        self.telemetry_sample_interval_ms = telemetry_sample_interval_ms
         self.telemetry_feature_names = tuple(telemetry_feature_names)
         self.control_target_names = tuple(control_target_names)
         self.aux_target_names = tuple(aux_target_names)
+        if self.telemetry_feature_names != DEFAULT_TELEMETRY_FEATURE_NAMES:
+            raise ValueError(
+                "stop-sign telemetry features must be exactly ['current_speed']; "
+                "oracle geometry and generic driving state are not model inputs"
+            )
+        if self.control_target_names != DEFAULT_CONTROL_TARGET_NAMES:
+            raise ValueError(
+                "stop-sign control targets must be exactly "
+                f"{list(DEFAULT_CONTROL_TARGET_NAMES)}"
+            )
+        if self.aux_target_names != STOP_SIGN_AUX_TARGET_NAMES:
+            raise ValueError(
+                "stop-sign auxiliary targets must be exactly "
+                f"{list(STOP_SIGN_AUX_TARGET_NAMES)}"
+            )
         self.target_transforms = build_target_transform_registry(
             tuple(self.control_target_names) + tuple(self.aux_target_names),
             target_transforms,
         )
         self.state_input_config = state_input_config_from_metadata(state_input_config)
-        if not isinstance(include_failed_or_nonparking_trips, bool):
-            raise TypeError("include_failed_or_nonparking_trips must be boolean")
-        self.include_failed_or_nonparking_trips = include_failed_or_nonparking_trips
-        self.excluded_failed_or_nonparking_trip_count = 0
+        if not isinstance(include_failed_or_non_stop_sign_trips, bool):
+            raise TypeError("include_failed_or_non_stop_sign_trips must be boolean")
+        self.include_failed_or_non_stop_sign_trips = include_failed_or_non_stop_sign_trips
+        self.excluded_failed_or_non_stop_sign_trip_count = 0
         self.image_size = image_size
         self.data_root = None if data_root is None else Path(data_root)
         self.run_paths: list[Path] = self._resolve_run_paths(run_paths, run_id=run_id, data_root=data_root)
@@ -442,11 +670,19 @@ class FsdDataset(Dataset[DatasetItem]):
                 )
                 for trip_dir in trip_dirs:
                     if (
-                        not self.include_failed_or_nonparking_trips
-                        and not _is_successful_parking_attempt(trip_dir)
+                        not self.include_failed_or_non_stop_sign_trips
+                        and not _is_successful_stop_sign_attempt(trip_dir)
                     ):
-                        self.excluded_failed_or_nonparking_trip_count += 1
+                        self.excluded_failed_or_non_stop_sign_trip_count += 1
                         continue
+                    _validate_processed_dataset_contract(
+                        trip_dir,
+                        image_size=self.image_size,
+                        image_offsets=self.image_offsets,
+                        telemetry_offsets=self.telemetry_offsets,
+                        future_offsets=self.future_offsets,
+                        telemetry_sample_interval_ms=self.telemetry_sample_interval_ms,
+                    )
                     trips.append(Trip(trip_dir, run_path=run_path))
         return trips
 
@@ -467,10 +703,12 @@ class FsdDataset(Dataset[DatasetItem]):
         if len(frame_paths) != len(self.image_offsets):
             self.rejected_sample_summary["bad_frame_paths"] += 1
             ok = False
-        if len(history) < len(self.telemetry_offsets):
+        required_history_length = -min(self.telemetry_offsets) + 1
+        required_future_length = max(self.future_offsets)
+        if len(history) < required_history_length:
             self.rejected_sample_summary["bad_telemetry_history"] += 1
             ok = False
-        if len(future) < len(self.future_offsets):
+        if len(future) < required_future_length:
             self.rejected_sample_summary["bad_telemetry_future"] += 1
             ok = False
 
@@ -480,6 +718,12 @@ class FsdDataset(Dataset[DatasetItem]):
         if not all(isinstance(item, dict) for item in future):
             self.rejected_sample_summary["non_dict_future_items"] += 1
             ok = False
+        if ok:
+            try:
+                for point in (*history, *future):
+                    stop_sign_phase_from_telemetry(point)
+            except (TypeError, ValueError):
+                ok = False
         if not ok:
             self.rejected_sample_summary["rejected_samples"] += 1
         return ok
@@ -491,6 +735,15 @@ class FsdDataset(Dataset[DatasetItem]):
             trip.sample_indices = []
             if not dataset_path.is_file():
                 continue
+            metadata = _load_trip_metadata_for_filtering(trip.trip_dir)
+            if metadata is None:
+                raise ValueError(f"trip metadata is missing: {trip.trip_dir / 'metadata.json'}")
+            try:
+                location_key = stop_location_key_from_metadata(metadata)
+            except ValueError:
+                if not self.include_failed_or_non_stop_sign_trips:
+                    raise
+                location_key = f"unscored:{trip.trip_key}"
             with dataset_path.open("rb") as handle:
                 while True:
                     byte_offset = handle.tell()
@@ -503,6 +756,18 @@ class FsdDataset(Dataset[DatasetItem]):
                     sample = json.loads(raw_line.decode("utf-8"))
                     if not self._sample_has_required_offsets(sample):
                         continue
+                    phase = stop_sign_phase_from_telemetry(sample["telemetry_history"][-1])
+                    try:
+                        clip_stage = normalize_stop_sign_clip_stage(sample.get("clip_stage"))
+                        expected_clip_stage = stop_sign_clip_stage_for_phase(phase)
+                        if clip_stage != expected_clip_stage:
+                            raise ValueError(
+                                f"sample clip_stage {clip_stage} does not match anchor phase {phase}"
+                            )
+                    except ValueError:
+                        if not self.include_failed_or_non_stop_sign_trips:
+                            raise
+                        clip_stage = "unscored"
                     trip.sample_indices.append(len(samples))
                     samples.append(DatasetSampleRef(
                         dataset_path=dataset_path,
@@ -510,6 +775,9 @@ class FsdDataset(Dataset[DatasetItem]):
                         trip_dir=trip.trip_dir,
                         run_path=trip.run_path,
                         trip_key=trip.trip_key,
+                        phase=phase,
+                        clip_stage=clip_stage,
+                        stop_location_key=location_key,
                     ))
         return samples
 
@@ -533,7 +801,7 @@ class FsdDataset(Dataset[DatasetItem]):
         summary = self.rejected_sample_summary
         return (
             "rejected_samples_summary="
-            f"excluded_failed_or_nonparking_trips={self.excluded_failed_or_nonparking_trip_count} "
+            f"excluded_failed_or_non_stop_sign_trips={self.excluded_failed_or_non_stop_sign_trip_count} "
             f"rejected={summary['rejected_samples']} "
             f"bad_frame_paths={summary['bad_frame_paths']} "
             f"bad_telemetry_history={summary['bad_telemetry_history']} "
@@ -544,8 +812,8 @@ class FsdDataset(Dataset[DatasetItem]):
             f"observed_telemetry_history_lengths={summary['observed_telemetry_history_lengths']} "
             f"observed_telemetry_future_lengths={summary['observed_telemetry_future_lengths']} "
             f"expected_frame_paths={len(self.image_offsets)} "
-            f"expected_telemetry_history>={len(self.telemetry_offsets)} "
-            f"expected_telemetry_future>={len(self.future_offsets)}"
+            f"expected_telemetry_history>={-min(self.telemetry_offsets) + 1} "
+            f"expected_telemetry_future>={max(self.future_offsets)}"
         )
 
     @property
@@ -554,6 +822,28 @@ class FsdDataset(Dataset[DatasetItem]):
 
     def trip_sample_indices(self) -> list[list[int]]:
         return [list(trip.sample_indices) for trip in self.trips]
+
+    def sample_phases(self) -> tuple[str, ...]:
+        return tuple(sample.phase for sample in self.samples)
+
+    def phase_balanced_sample_weights(self) -> tuple[float, ...]:
+        groups = tuple((sample.clip_stage, sample.phase) for sample in self.samples)
+        counts = Counter(groups)
+        return tuple(1.0 / counts[group] for group in groups)
+
+    def stop_location_keys(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(sample.stop_location_key for sample in self.samples))
+
+    def trip_stop_location_keys(self) -> tuple[str, ...]:
+        keys: list[str] = []
+        for trip in self.trips:
+            if not trip.sample_indices:
+                raise ValueError(f"stop-sign trip contains no usable samples: {trip.trip_key}")
+            trip_keys = {self.samples[index].stop_location_key for index in trip.sample_indices}
+            if len(trip_keys) != 1:
+                raise AssertionError(f"trip spans multiple stop locations: {trip.trip_key}")
+            keys.append(next(iter(trip_keys)))
+        return tuple(keys)
 
     def load_trip_data(self, trip_index: int) -> dict[str, Any]:
         if trip_index < 0 or trip_index >= len(self.trips):

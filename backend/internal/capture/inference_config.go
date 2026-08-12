@@ -10,8 +10,8 @@ import (
 
 const (
 	defaultInferenceConfigRelativePath = "fsd_trainer/train_config.toml"
-	defaultPlannerFormat               = "temporal_telemetry_gru_v2"
-	defaultControlContract             = "parking_setpoint_v1"
+	defaultPlannerFormat               = "temporal_stop_sign_v1"
+	defaultControlContract             = "stop_sign_motion_plan_v1"
 	defaultPredictionTimeout           = 250 * time.Millisecond
 	defaultAlignmentTolerance          = 125 * time.Millisecond
 	defaultMaxFrameTelemetrySkew       = 75 * time.Millisecond
@@ -94,7 +94,7 @@ func DefaultInferenceConfig() InferenceConfig {
 		SourceID:                sourceID,
 		AutoLoad:                parseBoolEnv("INFERENCE_AUTO_LOAD_MODEL", true),
 		FPS:                     defaultInferenceFPS,
-		WindowSize:              defaultInferenceWindowSize,
+		WindowSize:              5,
 		FrameStride:             defaultInferenceStride,
 		DispatchStride:          defaultInferenceStride,
 		FrameWidth:              defaultInferenceWidth,
@@ -102,15 +102,15 @@ func DefaultInferenceConfig() InferenceConfig {
 		RequestTimeout:          parseDurationEnv("INFERENCE_REQUEST_TIMEOUT", defaultInferenceRequestTimeout),
 		PredictionTimeout:       defaultPredictionTimeout,
 		JPEGQuality:             defaultInferenceJPEGQuality,
-		ImageOffsets:            []int{-8, -6, -4, -2, 0},
-		TelemetryOffsets:        []int{-8, -7, -6, -5, -4, -3, -2, -1, 0},
-		FutureOffsets:           []int{1, 2, 3, 4, 5, 6},
-		FutureSteps:             6,
-		ControlHorizonDtMs:      []int{50, 100, 150, 200, 250, 300},
+		ImageOffsets:            []int{-20, -15, -10, -5, 0},
+		TelemetryOffsets:        []int{-20, -15, -10, -5, 0},
+		FutureOffsets:           []int{2, 5, 10, 20},
+		FutureSteps:             4,
+		ControlHorizonDtMs:      []int{100, 250, 500, 1000},
 		TelemetrySampleInterval: defaultTelemetrySampleInterval,
-		TelemetryFeatureNames:   []string{"current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"},
-		ControlOutputNames:      []string{"desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"},
-		AuxOutputNames:          []string{"future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"},
+		TelemetryFeatureNames:   []string{"current_speed"},
+		ControlOutputNames:      []string{"future_speed_mps", "stop_intent"},
+		AuxOutputNames:          []string{"expert_throttle", "expert_brake", "actual_brake_pressure"},
 		AlignmentTolerance:      defaultAlignmentTolerance,
 		MaxFrameTelemetrySkew:   defaultMaxFrameTelemetrySkew,
 	}
@@ -299,8 +299,6 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 		ControlTargetNames:           append([]string(nil), cfg.ControlOutputNames...),
 		AuxTargetNames:               append([]string(nil), cfg.AuxOutputNames...),
 		LabelTolerance:               datasetConfig.LabelTolerance,
-		FutureSpeedDeltaClip:         datasetConfig.FutureSpeedDeltaClip,
-		FutureSpeedDeltaNormalize:    datasetConfig.FutureSpeedDeltaNormalize,
 		SyncFlashBrightnessThreshold: datasetConfig.SyncFlashBrightnessThreshold,
 		SyncFlashFrameLimit:          datasetConfig.SyncFlashFrameLimit,
 	}); err != nil {
@@ -336,7 +334,7 @@ func LoadInferenceConfig(path string) (InferenceConfig, error) {
 	if len(cfg.FutureOffsets) != cfg.FutureSteps {
 		return InferenceConfig{}, fmt.Errorf("backend inference future_offsets length must match future_steps")
 	}
-	expectedControlNames := []string{"desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"}
+	expectedControlNames := []string{"future_speed_mps", "stop_intent"}
 	if err := validateExactStrings("backend inference control_output_names", cfg.ControlOutputNames, expectedControlNames); err != nil {
 		return InferenceConfig{}, err
 	}

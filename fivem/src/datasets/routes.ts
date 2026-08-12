@@ -11,18 +11,18 @@ export const routePresets = {
     ranchoLTDGasoline: {destination: [819.8, -1029.6, 26.4]},
     littleSeoulGasStation: {destination: [-715.2, -935.0, 19.2]},
     littleSeoulArcadiusApproach: {destination: [-758.9, -586.8, 30.3]},
-    portolaDriveParking: {destination: [-731.6, -227.3, 37.1]},
+    portolaDrive: {destination: [-731.6, -227.3, 37.1]},
     rockfordPlaza: {destination: [-679.5, -884.7, 24.5]},
     weazelPlazaGarage: {destination: [-903.1, -451.2, 39.6]},
     richardsMajesticStudio: {destination: [-1074.6, -503.1, 36.0]},
     backlotCityStudioGate: {destination: [-1037.2, -474.1, 36.8]},
-    delPerroParkingGarage: {destination: [-1456.8, -497.8, 32.8]},
+    delPerroGarage: {destination: [-1456.8, -497.8, 32.8]},
     delPerroPier: {destination: [-1627.270, -983.829, 12.645]},
     vespucciCanals: {destination: [-1183.5, -1074.4, 2.2]},
     kortzCenter: {destination: [-2243.8, 270.8, 174.6]},
     orientalTheater: {destination: [296.5, 185.4, 104.3]},
-    littleSeoulParking: {destination: [-464.828, -777.476, 34.859]},
-    rockfordHillParking: {destination: [-777.282, 373.133, 87.353]},
+    littleSeoulSouth: {destination: [-464.828, -777.476, 34.859]},
+    rockfordHills: {destination: [-777.282, 373.133, 87.353]},
 } satisfies Record<string, Route>;
 
 export type RoutePresetId = keyof typeof routePresets;

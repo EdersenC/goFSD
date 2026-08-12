@@ -10,7 +10,7 @@ stale_timeout = '250ms'
 steering_gain = 1.0
 throttle_gain = 1.0
 throttle_floor = 0.0
-speed_limit_kph = 8.0
+speed_limit_kph = 60.0
 overspeed_brake_margin_kph = 2.0
 overspeed_brake = 0.25
 model_brake_threshold = 0.55
@@ -18,7 +18,7 @@ reverse_lockout_speed_kph = 1.0
 tick_hz = 60
 url = 'http://127.0.0.1:8080'
 
-[backend.parking_controller]
+[backend.stop_sign_controller]
 # Fail closed until this profile is measured against the active vehicle and adapter.
 calibration_verified = false
 calibration_profile_id = ''
@@ -31,11 +31,8 @@ steering_profile = [
   { wheel_steer = 0.0, command = 0.0 },
   { wheel_steer = 1.0, command = 1.0 },
 ]
-steering_feedback_gain = 0.35
-steering_ki = 0.10
-steering_integral_min = -0.5
-steering_integral_max = 0.5
-steering_slew_per_second = 4.0
+# The model owns future speed and stop intent. This deterministic controller
+# converts the nearest setpoint to mutually exclusive, slew-limited actuation.
 speed_kp = 0.45
 speed_ki = 0.12
 speed_integral_min = -2.0
@@ -47,17 +44,21 @@ stop_probability_threshold = 0.65
 stop_probability_release_threshold = 0.35
 hold_speed_mps = 0.15
 stop_brake_effort = 0.45
-max_desired_speed_mps = 2.22
+max_desired_speed_mps = 15.0
 max_dt = '250ms'
 plan_timeout = '400ms'
 telemetry_timeout = '250ms'
 estimated_actuation_latency = '50ms'
-expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
+expected_horizon_dt_ms = [100, 250, 500, 1000]
+
+[backend.stop_sign_controller.release_policy]
+name = 'scripted_continuous_release_v2'
+learned = false
 
 [backend.inference]
 auto_load = false
-planner_format = 'temporal_telemetry_gru_v2'
-control_contract = 'parking_setpoint_v1'
+planner_format = 'temporal_stop_sign_v1'
+control_contract = 'stop_sign_motion_plan_v1'
 dispatch_stride = 2
 fps = 30
 frame_height = 480
@@ -69,60 +70,50 @@ request_timeout = '5s'
 inference_timeout = '250ms'
 alignment_tolerance = '125ms'
 max_frame_telemetry_skew = '75ms'
-source_id = 'monitor-2'
+source_id = 'auto'
 
 [dataset]
 data_root = 'S:\fsd_fivem_data'
-future_speed_delta_clip = 2.0
-future_speed_delta_normalize = true
 image_height = 480
 image_width = 480
 window_size = 5
-image_offsets = [-8, -6, -4, -2, 0]
+image_offsets = [-20, -15, -10, -5, 0]
 label_tolerance = '100ms'
-telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
-future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_offsets = [-20, -15, -10, -5, 0]
+future_offsets = [2, 5, 10, 20]
 telemetry_sample_interval_ms = 50
-telemetry_feature_names = ['current_speed', 'yaw_sin', 'yaw_cos', 'yaw_rate', 'steering', 'acceleration']
-control_target_names = ['desired_wheel_steer_normalized', 'desired_speed_mps', 'stop_probability']
-aux_target_names = ['future_speed', 'future_speed_delta', 'future_yaw_delta', 'future_yaw_rate']
+telemetry_feature_names = ['current_speed']
+control_target_names = ['future_speed_mps', 'stop_intent']
+aux_target_names = ['expert_throttle', 'expert_brake', 'actual_brake_pressure']
 frame_stride = 2
 sample_stride = 4
 sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
 train_run_ids = []
 val_run_ids = []
-# Parking-setpoint training uses only successful forward-bay attempts with complete goal/outcome metadata by default.
-include_failed_or_nonparking_trips = false
+# Stop-sign training uses only successful continuous-v2 attempts with complete goal/outcome metadata by default.
+include_failed_or_non_stop_sign_trips = false
 
 [dataset.target_transforms]
-[dataset.target_transforms.desired_wheel_steer_normalized]
-type = 'signed_cap'
-clip = 1.0
-
-[dataset.target_transforms.desired_speed_mps]
+[dataset.target_transforms.future_speed_mps]
 type = 'positive_cap'
-clip = 2.22
+clip = 15.0
 
-[dataset.target_transforms.stop_probability]
+[dataset.target_transforms.stop_intent]
 type = 'positive_cap'
 clip = 1.0
 
-[dataset.target_transforms.future_speed]
+[dataset.target_transforms.expert_throttle]
 type = 'positive_cap'
-clip = 5.0
+clip = 1.0
 
-[dataset.target_transforms.future_speed_delta]
-type = 'signed_cap'
-clip = 2.0
+[dataset.target_transforms.expert_brake]
+type = 'positive_cap'
+clip = 1.0
 
-[dataset.target_transforms.future_yaw_delta]
-type = 'angle_cap'
-clip = 45.0
-
-[dataset.target_transforms.future_yaw_rate]
-type = 'signed_cap'
-clip = 10.0
+[dataset.target_transforms.actual_brake_pressure]
+type = 'positive_cap'
+clip = 1.0
 
 [inference]
 checkpoint = ''
@@ -147,15 +138,8 @@ val_pin_memory = false
 val_prefetch_factor = 1
 val_split = 1.0
 
-[loader.turn_oversampling]
-enabled = false
-straight_weight = 0.4
-light_turn_weight = 2.5
-medium_turn_weight = 1.5
-sharp_turn_weight = 0.4
-light_turn_threshold = 0.05
-medium_turn_threshold = 0.15
-sharp_turn_threshold = 0.30
+[loader.phase_balancing]
+enabled = true
 
 [output]
 base_dir = 'S:\fsd_fivem_data\training_runs'
@@ -181,31 +165,12 @@ num_layers = 2
 dropout = 0.10
 
 [state_inputs.current_speed]
-enabled = true
-cap = 5.0
-
-[state_inputs.parking_target_configured]
-enabled = true
-
-[state_inputs.parking_longitudinal_error]
-enabled = true
-cap = 17.0
-
-[state_inputs.parking_lateral_error]
-enabled = true
-cap = 3.0
-
-[state_inputs.parking_heading_error]
-enabled = true
-cap = 20.0
-
-[state_inputs.parking_distance]
 enabled = false
-cap = 20.0
+cap = 15.0
 
 [training]
 device = 'auto'
-early_stopping_metric = 'drive_score'
+early_stopping_metric = 'stop_sign_score'
 early_stopping_min_delta = 0.0
 early_stopping_patience = 6
 epochs = 150
@@ -213,7 +178,7 @@ learning_rate = 0.0005
 loss_function = 'smooth_l1'
 smooth_l1_beta = 0.1
 aux_loss_weight = 0.4
-horizon_loss_weights = [1.0, 0.9, 0.8, 0.5, 0.8, 1.0]
+horizon_loss_weights = [1.0, 0.9, 0.75, 0.6]
 
 [training.optimizer]
 name = 'adamw'
@@ -231,10 +196,8 @@ enabled = true
 decay = 0.999
 
 [training.target_loss_weights]
-desired_wheel_steer_normalized = 2.5
-desired_speed_mps = 3.9
-stop_probability = 2.5
-future_speed = 1.8
-future_speed_delta = 1.5
-future_yaw_delta = 1.3
-future_yaw_rate = 1.0
+future_speed_mps = 4.0
+stop_intent = 5.0
+expert_throttle = 0.25
+expert_brake = 0.25
+actual_brake_pressure = 0.25

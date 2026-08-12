@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"awesomeProject/internal/control"
-	"awesomeProject/internal/parkingcontrol"
+	"awesomeProject/internal/stopsigncontrol"
 )
 
 type fakeController struct {
@@ -417,12 +417,12 @@ func TestApplyResetAndSaveTuning(t *testing.T) {
 	}
 }
 
-func TestLoadParkingControllerConfigKeepsCheckedInProfileFailClosed(t *testing.T) {
+func TestLoadStopSignControllerConfigKeepsCheckedInProfileFailClosed(t *testing.T) {
 	path := t.TempDir() + "/train_config.toml"
 	content := []byte(`[backend.actuator]
 tick_hz = 60
 
-[backend.parking_controller]
+[backend.stop_sign_controller]
 calibration_verified = false
 calibration_profile_id = ''
 vehicle_model_hash = 0
@@ -434,11 +434,12 @@ steering_profile = [
   { wheel_steer = 0.0, command = 0.0 },
   { wheel_steer = 1.0, command = 0.8 },
 ]
+straight_approach_only = true
 speed_kp = 0.5
 plan_timeout = '350ms'
 telemetry_timeout = '200ms'
 estimated_actuation_latency = '40ms'
-expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
+expected_horizon_dt_ms = [100, 250, 500, 1000]
 `)
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -448,22 +449,22 @@ expected_horizon_dt_ms = [50, 100, 150, 200, 250, 300]
 	if err != nil {
 		t.Fatalf("LoadConfig returned error: %v", err)
 	}
-	if cfg.ParkingCalibration.Verified || cfg.ParkingCalibration.VehicleModelHash != 0 {
-		t.Fatalf("expected the placeholder calibration to remain fail-closed, got=%+v", cfg.ParkingCalibration)
+	if cfg.StopSignCalibration.Verified || cfg.StopSignCalibration.VehicleModelHash != 0 {
+		t.Fatalf("expected the placeholder calibration to remain fail-closed, got=%+v", cfg.StopSignCalibration)
 	}
-	if cfg.TickHz != 60 || cfg.ParkingController.SpeedKp != 0.5 || cfg.ParkingController.SteeringProfile[0].Command != -0.8 {
-		t.Fatalf("unexpected parsed parking controller config: %+v", cfg)
+	if cfg.TickHz != 60 || !cfg.StopSignController.StraightApproachOnly || cfg.StopSignController.SpeedKp != 0.5 || cfg.StopSignController.SteeringProfile[0].Command != -0.8 {
+		t.Fatalf("unexpected parsed stopSign controller config: %+v", cfg)
 	}
-	if cfg.ParkingPlanTimeout != 350*time.Millisecond || cfg.ParkingTelemetryTimeout != 200*time.Millisecond || cfg.ParkingEstimatedActuationLatency != 40*time.Millisecond {
-		t.Fatalf("unexpected parking timing config: %+v", cfg)
+	if cfg.StopSignPlanTimeout != 350*time.Millisecond || cfg.StopSignTelemetryTimeout != 200*time.Millisecond || cfg.StopSignEstimatedActuationLatency != 40*time.Millisecond {
+		t.Fatalf("unexpected stopSign timing config: %+v", cfg)
 	}
 }
 
-func TestLoadParkingControllerConfigRejectsUntraceableVerifiedProfile(t *testing.T) {
+func TestLoadStopSignControllerConfigRejectsUntraceableVerifiedProfile(t *testing.T) {
 	path := t.TempDir() + "/train_config.toml"
-	content := []byte(`[backend.parking_controller]
+	content := []byte(`[backend.stop_sign_controller]
 calibration_verified = true
-calibration_profile_id = 'parking-v1'
+calibration_profile_id = 'stopSign-v1'
 vehicle_model_hash = 123
 steering_convention = 'positive_wheel_is_positive_xinput'
 `)
@@ -476,45 +477,48 @@ steering_convention = 'positive_wheel_is_positive_xinput'
 	}
 }
 
-func TestParkingSetpointPlanRunsCalibratedFeedbackController(t *testing.T) {
+func TestStopSignSetpointPlanRunsCalibratedFeedbackController(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.25, 0.10, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.25, 0.10, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
 
-	state, err := svc.SubmitParkingSetpointPlan(testParkingPlan(base))
+	state, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(base))
 	if err != nil {
-		t.Fatalf("SubmitParkingSetpointPlan returned error: %v", err)
+		t.Fatalf("SubmitStopSignMotionPlan returned error: %v", err)
 	}
-	if state.ParkingController.LastPlanID != 1 || state.ParkingController.Owner != OwnerParkingInference {
-		t.Fatalf("expected accepted plan receipt and ownership, got=%+v", state.ParkingController)
+	if state.StopSignController.LastPlanID != 1 || state.StopSignController.Owner != OwnerStopSignInference {
+		t.Fatalf("expected accepted plan receipt and ownership, got=%+v", state.StopSignController)
 	}
 
 	stepAt := base.Add(20 * time.Millisecond)
 	if err := svc.step(stepAt); err != nil {
-		t.Fatalf("parking step returned error: %v", err)
+		t.Fatalf("stopSign step returned error: %v", err)
 	}
 	applied := svc.State()
-	if applied.Applied.PlanID != 1 || applied.Target.Parking == nil || applied.Target.Parking.FailSafe {
-		t.Fatalf("expected plan 1 to reach the parking controller, got=%+v", applied)
+	if applied.Applied.PlanID != 1 || applied.Target.StopSign == nil || applied.Target.StopSign.FailSafe {
+		t.Fatalf("expected plan 1 to reach the stopSign controller, got=%+v", applied)
 	}
-	if applied.Target.Parking.SelectedSetpoint == nil || applied.Target.Parking.MeasuredWheelSteer == nil {
-		t.Fatalf("expected selected setpoint and physical feedback in trace, got=%+v", applied.Target.Parking)
+	if applied.Target.StopSign.SelectedSetpoint == nil || applied.Target.StopSign.MeasuredWheelSteer == nil {
+		t.Fatalf("expected selected setpoint and physical feedback in trace, got=%+v", applied.Target.StopSign)
 	}
 	if applied.Applied.Throttle <= 0 || applied.Applied.Brake != 0 {
 		t.Fatalf("expected mutually exclusive positive speed effort, got=%+v", applied.Applied)
 	}
-	if applied.Applied.Steer <= 0 || applied.Applied.Steer > 1 {
-		t.Fatalf("expected bounded calibrated steering output, got=%+v", applied.Applied)
+	if applied.Applied.Steer >= 0 || applied.Applied.Steer < -1 {
+		t.Fatalf("expected straight-mode feedback to center positive measured steering, got=%+v", applied.Applied)
 	}
-	if applied.ParkingController.LastPlanAppliedID != 1 || applied.LastApplyAttemptedPlanID != 1 {
+	if applied.Target.StopSign.ControllerOutput.SteeringFeedForward != 0 {
+		t.Fatalf("expected straight mode to ignore model steering feed-forward, got=%+v", applied.Target.StopSign)
+	}
+	if applied.StopSignController.LastPlanAppliedID != 1 || applied.LastApplyAttemptedPlanID != 1 {
 		t.Fatalf("expected exact plan receipt through controller apply, got=%+v", applied)
 	}
 }
 
-func TestParkingSetpointPlanFailsClosedWhenPlanExpires(t *testing.T) {
+func TestStopSignSetpointPlanFailsClosedWhenPlanExpires(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name              string
@@ -529,22 +533,22 @@ func TestParkingSetpointPlanFailsClosedWhenPlanExpires(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			now := base
 			store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-			updateParkingTelemetry(store, base, test.speedMPS, 0, testParkingVehicleModelHash)
-			cfg := testParkingConfig()
-			cfg.ParkingTelemetryTimeout = time.Second
-			svc := newReadyParkingService(cfg, store, &now)
-			armParkingInference(t, svc)
-			if _, err := svc.SubmitParkingSetpointPlan(testParkingPlan(base)); err != nil {
-				t.Fatalf("SubmitParkingSetpointPlan returned error: %v", err)
+			updateStopSignTelemetry(store, base, test.speedMPS, 0, testStopSignVehicleModelHash)
+			cfg := testStopSignConfig()
+			cfg.StopSignTelemetryTimeout = time.Second
+			svc := newReadyStopSignService(cfg, store, &now)
+			armStopSignInference(t, svc)
+			if _, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(base)); err != nil {
+				t.Fatalf("SubmitStopSignMotionPlan returned error: %v", err)
 			}
 
-			stepAt := base.Add(cfg.ParkingPlanTimeout + time.Millisecond)
+			stepAt := base.Add(cfg.StopSignPlanTimeout + time.Millisecond)
 			if err := svc.step(stepAt); err != nil {
-				t.Fatalf("parking fail-safe step returned error: %v", err)
+				t.Fatalf("stopSign fail-safe step returned error: %v", err)
 			}
 			state := svc.State()
-			if state.Target.Parking == nil || !state.Target.Parking.FailSafe || !state.Applied.TimedOut {
-				t.Fatalf("expected explicit parking fail-safe trace, got=%+v", state)
+			if state.Target.StopSign == nil || !state.Target.StopSign.FailSafe || !state.Applied.TimedOut {
+				t.Fatalf("expected explicit stopSign fail-safe trace, got=%+v", state)
 			}
 			if test.wantBrake && (state.Applied.Brake <= 0 || state.Applied.Handbrake || state.Applied.Throttle != 0) {
 				t.Fatalf("expected service-brake fail-safe while moving, got=%+v", state.Applied)
@@ -556,49 +560,49 @@ func TestParkingSetpointPlanFailsClosedWhenPlanExpires(t *testing.T) {
 	}
 }
 
-func TestParkingSetpointPlanRequiresVerifiedCalibration(t *testing.T) {
+func TestStopSignSetpointPlanRequiresVerifiedCalibration(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.2, 0, testParkingVehicleModelHash)
-	cfg := testParkingConfig()
-	cfg.ParkingCalibration.Verified = false
-	svc := newReadyParkingService(cfg, store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.2, 0, testStopSignVehicleModelHash)
+	cfg := testStopSignConfig()
+	cfg.StopSignCalibration.Verified = false
+	svc := newReadyStopSignService(cfg, store, &now)
+	armStopSignInference(t, svc)
 
-	_, err := svc.SubmitParkingSetpointPlan(testParkingPlan(base))
-	if !errors.Is(err, ErrParkingControllerNotReady) {
+	_, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(base))
+	if !errors.Is(err, ErrStopSignControllerNotReady) {
 		t.Fatalf("expected unverified calibration to block setpoint plans, got=%v", err)
 	}
 }
 
-func TestParkingSetpointPlanRejectsWrongHorizonTiming(t *testing.T) {
+func TestStopSignSetpointPlanRejectsWrongHorizonTiming(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.2, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
-	plan := testParkingPlan(base)
+	updateStopSignTelemetry(store, base, 0.2, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
+	plan := testStopSignPlan(base)
 	plan.Points[1].DtMs = 110
 
-	if _, err := svc.SubmitParkingSetpointPlan(plan); err == nil {
+	if _, err := svc.SubmitStopSignMotionPlan(plan); err == nil {
 		t.Fatal("expected mismatched model/controller timing to be rejected")
 	}
 }
 
-func TestParkingInferenceOwnershipRejectsCompetingDriveCommand(t *testing.T) {
+func TestStopSignInferenceOwnershipRejectsCompetingDriveCommand(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.2, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.2, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
 
 	enabled := true
 	_, err := svc.Submit(CommandRequest{Enabled: &enabled, Throttle: 0.5, Owner: OwnerCalibration})
-	if !errors.Is(err, ErrParkingSessionOwned) {
-		t.Fatalf("expected active parking session ownership error, got=%v", err)
+	if !errors.Is(err, ErrStopSignSessionOwned) {
+		t.Fatalf("expected active stopSign session ownership error, got=%v", err)
 	}
 
 	disabled := false
@@ -607,44 +611,44 @@ func TestParkingInferenceOwnershipRejectsCompetingDriveCommand(t *testing.T) {
 	}
 }
 
-func TestParkingControllerFailsClosedOnVehicleCalibrationMismatch(t *testing.T) {
+func TestStopSignControllerFailsClosedOnVehicleCalibrationMismatch(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.8, 0, testParkingVehicleModelHash+1)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
-	if _, err := svc.SubmitParkingSetpointPlan(testParkingPlan(base)); err != nil {
-		t.Fatalf("SubmitParkingSetpointPlan returned error: %v", err)
+	updateStopSignTelemetry(store, base, 0.8, 0, testStopSignVehicleModelHash+1)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
+	if _, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(base)); err != nil {
+		t.Fatalf("SubmitStopSignMotionPlan returned error: %v", err)
 	}
 
 	if err := svc.step(base.Add(20 * time.Millisecond)); err != nil {
-		t.Fatalf("parking fail-safe step returned error: %v", err)
+		t.Fatalf("stopSign fail-safe step returned error: %v", err)
 	}
 	state := svc.State()
-	if state.Target.Parking == nil || !state.Target.Parking.FailSafe || state.Applied.Brake <= 0 || state.Applied.Throttle != 0 {
+	if state.Target.StopSign == nil || !state.Target.StopSign.FailSafe || state.Applied.Brake <= 0 || state.Applied.Throttle != 0 {
 		t.Fatalf("expected vehicle mismatch to fail closed with service brake, got=%+v", state)
 	}
 }
 
-func TestParkingArmAppliesSafeStopUntilFirstPlan(t *testing.T) {
+func TestStopSignArmAppliesSafeStopUntilFirstPlan(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.8, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.8, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
 
 	if err := svc.step(base.Add(20 * time.Millisecond)); err != nil {
 		t.Fatalf("apply awaiting-plan stop: %v", err)
 	}
 	state := svc.State()
-	if state.Applied.Brake <= 0 || state.Applied.Handbrake || state.Target.Parking == nil || state.Target.Parking.PlanState != "awaiting-plan" {
+	if state.Applied.Brake <= 0 || state.Applied.Handbrake || state.Target.StopSign == nil || state.Target.StopSign.PlanState != "awaiting-plan" {
 		t.Fatalf("expected service brake while awaiting the first plan at speed, got=%+v", state)
 	}
 
 	now = base.Add(40 * time.Millisecond)
-	updateParkingTelemetry(store, now, 0.05, 0, testParkingVehicleModelHash)
+	updateStopSignTelemetry(store, now, 0.05, 0, testStopSignVehicleModelHash)
 	if err := svc.step(now); err != nil {
 		t.Fatalf("apply awaiting-plan handbrake: %v", err)
 	}
@@ -654,19 +658,19 @@ func TestParkingArmAppliesSafeStopUntilFirstPlan(t *testing.T) {
 	}
 }
 
-func TestParkingSafetyStopTransitionsFromServiceBrakeToHandbrake(t *testing.T) {
+func TestStopSignSafetyStopTransitionsFromServiceBrakeToHandbrake(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.8, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.8, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
 
-	queued, err := svc.RequestParkingSafetyStop()
+	queued, err := svc.RequestStopSignSafetyStop()
 	if err != nil {
-		t.Fatalf("RequestParkingSafetyStop returned error: %v", err)
+		t.Fatalf("RequestStopSignSafetyStop returned error: %v", err)
 	}
-	if queued.LastCommandID <= 0 || !queued.ParkingController.Stopping {
+	if queued.LastCommandID <= 0 || !queued.StopSignController.Stopping {
 		t.Fatalf("expected trackable actuator-owned stop request, got=%+v", queued)
 	}
 	if err := svc.step(base.Add(20 * time.Millisecond)); err != nil {
@@ -678,50 +682,50 @@ func TestParkingSafetyStopTransitionsFromServiceBrakeToHandbrake(t *testing.T) {
 	}
 
 	now = base.Add(40 * time.Millisecond)
-	updateParkingTelemetry(store, now, 0.05, 0, testParkingVehicleModelHash)
+	updateStopSignTelemetry(store, now, 0.05, 0, testStopSignVehicleModelHash)
 	if err := svc.step(now); err != nil {
 		t.Fatalf("apply stopped safety hold: %v", err)
 	}
 	state = svc.State()
-	if !state.Applied.Handbrake || state.Applied.Brake != 0 || !state.ParkingController.Stopping {
+	if !state.Applied.Handbrake || state.Applied.Brake != 0 || !state.StopSignController.Stopping {
 		t.Fatalf("expected persistent handbrake hold after confirmed stop, got=%+v", state)
 	}
-	if _, err := svc.SubmitParkingSetpointPlan(testParkingPlan(now)); !errors.Is(err, ErrParkingSessionOwned) {
+	if _, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(now)); !errors.Is(err, ErrStopSignSessionOwned) {
 		t.Fatalf("expected safety stop to reject later plans, got=%v", err)
 	}
 }
 
-func TestParkingSetpointPlanRejectsActiveControllerApplyFault(t *testing.T) {
+func TestStopSignSetpointPlanRejectsActiveControllerApplyFault(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.2, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
+	updateStopSignTelemetry(store, base, 0.2, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
 	svc.lastApplyError = "virtual controller write failed"
 
-	_, err := svc.SubmitParkingSetpointPlan(testParkingPlan(base))
+	_, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(base))
 	if err == nil || !strings.Contains(err.Error(), "apply fault") {
 		t.Fatalf("expected active controller apply fault to reject the plan, got=%v", err)
 	}
 }
 
-func TestParkingControllerRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T) {
+func TestStopSignControllerRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T) {
 	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	now := base.Add(300 * time.Millisecond)
 	store := control.NewStore(control.WithNowFunc(func() time.Time { return now }))
-	updateParkingTelemetry(store, base, 0.2, 0, testParkingVehicleModelHash)
-	svc := newReadyParkingService(testParkingConfig(), store, &now)
-	armParkingInference(t, svc)
-	if _, err := svc.SubmitParkingSetpointPlan(testParkingPlan(now)); err != nil {
-		t.Fatalf("SubmitParkingSetpointPlan returned error: %v", err)
+	updateStopSignTelemetry(store, base, 0.2, 0, testStopSignVehicleModelHash)
+	svc := newReadyStopSignService(testStopSignConfig(), store, &now)
+	armStopSignInference(t, svc)
+	if _, err := svc.SubmitStopSignMotionPlan(testStopSignPlan(now)); err != nil {
+		t.Fatalf("SubmitStopSignMotionPlan returned error: %v", err)
 	}
 
 	if err := svc.step(now.Add(20 * time.Millisecond)); err != nil {
-		t.Fatalf("parking fail-safe step returned error: %v", err)
+		t.Fatalf("stopSign fail-safe step returned error: %v", err)
 	}
 	state := svc.State()
-	if state.Target.Parking == nil || !state.Target.Parking.FailSafe || !strings.Contains(state.Target.Parking.Fault, "source is stale") {
+	if state.Target.StopSign == nil || !state.Target.StopSign.FailSafe || !strings.Contains(state.Target.StopSign.Fault, "source is stale") {
 		t.Fatalf("expected stale source timestamp to fail closed despite a fresh receipt, got=%+v", state)
 	}
 	if state.Applied.Brake <= 0 || state.Applied.Handbrake {
@@ -729,15 +733,15 @@ func TestParkingControllerRejectsFreshReceiptOfStaleSourceTelemetry(t *testing.T
 	}
 }
 
-const testParkingVehicleModelHash int64 = 123456
+const testStopSignVehicleModelHash int64 = 123456
 
-func testParkingConfig() Config {
+func testStopSignConfig() Config {
 	cfg := DefaultConfig()
 	cfg.SpeedLimitKPH = 0
-	cfg.ParkingCalibration = ParkingCalibration{
+	cfg.StopSignCalibration = StopSignCalibration{
 		Verified:           true,
 		ProfileID:          "test-profile-v1",
-		VehicleModelHash:   testParkingVehicleModelHash,
+		VehicleModelHash:   testStopSignVehicleModelHash,
 		GameBuild:          "test-build",
 		AdapterVersion:     "test-adapter-v1",
 		SteeringConvention: "positive_wheel_is_positive_xinput",
@@ -745,7 +749,7 @@ func testParkingConfig() Config {
 	return cfg
 }
 
-func newReadyParkingService(cfg Config, store *control.Store, now *time.Time) *Service {
+func newReadyStopSignService(cfg Config, store *control.Store, now *time.Time) *Service {
 	svc := NewService(cfg, "", store)
 	svc.controller = &fakeController{}
 	svc.ready = true
@@ -754,39 +758,39 @@ func newReadyParkingService(cfg Config, store *control.Store, now *time.Time) *S
 	return svc
 }
 
-func armParkingInference(t *testing.T, svc *Service) {
+func armStopSignInference(t *testing.T, svc *Service) {
 	t.Helper()
 	enabled := true
 	if _, err := svc.Submit(CommandRequest{
 		Enabled:   &enabled,
 		InputMode: InputModeNormalized,
-		Owner:     OwnerParkingInference,
+		Owner:     OwnerStopSignInference,
 	}); err != nil {
-		t.Fatalf("arm parking inference: %v", err)
+		t.Fatalf("arm stopSign inference: %v", err)
 	}
 }
 
-func testParkingPlan(sampledAt time.Time) parkingcontrol.Plan {
-	dtMs := []int{50, 100, 150, 200, 250, 300}
-	points := make([]parkingcontrol.Setpoint, len(dtMs))
+func testStopSignPlan(sampledAt time.Time) stopsigncontrol.Plan {
+	dtMs := []int{100, 250, 500, 1000}
+	points := make([]stopsigncontrol.Setpoint, len(dtMs))
 	for index, offset := range dtMs {
-		points[index] = parkingcontrol.Setpoint{
+		points[index] = stopsigncontrol.Setpoint{
 			DtMs:                        offset,
 			DesiredWheelSteerNormalized: 0.45,
 			DesiredSpeedMPS:             1.0,
 			StopProbability:             0.05,
 		}
 	}
-	return parkingcontrol.Plan{
-		Contract:    parkingcontrol.ParkingSetpointContractV1,
+	return stopsigncontrol.Plan{
+		Contract:    stopsigncontrol.StopSignMotionPlanContractV1,
 		SampledAtS:  timeToSeconds(sampledAt),
 		ReceivedAtS: timeToSeconds(sampledAt),
 		Points:      points,
-		Direction:   parkingcontrol.ParkingDirectionForward,
+		Direction:   stopsigncontrol.StopSignDirectionForward,
 	}
 }
 
-func updateParkingTelemetry(store *control.Store, at time.Time, speedMPS, steering float64, vehicleModelHash int64) {
+func updateStopSignTelemetry(store *control.Store, at time.Time, speedMPS, steering float64, vehicleModelHash int64) {
 	store.UpdateTelemetry(control.TelemetryUpdate{
 		CurrentSpeed:     speedMPS,
 		Steering:         steering,

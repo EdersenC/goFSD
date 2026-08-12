@@ -7,16 +7,13 @@ import torch
 from torch import Tensor
 
 from control_contract import (
-    DESIRED_SPEED_MPS,
-    DESIRED_WHEEL_STEER_NORMALIZED,
+    FUTURE_SPEED_MPS,
     MAX_DESIRED_SPEED_MPS,
-    STOP_PROBABILITY,
+    STOP_INTENT,
 )
 
 
-DEFAULT_FUTURE_SPEED_DELTA_CLIP = 2.0
-DEFAULT_FUTURE_SPEED_DELTA_NORMALIZE = True
-DEFAULT_PARKING_SPEED_CAP_MPS = MAX_DESIRED_SPEED_MPS
+DEFAULT_STOP_SIGN_SPEED_CAP_MPS = MAX_DESIRED_SPEED_MPS
 
 TARGET_TRANSFORM_TYPE_SIGNED_CAP = "signed_cap"
 TARGET_TRANSFORM_TYPE_POSITIVE_CAP = "positive_cap"
@@ -24,13 +21,11 @@ TARGET_TRANSFORM_TYPE_ANGLE_CAP = "angle_cap"
 TARGET_TRANSFORM_TYPE_IDENTITY = "identity"
 
 DEFAULT_TARGET_TRANSFORMS: dict[str, tuple[str, float, float]] = {
-    DESIRED_WHEEL_STEER_NORMALIZED: (TARGET_TRANSFORM_TYPE_SIGNED_CAP, -1.0, 1.0),
-    DESIRED_SPEED_MPS: (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, DEFAULT_PARKING_SPEED_CAP_MPS),
-    STOP_PROBABILITY: (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 1.0),
-    "future_speed": (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 80.0),
-    "future_speed_delta": (TARGET_TRANSFORM_TYPE_SIGNED_CAP, -DEFAULT_FUTURE_SPEED_DELTA_CLIP, DEFAULT_FUTURE_SPEED_DELTA_CLIP),
-    "future_yaw_delta": (TARGET_TRANSFORM_TYPE_ANGLE_CAP, -45.0, 45.0),
-    "future_yaw_rate": (TARGET_TRANSFORM_TYPE_SIGNED_CAP, -10.0, 10.0),
+    FUTURE_SPEED_MPS: (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, DEFAULT_STOP_SIGN_SPEED_CAP_MPS),
+    STOP_INTENT: (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 1.0),
+    "expert_throttle": (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 1.0),
+    "expert_brake": (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 1.0),
+    "actual_brake_pressure": (TARGET_TRANSFORM_TYPE_POSITIVE_CAP, 0.0, 1.0),
 }
 
 
@@ -331,21 +326,10 @@ def resolve_target_transforms_for_model(checkpoint: Mapping[str, Any], target_na
     return resolve_checkpoint_target_transforms(checkpoint, target_names)
 
 
-def validate_parking_control_target_transforms(
+def validate_stop_sign_control_target_transforms(
     target_transforms: Mapping[str, TargetTransform],
 ) -> None:
-    steer = _require_transform(target_transforms, DESIRED_WHEEL_STEER_NORMALIZED)
-    if (
-        steer.transform_type != TARGET_TRANSFORM_TYPE_SIGNED_CAP
-        or not steer.normalize
-        or steer.range_min != -1.0
-        or steer.range_max != 1.0
-    ):
-        raise ValueError(
-            f"{DESIRED_WHEEL_STEER_NORMALIZED} transform must be normalized signed_cap [-1, 1]"
-        )
-
-    speed = _require_transform(target_transforms, DESIRED_SPEED_MPS)
+    speed = _require_transform(target_transforms, FUTURE_SPEED_MPS)
     if (
         speed.transform_type != TARGET_TRANSFORM_TYPE_POSITIVE_CAP
         or not speed.normalize
@@ -353,10 +337,10 @@ def validate_parking_control_target_transforms(
         or speed.range_max != MAX_DESIRED_SPEED_MPS
     ):
         raise ValueError(
-            f"{DESIRED_SPEED_MPS} transform must be normalized positive_cap [0, {MAX_DESIRED_SPEED_MPS}]"
+            f"{FUTURE_SPEED_MPS} transform must be normalized positive_cap [0, {MAX_DESIRED_SPEED_MPS}]"
         )
 
-    stop = _require_transform(target_transforms, STOP_PROBABILITY)
+    stop = _require_transform(target_transforms, STOP_INTENT)
     if (
         stop.transform_type != TARGET_TRANSFORM_TYPE_POSITIVE_CAP
         or not stop.normalize
@@ -364,7 +348,7 @@ def validate_parking_control_target_transforms(
         or stop.range_max != 1.0
     ):
         raise ValueError(
-            f"{STOP_PROBABILITY} transform must be normalized positive_cap [0, 1]"
+            f"{STOP_INTENT} transform must be normalized positive_cap [0, 1]"
         )
 
 
@@ -417,33 +401,27 @@ def round_trip_transform_check(target_names: Sequence[str] | None = None) -> dic
 
     registry = build_target_transform_registry(names)
     sample_values = {
-        DESIRED_WHEEL_STEER_NORMALIZED: 0.42,
-        DESIRED_SPEED_MPS: 1.5,
-        STOP_PROBABILITY: 1.0,
-        "future_speed": 19.5,
-        "future_speed_delta": -2.0,
-        "future_yaw_delta": -15.0,
-        "future_yaw_rate": 1.5,
+        FUTURE_SPEED_MPS: 1.5,
+        STOP_INTENT: 1.0,
+        "expert_throttle": 0.42,
+        "expert_brake": 0.75,
+        "actual_brake_pressure": 0.5,
     }
 
     max_round_trip_error = 0.0
     for name in names:
         transform = registry[name]
         raw_value = float(sample_values[name]) if name in sample_values else 0.25
-        if name == "future_speed_delta" and raw_value >= 0.0:
-            raw_value = -2.0
         value = torch.tensor([raw_value], dtype=torch.float32)
         restored = float(transform.denormalize_tensor(transform.normalize_tensor(value)).item())
         max_round_trip_error = max(max_round_trip_error, abs(restored - raw_value))
-        if name == "future_speed_delta" and restored >= 0.0:
-            raise AssertionError("future_speed_delta negative test case should remain negative after round trip")
 
-    if STOP_PROBABILITY in registry:
-        positive_transform = registry[STOP_PROBABILITY]
+    if STOP_INTENT in registry:
+        positive_transform = registry[STOP_INTENT]
         positive_restored = float(positive_transform.denormalize_tensor(
             positive_transform.normalize_tensor(torch.tensor([-0.4]))
         ).item())
         if positive_restored < 0.0:
-            raise AssertionError(f"{STOP_PROBABILITY} must remain non-negative after denormalization")
+            raise AssertionError(f"{STOP_INTENT} must remain non-negative after denormalization")
 
     return {"max_round_trip_error": float(max_round_trip_error)}

@@ -31,13 +31,10 @@ func TestCollectTripDirs(t *testing.T) {
 func TestProcessTripDirsSkipsExistingOutputs(t *testing.T) {
 	tmp := t.TempDir()
 	tripDir := filepath.Join(tmp, "run-a", "scene-a", "trip-000")
-	framesDir := filepath.Join(tripDir, "frames")
-	if err := os.MkdirAll(framesDir, 0o755); err != nil {
-		t.Fatalf("mkdir frames: %v", err)
+	if err := os.MkdirAll(tripDir, 0o755); err != nil {
+		t.Fatalf("mkdir trip: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(framesDir, "000001.jpg"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write frame: %v", err)
-	}
+	writeCompletedProcessingFixture(t, tripDir, NewProcessor(), 1, 1)
 
 	results := ProcessTripDirs(context.Background(), []string{tripDir}, 2)
 	if len(results) != 1 {
@@ -54,13 +51,10 @@ func TestProcessTripDirsSkipsExistingOutputs(t *testing.T) {
 func TestProcessTripDirsWithCallbackReportsResults(t *testing.T) {
 	tmp := t.TempDir()
 	tripDir := filepath.Join(tmp, "run-a", "scene-a", "trip-000")
-	framesDir := filepath.Join(tripDir, "frames")
-	if err := os.MkdirAll(framesDir, 0o755); err != nil {
-		t.Fatalf("mkdir frames: %v", err)
+	if err := os.MkdirAll(tripDir, 0o755); err != nil {
+		t.Fatalf("mkdir trip: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(framesDir, "000001.jpg"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write frame: %v", err)
-	}
+	writeCompletedProcessingFixture(t, tripDir, NewProcessor(), 1, 1)
 
 	var mu sync.Mutex
 	seen := make([]TripProcessResult, 0, 2)

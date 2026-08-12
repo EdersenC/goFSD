@@ -23,11 +23,12 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 		vehicleModel: "sultan",
 		vehicleColor: "Black",
 		status: ProcessingStatus{
-			State:      "completed",
-			FrameCount: 5,
+			State:             "completed",
+			ConfigFingerprint: "sha256:report-test",
+			FrameCount:        5,
 		},
 		samples: []DatasetSample{
-			reportSample(0.1, 20.0, 0.2, -2.0, -1.0, 3.0, 3.5, reportTelemetry{
+			reportSample(0.1, 0.2, 3.0, 3.5, reportTelemetry{
 				currentSpeed:        5.0,
 				routeDistance:       12.0,
 				leadVehicleDistance: 18.0,
@@ -35,7 +36,7 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 				isStopped:           0,
 				extraRaw:            map[string]any{"isInJunction": true, "eventOffroad": false},
 			}),
-			reportSample(0.1, 15.0, 0.2, 0.0, 0.0, 5.0, 5.0, reportTelemetry{
+			reportSample(0.1, 0.2, 5.0, 5.0, reportTelemetry{
 				currentSpeed:        5.0,
 				routeDistance:       6.0,
 				leadVehicleDistance: 10.0,
@@ -43,7 +44,7 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 				isStopped:           1,
 				extraRaw:            map[string]any{"isInJunction": false, "eventOffroad": true},
 			}),
-			reportSample(0.1, 5.0, 0.2, 2.0, 1.0, 7.0, 7.5, reportTelemetry{
+			reportSample(0.1, 0.2, 7.0, 7.5, reportTelemetry{
 				currentSpeed:   5.0,
 				routeDistance:  2.0,
 				hasLeadVehicle: false,
@@ -67,7 +68,7 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			State:             "failed",
 			Error:             "ffmpeg failed",
 			Warning:           "no dataset samples generated",
-			ZeroSampleReasons: map[string]int{"missing_yaw_rate_target": 4},
+			ZeroSampleReasons: map[string]int{"missing_future_speed_target": 4},
 		},
 	})
 
@@ -86,14 +87,14 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 			FrameCount: 2,
 		},
 		samples: []DatasetSample{
-			reportSample(0.5, 40.0, 0.2, 1.0, 0.5, 11.0, 11.0, reportTelemetry{
+			reportSample(0.5, 0.2, 11.0, 11.0, reportTelemetry{
 				currentSpeed: 10.0,
 				isStopped:    0,
 			}),
 		},
 	})
 
-	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB, tripC}, DatasetReportConfig{FutureSpeedDeltaClip: 2.0})
+	report, err := BuildRunDatasetReport(runDir, []string{tripA, tripB, tripC}, DatasetReportConfig{})
 	if err != nil {
 		t.Fatalf("BuildRunDatasetReport: %v", err)
 	}
@@ -124,12 +125,6 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 	if math.Abs(summary.StoppedSampleShare-0.5) > 1e-9 {
 		t.Fatalf("unexpected stopped sample share: got=%v want=0.5", summary.StoppedSampleShare)
 	}
-	if summary.FutureSpeedDeltaClip.AnyClipCount != 2 || summary.FutureSpeedDeltaClip.NegativeClipCount != 1 || summary.FutureSpeedDeltaClip.PositiveClipCount != 1 {
-		t.Fatalf("unexpected clip summary: %+v", summary.FutureSpeedDeltaClip)
-	}
-	if math.Abs(summary.FutureSpeedDeltaClip.AnyClipRate-0.5) > 1e-9 {
-		t.Fatalf("unexpected clip rate: got=%v want=0.5", summary.FutureSpeedDeltaClip.AnyClipRate)
-	}
 	if summary.FlatLabelTripCounts["steer"] != 1 {
 		t.Fatalf("unexpected flat steer trip count: %+v", summary.FlatLabelTripCounts)
 	}
@@ -154,11 +149,13 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 
 	var foundMissing bool
 	var foundFlatSteer bool
+	var foundFingerprint bool
 	for _, trip := range report.Trips {
 		if trip.TripName == "trip-001" {
-			foundMissing = trip.MissingDataset && trip.ZeroSamples && trip.ZeroSampleReasons["missing_yaw_rate_target"] == 4
+			foundMissing = trip.MissingDataset && trip.ZeroSamples && trip.ZeroSampleReasons["missing_future_speed_target"] == 4
 		}
 		if trip.TripName == "trip-000" && trip.SceneID == "scene-a" {
+			foundFingerprint = trip.ConfigFingerprint == "sha256:report-test"
 			for _, label := range trip.FlatLabels {
 				if label == "steer" {
 					foundFlatSteer = true
@@ -172,6 +169,9 @@ func TestBuildRunDatasetReportAggregatesTripsAndFlags(t *testing.T) {
 	}
 	if !foundFlatSteer {
 		t.Fatalf("expected flat steer label to be flagged")
+	}
+	if !foundFingerprint {
+		t.Fatal("expected processing fingerprint in the trip report")
 	}
 }
 
@@ -193,14 +193,14 @@ func TestWriteRunDatasetReportsWritesFile(t *testing.T) {
 			FrameCount: 1,
 		},
 		samples: []DatasetSample{
-			reportSample(0.2, 25.0, 0.2, 0.0, 0.0, 4.0, 4.0, reportTelemetry{
+			reportSample(0.2, 0.2, 4.0, 4.0, reportTelemetry{
 				currentSpeed: 4.0,
 				isStopped:    0,
 			}),
 		},
 	})
 
-	reports, err := WriteRunDatasetReports([]string{tripDir}, DatasetReportConfig{FutureSpeedDeltaClip: 2.0})
+	reports, err := WriteRunDatasetReports([]string{tripDir}, DatasetReportConfig{})
 	if err != nil {
 		t.Fatalf("WriteRunDatasetReports: %v", err)
 	}
@@ -286,10 +286,7 @@ type reportTelemetry struct {
 
 func reportSample(
 	steering float64,
-	futureYawDelta float64,
 	futureHorizonSeconds float64,
-	futureSpeedDelta float64,
-	futureSpeedDeltaTarget float64,
 	futureSpeed float64,
 	futureSpeedTarget float64,
 	telemetry reportTelemetry,
@@ -301,12 +298,9 @@ func reportSample(
 				Steering: steering,
 			},
 			Aux: GroupedLabelAux{
-				FutureSpeedDelta:       futureSpeedDelta,
-				FutureSpeedDeltaTarget: futureSpeedDeltaTarget,
-				FutureSpeed:            futureSpeed,
-				FutureSpeedTarget:      futureSpeedTarget,
-				FutureYawDelta:         futureYawDelta,
-				FutureHorizonSeconds:   futureHorizonSeconds,
+				FutureSpeed:          futureSpeed,
+				FutureSpeedTarget:    futureSpeedTarget,
+				FutureHorizonSeconds: futureHorizonSeconds,
 			},
 		},
 		TelemetryHistory: []GroupedTelemetryItem{

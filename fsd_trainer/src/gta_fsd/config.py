@@ -6,8 +6,8 @@ from typing import Any
 
 from control_contract import (
     DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS,
-    PARKING_CONTROL_TARGET_NAMES,
-    require_parking_control_target_names,
+    STOP_SIGN_CONTROL_TARGET_NAMES,
+    require_stop_sign_control_target_names,
 )
 
 DEFAULT_IMAGE_WIDTH = 480
@@ -18,19 +18,19 @@ DEFAULT_SAMPLE_STRIDE = 2
 
 DEFAULT_IMAGE_OFFSETS = (-8, -6, -4, -2, 0)
 DEFAULT_TELEMETRY_OFFSETS = (-8, -7, -6, -5, -4, -3, -2, -1, 0)
-DEFAULT_FUTURE_OFFSETS = (1, 2, 3, 4, 5, 6)
+DEFAULT_FUTURE_OFFSETS = (2, 5, 10, 20)
 DEFAULT_TELEMETRY_FEATURE_NAMES = (
     "current_speed",
-    "yaw_sin",
-    "yaw_cos",
-    "yaw_rate",
-    "steering",
-    "acceleration",
 )
-DEFAULT_CONTROL_TARGET_NAMES = PARKING_CONTROL_TARGET_NAMES
-DEFAULT_AUX_TARGET_NAMES = ("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate")
+DEFAULT_CONTROL_TARGET_NAMES = STOP_SIGN_CONTROL_TARGET_NAMES
+STOP_SIGN_AUX_TARGET_NAMES = (
+    "expert_throttle",
+    "expert_brake",
+    "actual_brake_pressure",
+)
+DEFAULT_AUX_TARGET_NAMES = STOP_SIGN_AUX_TARGET_NAMES
 DEFAULT_AUX_LOSS_WEIGHT = 0.3
-DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.8, 0.65, 0.5, 0.4)
+DEFAULT_HORIZON_LOSS_WEIGHTS = (1.0, 0.9, 0.75, 0.6)
 DEFAULT_LOSS_FUNCTION = "smooth_l1"
 DEFAULT_SMOOTH_L1_BETA = 0.1
 DEFAULT_TELEMETRY_HIDDEN_DIM = 128
@@ -177,11 +177,16 @@ def parse_temporal_dataset_config(
         dataset_raw.get("telemetry_feature_names", list(DEFAULT_TELEMETRY_FEATURE_NAMES)),
         key="dataset.telemetry_feature_names",
     )
+    if telemetry_feature_names != DEFAULT_TELEMETRY_FEATURE_NAMES:
+        raise ValueError(
+            "dataset.telemetry_feature_names must exactly match the RGB-first stop-sign input contract: "
+            f"expected={list(DEFAULT_TELEMETRY_FEATURE_NAMES)} actual={list(telemetry_feature_names)}"
+        )
     control_target_names = _parse_name_list(
         dataset_raw.get("control_target_names", list(DEFAULT_CONTROL_TARGET_NAMES)),
         key="dataset.control_target_names",
     )
-    require_parking_control_target_names(
+    require_stop_sign_control_target_names(
         control_target_names,
         source="dataset.control_target_names",
     )
@@ -189,6 +194,11 @@ def parse_temporal_dataset_config(
         dataset_raw.get("aux_target_names", list(DEFAULT_AUX_TARGET_NAMES)),
         key="dataset.aux_target_names",
     )
+    if aux_target_names != STOP_SIGN_AUX_TARGET_NAMES:
+        raise ValueError(
+            "dataset.aux_target_names must exactly match the stop-sign diagnostic contract: "
+            f"expected={list(STOP_SIGN_AUX_TARGET_NAMES)} actual={list(aux_target_names)}"
+        )
     return (
         image_offsets,
         telemetry_offsets,

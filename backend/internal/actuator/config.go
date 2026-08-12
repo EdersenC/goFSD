@@ -7,30 +7,30 @@ import (
 	"strings"
 	"time"
 
-	"awesomeProject/internal/parkingcontrol"
+	"awesomeProject/internal/stopsigncontrol"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
 
 const (
-	defaultTickHz                  = 60
-	defaultActuatorURL             = "http://127.0.0.1:8080"
-	defaultActuatorHTTPTimeout     = 500 * time.Millisecond
-	defaultStaleTimeout            = 250 * time.Millisecond
-	defaultSteeringGain            = 1.0
-	defaultThrottleGain            = 1.0
-	defaultThrottleFloor           = 0.0
-	defaultSpeedLimitKPH           = 17.0
-	defaultOverspeedBrakeMarginKPH = 2.0
-	defaultOverspeedBrake          = 0.25
-	defaultModelBrakeThreshold     = 0.55
-	defaultReverseLockoutSpeedKPH  = 1.0
-	defaultParkingPlanTimeout      = 400 * time.Millisecond
-	defaultParkingTelemetryTimeout = 250 * time.Millisecond
-	defaultParkingLatency          = 50 * time.Millisecond
+	defaultTickHz                   = 60
+	defaultActuatorURL              = "http://127.0.0.1:8080"
+	defaultActuatorHTTPTimeout      = 500 * time.Millisecond
+	defaultStaleTimeout             = 250 * time.Millisecond
+	defaultSteeringGain             = 1.0
+	defaultThrottleGain             = 1.0
+	defaultThrottleFloor            = 0.0
+	defaultSpeedLimitKPH            = 17.0
+	defaultOverspeedBrakeMarginKPH  = 2.0
+	defaultOverspeedBrake           = 0.25
+	defaultModelBrakeThreshold      = 0.55
+	defaultReverseLockoutSpeedKPH   = 1.0
+	defaultStopSignPlanTimeout      = 400 * time.Millisecond
+	defaultStopSignTelemetryTimeout = 250 * time.Millisecond
+	defaultStopSignLatency          = 50 * time.Millisecond
 )
 
-type ParkingCalibration struct {
+type StopSignCalibration struct {
 	Verified           bool   `json:"verified"`
 	ProfileID          string `json:"profileId"`
 	VehicleModelHash   int64  `json:"vehicleModelHash"`
@@ -40,24 +40,24 @@ type ParkingCalibration struct {
 }
 
 type Config struct {
-	TickHz                           int
-	StaleTimeout                     time.Duration
-	URL                              string
-	RequestTimeout                   time.Duration
-	SteeringGain                     float64
-	ThrottleGain                     float64
-	ThrottleFloor                    float64
-	SpeedLimitKPH                    float64
-	OverspeedBrakeMarginKPH          float64
-	OverspeedBrake                   float64
-	ModelBrakeThreshold              float64
-	ReverseLockoutSpeedKPH           float64
-	ParkingController                parkingcontrol.Config
-	ParkingCalibration               ParkingCalibration
-	ParkingPlanTimeout               time.Duration
-	ParkingTelemetryTimeout          time.Duration
-	ParkingEstimatedActuationLatency time.Duration
-	ParkingExpectedHorizonDtMs       []int
+	TickHz                            int
+	StaleTimeout                      time.Duration
+	URL                               string
+	RequestTimeout                    time.Duration
+	SteeringGain                      float64
+	ThrottleGain                      float64
+	ThrottleFloor                     float64
+	SpeedLimitKPH                     float64
+	OverspeedBrakeMarginKPH           float64
+	OverspeedBrake                    float64
+	ModelBrakeThreshold               float64
+	ReverseLockoutSpeedKPH            float64
+	StopSignController                stopsigncontrol.Config
+	StopSignCalibration               StopSignCalibration
+	StopSignPlanTimeout               time.Duration
+	StopSignTelemetryTimeout          time.Duration
+	StopSignEstimatedActuationLatency time.Duration
+	StopSignExpectedHorizonDtMs       []int
 }
 
 type Tuning struct {
@@ -83,40 +83,41 @@ type configFile struct {
 }
 
 type backendSection struct {
-	Actuator          actuatorSection          `toml:"actuator"`
-	ParkingController parkingControllerSection `toml:"parking_controller"`
+	Actuator           actuatorSection           `toml:"actuator"`
+	StopSignController stopSignControllerSection `toml:"stop_sign_controller"`
 }
 
-type parkingControllerSection struct {
-	CalibrationVerified             *bool                                     `toml:"calibration_verified"`
-	CalibrationProfileID            string                                    `toml:"calibration_profile_id"`
-	VehicleModelHash                *int64                                    `toml:"vehicle_model_hash"`
-	GameBuild                       string                                    `toml:"game_build"`
-	AdapterVersion                  string                                    `toml:"adapter_version"`
-	SteeringConvention              string                                    `toml:"steering_convention"`
-	SteeringProfile                 []parkingcontrol.SteeringCalibrationPoint `toml:"steering_profile"`
-	SteeringFeedbackGain            *float64                                  `toml:"steering_feedback_gain"`
-	SteeringKi                      *float64                                  `toml:"steering_ki"`
-	SteeringIntegralMin             *float64                                  `toml:"steering_integral_min"`
-	SteeringIntegralMax             *float64                                  `toml:"steering_integral_max"`
-	SteeringSlewPerSecond           *float64                                  `toml:"steering_slew_per_second"`
-	SpeedKp                         *float64                                  `toml:"speed_kp"`
-	SpeedKi                         *float64                                  `toml:"speed_ki"`
-	SpeedIntegralMin                *float64                                  `toml:"speed_integral_min"`
-	SpeedIntegralMax                *float64                                  `toml:"speed_integral_max"`
-	MaxThrottleEffort               *float64                                  `toml:"max_throttle_effort"`
-	MaxBrakeEffort                  *float64                                  `toml:"max_brake_effort"`
-	LongitudinalSlewPerSecond       *float64                                  `toml:"longitudinal_slew_per_second"`
-	StopProbabilityThreshold        *float64                                  `toml:"stop_probability_threshold"`
-	StopProbabilityReleaseThreshold *float64                                  `toml:"stop_probability_release_threshold"`
-	HoldSpeedMPS                    *float64                                  `toml:"hold_speed_mps"`
-	StopBrakeEffort                 *float64                                  `toml:"stop_brake_effort"`
-	MaxDesiredSpeedMPS              *float64                                  `toml:"max_desired_speed_mps"`
-	MaxDT                           string                                    `toml:"max_dt"`
-	PlanTimeout                     string                                    `toml:"plan_timeout"`
-	TelemetryTimeout                string                                    `toml:"telemetry_timeout"`
-	EstimatedActuationLatency       string                                    `toml:"estimated_actuation_latency"`
-	ExpectedHorizonDtMs             []int                                     `toml:"expected_horizon_dt_ms"`
+type stopSignControllerSection struct {
+	CalibrationVerified             *bool                                      `toml:"calibration_verified"`
+	CalibrationProfileID            string                                     `toml:"calibration_profile_id"`
+	VehicleModelHash                *int64                                     `toml:"vehicle_model_hash"`
+	GameBuild                       string                                     `toml:"game_build"`
+	AdapterVersion                  string                                     `toml:"adapter_version"`
+	SteeringConvention              string                                     `toml:"steering_convention"`
+	SteeringProfile                 []stopsigncontrol.SteeringCalibrationPoint `toml:"steering_profile"`
+	StraightApproachOnly            *bool                                      `toml:"straight_approach_only"`
+	SteeringFeedbackGain            *float64                                   `toml:"steering_feedback_gain"`
+	SteeringKi                      *float64                                   `toml:"steering_ki"`
+	SteeringIntegralMin             *float64                                   `toml:"steering_integral_min"`
+	SteeringIntegralMax             *float64                                   `toml:"steering_integral_max"`
+	SteeringSlewPerSecond           *float64                                   `toml:"steering_slew_per_second"`
+	SpeedKp                         *float64                                   `toml:"speed_kp"`
+	SpeedKi                         *float64                                   `toml:"speed_ki"`
+	SpeedIntegralMin                *float64                                   `toml:"speed_integral_min"`
+	SpeedIntegralMax                *float64                                   `toml:"speed_integral_max"`
+	MaxThrottleEffort               *float64                                   `toml:"max_throttle_effort"`
+	MaxBrakeEffort                  *float64                                   `toml:"max_brake_effort"`
+	LongitudinalSlewPerSecond       *float64                                   `toml:"longitudinal_slew_per_second"`
+	StopProbabilityThreshold        *float64                                   `toml:"stop_probability_threshold"`
+	StopProbabilityReleaseThreshold *float64                                   `toml:"stop_probability_release_threshold"`
+	HoldSpeedMPS                    *float64                                   `toml:"hold_speed_mps"`
+	StopBrakeEffort                 *float64                                   `toml:"stop_brake_effort"`
+	MaxDesiredSpeedMPS              *float64                                   `toml:"max_desired_speed_mps"`
+	MaxDT                           string                                     `toml:"max_dt"`
+	PlanTimeout                     string                                     `toml:"plan_timeout"`
+	TelemetryTimeout                string                                     `toml:"telemetry_timeout"`
+	EstimatedActuationLatency       string                                     `toml:"estimated_actuation_latency"`
+	ExpectedHorizonDtMs             []int                                      `toml:"expected_horizon_dt_ms"`
 }
 
 type actuatorSection struct {
@@ -136,33 +137,34 @@ type actuatorSection struct {
 
 func DefaultConfig() Config {
 	return Config{
-		TickHz:                           defaultTickHz,
-		StaleTimeout:                     defaultStaleTimeout,
-		URL:                              defaultActuatorURL,
-		RequestTimeout:                   defaultActuatorHTTPTimeout,
-		SteeringGain:                     defaultSteeringGain,
-		ThrottleGain:                     defaultThrottleGain,
-		ThrottleFloor:                    defaultThrottleFloor,
-		SpeedLimitKPH:                    defaultSpeedLimitKPH,
-		OverspeedBrakeMarginKPH:          defaultOverspeedBrakeMarginKPH,
-		OverspeedBrake:                   defaultOverspeedBrake,
-		ModelBrakeThreshold:              defaultModelBrakeThreshold,
-		ReverseLockoutSpeedKPH:           defaultReverseLockoutSpeedKPH,
-		ParkingController:                defaultParkingControllerConfig(),
-		ParkingPlanTimeout:               defaultParkingPlanTimeout,
-		ParkingTelemetryTimeout:          defaultParkingTelemetryTimeout,
-		ParkingEstimatedActuationLatency: defaultParkingLatency,
-		ParkingExpectedHorizonDtMs:       []int{50, 100, 150, 200, 250, 300},
+		TickHz:                            defaultTickHz,
+		StaleTimeout:                      defaultStaleTimeout,
+		URL:                               defaultActuatorURL,
+		RequestTimeout:                    defaultActuatorHTTPTimeout,
+		SteeringGain:                      defaultSteeringGain,
+		ThrottleGain:                      defaultThrottleGain,
+		ThrottleFloor:                     defaultThrottleFloor,
+		SpeedLimitKPH:                     defaultSpeedLimitKPH,
+		OverspeedBrakeMarginKPH:           defaultOverspeedBrakeMarginKPH,
+		OverspeedBrake:                    defaultOverspeedBrake,
+		ModelBrakeThreshold:               defaultModelBrakeThreshold,
+		ReverseLockoutSpeedKPH:            defaultReverseLockoutSpeedKPH,
+		StopSignController:                defaultStopSignControllerConfig(),
+		StopSignPlanTimeout:               defaultStopSignPlanTimeout,
+		StopSignTelemetryTimeout:          defaultStopSignTelemetryTimeout,
+		StopSignEstimatedActuationLatency: defaultStopSignLatency,
+		StopSignExpectedHorizonDtMs:       []int{100, 250, 500, 1000},
 	}
 }
 
-func defaultParkingControllerConfig() parkingcontrol.Config {
-	return parkingcontrol.Config{
-		SteeringProfile: []parkingcontrol.SteeringCalibrationPoint{
+func defaultStopSignControllerConfig() stopsigncontrol.Config {
+	return stopsigncontrol.Config{
+		SteeringProfile: []stopsigncontrol.SteeringCalibrationPoint{
 			{WheelSteer: -1, Command: -1},
 			{WheelSteer: 0, Command: 0},
 			{WheelSteer: 1, Command: 1},
 		},
+		StraightApproachOnly:            true,
 		SteeringFeedbackGain:            0.35,
 		SteeringKi:                      0.10,
 		SteeringIntegralMin:             -0.5,
@@ -179,7 +181,7 @@ func defaultParkingControllerConfig() parkingcontrol.Config {
 		StopProbabilityReleaseThreshold: 0.35,
 		HoldSpeedMPS:                    0.15,
 		StopBrakeEffort:                 0.45,
-		MaxDesiredSpeedMPS:              parkingcontrol.ParkingSetpointMaxSpeedMPS,
+		MaxDesiredSpeedMPS:              stopsigncontrol.StopSignMotionPlanMaxSpeedMPS,
 		MaxDT:                           250 * time.Millisecond,
 	}
 }
@@ -248,7 +250,7 @@ func LoadConfig(path string) (Config, error) {
 	if section.ReverseLockoutSpeedKPH != nil {
 		cfg.ReverseLockoutSpeedKPH = *section.ReverseLockoutSpeedKPH
 	}
-	if err := applyParkingControllerSection(&cfg, parsed.Backend.ParkingController); err != nil {
+	if err := applyStopSignControllerSection(&cfg, parsed.Backend.StopSignController); err != nil {
 		return Config{}, err
 	}
 
@@ -264,35 +266,38 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateActuatorSafetyConfig(cfg); err != nil {
 		return Config{}, err
 	}
-	if err := validateParkingControllerConfig(cfg); err != nil {
+	if err := validateStopSignControllerConfig(cfg); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
 }
 
-func applyParkingControllerSection(cfg *Config, section parkingControllerSection) error {
-	controller := &cfg.ParkingController
+func applyStopSignControllerSection(cfg *Config, section stopSignControllerSection) error {
+	controller := &cfg.StopSignController
 	if section.CalibrationVerified != nil {
-		cfg.ParkingCalibration.Verified = *section.CalibrationVerified
+		cfg.StopSignCalibration.Verified = *section.CalibrationVerified
 	}
 	if value := strings.TrimSpace(section.CalibrationProfileID); value != "" {
-		cfg.ParkingCalibration.ProfileID = value
+		cfg.StopSignCalibration.ProfileID = value
 	}
 	if section.VehicleModelHash != nil {
-		cfg.ParkingCalibration.VehicleModelHash = *section.VehicleModelHash
+		cfg.StopSignCalibration.VehicleModelHash = *section.VehicleModelHash
 	}
 	if value := strings.TrimSpace(section.GameBuild); value != "" {
-		cfg.ParkingCalibration.GameBuild = value
+		cfg.StopSignCalibration.GameBuild = value
 	}
 	if value := strings.TrimSpace(section.AdapterVersion); value != "" {
-		cfg.ParkingCalibration.AdapterVersion = value
+		cfg.StopSignCalibration.AdapterVersion = value
 	}
 	if value := strings.TrimSpace(section.SteeringConvention); value != "" {
-		cfg.ParkingCalibration.SteeringConvention = value
+		cfg.StopSignCalibration.SteeringConvention = value
 	}
 	if len(section.SteeringProfile) > 0 {
-		controller.SteeringProfile = append([]parkingcontrol.SteeringCalibrationPoint(nil), section.SteeringProfile...)
+		controller.SteeringProfile = append([]stopsigncontrol.SteeringCalibrationPoint(nil), section.SteeringProfile...)
+	}
+	if section.StraightApproachOnly != nil {
+		controller.StraightApproachOnly = *section.StraightApproachOnly
 	}
 	assignFloat := func(destination *float64, value *float64) {
 		if value != nil {
@@ -318,20 +323,20 @@ func applyParkingControllerSection(cfg *Config, section parkingControllerSection
 	assignFloat(&controller.MaxDesiredSpeedMPS, section.MaxDesiredSpeedMPS)
 
 	var err error
-	if controller.MaxDT, err = parseOptionalDuration("backend.parking_controller.max_dt", section.MaxDT, controller.MaxDT); err != nil {
+	if controller.MaxDT, err = parseOptionalDuration("backend.stop_sign_controller.max_dt", section.MaxDT, controller.MaxDT); err != nil {
 		return err
 	}
-	if cfg.ParkingPlanTimeout, err = parseOptionalDuration("backend.parking_controller.plan_timeout", section.PlanTimeout, cfg.ParkingPlanTimeout); err != nil {
+	if cfg.StopSignPlanTimeout, err = parseOptionalDuration("backend.stop_sign_controller.plan_timeout", section.PlanTimeout, cfg.StopSignPlanTimeout); err != nil {
 		return err
 	}
-	if cfg.ParkingTelemetryTimeout, err = parseOptionalDuration("backend.parking_controller.telemetry_timeout", section.TelemetryTimeout, cfg.ParkingTelemetryTimeout); err != nil {
+	if cfg.StopSignTelemetryTimeout, err = parseOptionalDuration("backend.stop_sign_controller.telemetry_timeout", section.TelemetryTimeout, cfg.StopSignTelemetryTimeout); err != nil {
 		return err
 	}
-	if cfg.ParkingEstimatedActuationLatency, err = parseOptionalDuration("backend.parking_controller.estimated_actuation_latency", section.EstimatedActuationLatency, cfg.ParkingEstimatedActuationLatency); err != nil {
+	if cfg.StopSignEstimatedActuationLatency, err = parseOptionalDuration("backend.stop_sign_controller.estimated_actuation_latency", section.EstimatedActuationLatency, cfg.StopSignEstimatedActuationLatency); err != nil {
 		return err
 	}
 	if len(section.ExpectedHorizonDtMs) > 0 {
-		cfg.ParkingExpectedHorizonDtMs = append([]int(nil), section.ExpectedHorizonDtMs...)
+		cfg.StopSignExpectedHorizonDtMs = append([]int(nil), section.ExpectedHorizonDtMs...)
 	}
 	return nil
 }
@@ -348,38 +353,38 @@ func parseOptionalDuration(label, raw string, fallback time.Duration) (time.Dura
 	return parsed, nil
 }
 
-func validateParkingControllerConfig(cfg Config) error {
-	if _, err := parkingcontrol.New(cfg.ParkingController); err != nil {
-		return fmt.Errorf("backend parking controller: %w", err)
+func validateStopSignControllerConfig(cfg Config) error {
+	if _, err := stopsigncontrol.New(cfg.StopSignController); err != nil {
+		return fmt.Errorf("backend stop-sign controller: %w", err)
 	}
-	if cfg.ParkingPlanTimeout <= 0 {
-		return fmt.Errorf("backend parking controller plan_timeout must be > 0")
+	if cfg.StopSignPlanTimeout <= 0 {
+		return fmt.Errorf("backend stop-sign controller plan_timeout must be > 0")
 	}
-	if cfg.ParkingTelemetryTimeout <= 0 {
-		return fmt.Errorf("backend parking controller telemetry_timeout must be > 0")
+	if cfg.StopSignTelemetryTimeout <= 0 {
+		return fmt.Errorf("backend stop-sign controller telemetry_timeout must be > 0")
 	}
-	if cfg.ParkingEstimatedActuationLatency < 0 {
-		return fmt.Errorf("backend parking controller estimated_actuation_latency must be >= 0")
+	if cfg.StopSignEstimatedActuationLatency < 0 {
+		return fmt.Errorf("backend stop-sign controller estimated_actuation_latency must be >= 0")
 	}
-	if len(cfg.ParkingExpectedHorizonDtMs) == 0 {
-		return fmt.Errorf("backend parking controller expected_horizon_dt_ms must not be empty")
+	if len(cfg.StopSignExpectedHorizonDtMs) == 0 {
+		return fmt.Errorf("backend stop-sign controller expected_horizon_dt_ms must not be empty")
 	}
-	for index, value := range cfg.ParkingExpectedHorizonDtMs {
-		if value <= 0 || index > 0 && value <= cfg.ParkingExpectedHorizonDtMs[index-1] {
-			return fmt.Errorf("backend parking controller expected_horizon_dt_ms must be positive and strictly increasing")
+	for index, value := range cfg.StopSignExpectedHorizonDtMs {
+		if value <= 0 || index > 0 && value <= cfg.StopSignExpectedHorizonDtMs[index-1] {
+			return fmt.Errorf("backend stop-sign controller expected_horizon_dt_ms must be positive and strictly increasing")
 		}
 	}
-	if !cfg.ParkingCalibration.Verified {
+	if !cfg.StopSignCalibration.Verified {
 		return nil
 	}
-	if strings.TrimSpace(cfg.ParkingCalibration.ProfileID) == "" ||
-		cfg.ParkingCalibration.VehicleModelHash == 0 ||
-		strings.TrimSpace(cfg.ParkingCalibration.GameBuild) == "" ||
-		strings.TrimSpace(cfg.ParkingCalibration.AdapterVersion) == "" {
-		return fmt.Errorf("verified backend parking calibration requires profile_id, vehicle_model_hash, game_build, and adapter_version")
+	if strings.TrimSpace(cfg.StopSignCalibration.ProfileID) == "" ||
+		cfg.StopSignCalibration.VehicleModelHash == 0 ||
+		strings.TrimSpace(cfg.StopSignCalibration.GameBuild) == "" ||
+		strings.TrimSpace(cfg.StopSignCalibration.AdapterVersion) == "" {
+		return fmt.Errorf("verified backend stop-sign calibration requires profile_id, vehicle_model_hash, game_build, and adapter_version")
 	}
-	if cfg.ParkingCalibration.SteeringConvention != "positive_wheel_is_positive_xinput" {
-		return fmt.Errorf("verified backend parking calibration steering_convention must be positive_wheel_is_positive_xinput")
+	if cfg.StopSignCalibration.SteeringConvention != "positive_wheel_is_positive_xinput" {
+		return fmt.Errorf("verified backend stop-sign calibration steering_convention must be positive_wheel_is_positive_xinput")
 	}
 	return nil
 }

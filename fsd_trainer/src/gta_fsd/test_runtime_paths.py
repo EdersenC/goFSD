@@ -9,20 +9,15 @@ from unittest.mock import patch
 from config import resolve_data_root, resolve_data_root_child
 from inference import DEFAULT_CONFIG_PATH, load_config as load_inference_config
 from server import discover_models, load_training_runs_dir
-from state_inputs import (
-    PARKING_HEADING_ERROR_KEY,
-    PARKING_LATERAL_ERROR_KEY,
-    PARKING_LONGITUDINAL_ERROR_KEY,
-)
 from train import load_config as load_train_config
 from training_runtime import _resolve_jobs_dir
 
 
-def write_runnable_parking_config(directory: Path) -> Path:
+def write_runnable_stop_sign_config(directory: Path) -> Path:
     config_path = directory / "train_config.toml"
     config_text = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    config_text = config_text.replace("train_run_ids = []", "train_run_ids = ['parking-train']")
-    config_text = config_text.replace("val_run_ids = []", "val_run_ids = ['parking-val']")
+    config_text = config_text.replace("train_run_ids = []", "train_run_ids = ['stop-sign-train']")
+    config_text = config_text.replace("val_run_ids = []", "val_run_ids = ['stop-sign-val']")
     config_path.write_text(config_text, encoding="utf-8")
     return config_path
 
@@ -38,8 +33,8 @@ class RuntimePathTests(unittest.TestCase):
 
     def test_data_root_environment_keeps_runtime_artifacts_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / "parking-data"
-            config_path = write_runnable_parking_config(Path(tmp))
+            data_root = Path(tmp) / "stop-sign-data"
+            config_path = write_runnable_stop_sign_config(Path(tmp))
             with patch.dict(os.environ, {"FSD_DATA_ROOT": str(data_root)}):
                 self.assertEqual(resolve_data_root(r"S:\fsd_fivem_data"), str(data_root))
                 self.assertEqual(
@@ -63,24 +58,24 @@ class RuntimePathTests(unittest.TestCase):
 
     def test_empty_training_runs_directory_has_no_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / "parking-data"
+            data_root = Path(tmp) / "stop-sign-data"
             with patch.dict(os.environ, {"FSD_DATA_ROOT": str(data_root)}):
                 self.assertEqual(discover_models(DEFAULT_CONFIG_PATH), [])
 
-    def test_checked_in_parking_caps_cover_the_complete_curriculum(self) -> None:
+    def test_checked_in_stop_sign_contract_covers_the_complete_curriculum(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = write_runnable_parking_config(Path(tmp))
+            config_path = write_runnable_stop_sign_config(Path(tmp))
             with patch.dict(os.environ, {"FSD_DATA_ROOT": tmp}):
                 config = load_train_config(config_path)
 
-        self.assertEqual(config.state_inputs.spec(PARKING_LONGITUDINAL_ERROR_KEY).cap, 17.0)
-        self.assertEqual(config.state_inputs.spec(PARKING_LATERAL_ERROR_KEY).cap, 3.0)
-        self.assertEqual(config.state_inputs.spec(PARKING_HEADING_ERROR_KEY).cap, 20.0)
-        self.assertFalse(config.dataset.include_failed_or_nonparking_trips)
+        self.assertFalse(config.dataset.include_failed_or_non_stop_sign_trips)
         self.assertEqual(config.dataset.telemetry_sample_interval_ms, 50)
+        self.assertEqual(config.dataset.future_offsets, (2, 5, 10, 20))
+        self.assertEqual(config.dataset.control_target_names, ("future_speed_mps", "stop_intent"))
+        self.assertTrue(config.loader.phase_balancing.enabled)
         self.assertEqual(
-            config.dataset.target_transforms["desired_speed_mps"].range_max,
-            2.22,
+            config.dataset.target_transforms["future_speed_mps"].range_max,
+            15.0,
         )
 
 

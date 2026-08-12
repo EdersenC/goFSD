@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"awesomeProject/internal/capture"
+	datasetproc "awesomeProject/internal/dataset"
 )
 
 func TestDiscoverInspectorRuns(t *testing.T) {
@@ -19,9 +22,11 @@ func TestDiscoverInspectorRuns(t *testing.T) {
 	writeCommandJSONFile(t, filepath.Join(sceneDir, "run.jsonl"), map[string]any{
 		"tripIndex": 0,
 	})
-	writeJSONLinesFile(t, filepath.Join(tripDir, "dataset.jsonl"), nil)
+	config := capture.DefaultDatasetConfig()
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(config)...)
+	writeCurrentProcessingFixture(t, tripDir, config, processor, 1)
 
-	runs, err := discoverInspectorRuns(root)
+	runs, err := discoverInspectorRuns(root, processor)
 	if err != nil {
 		t.Fatalf("discoverInspectorRuns: %v", err)
 	}
@@ -33,6 +38,34 @@ func TestDiscoverInspectorRuns(t *testing.T) {
 	}
 	if len(runs[0].Scenes) != 1 || len(runs[0].Scenes[0].Trips) != 1 {
 		t.Fatalf("unexpected run structure: %+v", runs[0])
+	}
+	trip := runs[0].Scenes[0].Trips[0]
+	if !trip.ProcessedAvailable || trip.ProcessingState != "completed" ||
+		trip.ProcessingConfigFingerprint != processor.ConfigFingerprint() {
+		t.Fatalf("unexpected processing state: %+v", trip)
+	}
+	if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte{}, 0o644); err != nil {
+		t.Fatalf("truncate processed dataset: %v", err)
+	}
+	runs, err = discoverInspectorRuns(root, processor)
+	if err != nil {
+		t.Fatalf("discoverInspectorRuns after truncation: %v", err)
+	}
+	if runs[0].Scenes[0].Trips[0].ProcessedAvailable {
+		t.Fatal("inspector advertised a truncated dataset as processed")
+	}
+}
+
+func TestInspectTripProcessingStatusSurfacesFailure(t *testing.T) {
+	tripDir := t.TempDir()
+	writeCommandJSONFile(t, filepath.Join(tripDir, "processing.json"), map[string]any{
+		"state": "failed",
+		"error": "ffmpeg exited",
+	})
+
+	state, errorText, fingerprint := inspectTripProcessingStatus(tripDir)
+	if state != "failed" || errorText != "ffmpeg exited" || fingerprint != "" {
+		t.Fatalf("unexpected processing status: state=%q error=%q fingerprint=%q", state, errorText, fingerprint)
 	}
 }
 
@@ -75,11 +108,11 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 			"anchor_video_pts": 2.2,
 			"label": map[string]any{
 				"control": map[string]any{
-					"Steering": 0.15,
+					"Steering":       0.15,
+					"expertThrottle": 0.25,
 				},
 				"aux": map[string]any{
-					"future_yaw_delta":   3.5,
-					"future_speed_delta": 0.25,
+					"future_speed_target": 3.5,
 				},
 			},
 			"frame_paths": []string{"a.jpg"},
@@ -104,8 +137,8 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 		t.Fatalf("loadInspectorFields processed: %v", err)
 	}
 	assertFieldKind(t, processedFields, "label.control.Steering", "number")
-	assertFieldKind(t, processedFields, "label.aux.future_yaw_delta", "number")
-	assertFieldKind(t, processedFields, "label.aux.future_speed_delta", "number")
+	assertFieldKind(t, processedFields, "label.control.expertThrottle", "number")
+	assertFieldKind(t, processedFields, "label.aux.future_speed_target", "number")
 	assertFieldMissing(t, processedFields, "frame_paths")
 
 	rawSeries, err := loadInspectorSeries(selection, dataSourceRaw, []string{"yaw", "currentSpeed"})
@@ -119,15 +152,15 @@ func TestInspectorFieldsAndSeries(t *testing.T) {
 		t.Fatalf("unexpected raw yaw: %#v", got)
 	}
 
-	processedSeries, err := loadInspectorSeries(selection, dataSourceProcessed, []string{"label.aux.future_yaw_delta"})
+	processedSeries, err := loadInspectorSeries(selection, dataSourceProcessed, []string{"label.aux.future_speed_target"})
 	if err != nil {
 		t.Fatalf("loadInspectorSeries processed: %v", err)
 	}
 	if processedSeries.RowCount != 1 {
 		t.Fatalf("unexpected processed row count: %d", processedSeries.RowCount)
 	}
-	if got := processedSeries.Rows[0]["label.aux.future_yaw_delta"]; got != 3.5 {
-		t.Fatalf("unexpected processed yaw delta: %#v", got)
+	if got := processedSeries.Rows[0]["label.aux.future_speed_target"]; got != 3.5 {
+		t.Fatalf("unexpected processed future speed: %#v", got)
 	}
 }
 
@@ -150,16 +183,19 @@ func TestDataInspectorHandlers(t *testing.T) {
 		{
 			"anchor_game_time": 1.0,
 			"label": map[string]any{
-				"control": map[string]any{},
+				"control": map[string]any{
+					"expertThrottle": 0.25,
+				},
 				"aux": map[string]any{
-					"future_yaw_delta": 2.5,
+					"future_speed_target": 2.5,
 				},
 			},
 		},
 	})
 
 	mux := http.NewServeMux()
-	registerDataInspectorHandlers(mux, root)
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(capture.DefaultDatasetConfig())...)
+	registerDataInspectorHandlers(mux, root, processor)
 
 	req := httptest.NewRequest(http.MethodGet, "/data/runs", nil)
 	rec := httptest.NewRecorder()
@@ -175,7 +211,7 @@ func TestDataInspectorHandlers(t *testing.T) {
 		t.Fatalf("unexpected status for fields: %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/data/trip/series?runId=run-123&sceneKey=scene-a_default&tripName=trip-000&source=processed&field=label.aux.future_yaw_delta", nil)
+	req = httptest.NewRequest(http.MethodGet, "/data/trip/series?runId=run-123&sceneKey=scene-a_default&tripName=trip-000&source=processed&field=label.aux.future_speed_target", nil)
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

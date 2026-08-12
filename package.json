@@ -1,13 +1,27 @@
 {
-  "name": "gta-parking-lab",
+  "name": "gta-stop-sign-lab",
   "version": "0.1.0",
   "private": true,
-  "description": "Parking-first FiveM data collection and model training workspace",
+  "description": "Stop-sign temporal FiveM data collection and model training workspace",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "start": "bash scripts/start-stop-sign-lab.sh",
+    "start:collect": "bash scripts/start-stop-sign-lab.sh --collect-only",
     "doctor": "bash scripts/doctor.sh",
+    "resume": "bash scripts/resume.sh",
+    "status": "bash scripts/resume.sh",
     "build": "npm --prefix fivem run build",
+    "build:web": "npm --prefix backend/cmd/web run build",
+    "test:web": "npm --prefix backend/cmd/web test",
+    "test:launcher": "bash scripts/test-start-stop-sign-lab.sh",
     "test": "bash scripts/validate.sh",
     "dev:backend": "bash scripts/dev-backend.sh",
-    "dev:model": "bash scripts/dev-model-server.sh"
+    "dev:model": "bash scripts/dev-model-server.sh",
+    "data:backfill": "bash scripts/dev-backend.sh process-runs -stop-sign-only",
+    "data:rebuild": "bash scripts/dev-backend.sh process-runs -stop-sign-only -dataset-only -force",
+    "data:report": "bash scripts/dev-backend.sh report-runs -stop-sign-only",
+    "data:audit": "node scripts/audit-stop-sign-data.mjs",
+    "train:stop-sign": "node scripts/queue-stop-sign-training.mjs",
+    "probe:stop-sign": "node scripts/stop-sign-probe.mjs"
   }
 }

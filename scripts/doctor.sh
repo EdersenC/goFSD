@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-parking_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-parking_failures=0
+stop_sign_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+stop_sign_failures=0
 
 pass() {
     printf 'ok    %s\n' "$1"
@@ -14,7 +14,7 @@ warn() {
 
 fail() {
     printf 'fail  %s\n' "$1"
-    parking_failures=$((parking_failures + 1))
+    stop_sign_failures=$((stop_sign_failures + 1))
 }
 
 check_command() {
@@ -26,16 +26,17 @@ check_command() {
     fi
 }
 
-echo "Parking Lab doctor"
+echo "Stop Sign Lab doctor"
 check_command node
 check_command npm
+check_command git
 
-parking_is_wsl=false
+stop_sign_is_wsl=false
 if [[ "$(uname -s)" == "Linux" ]] && uname -r | grep -qi microsoft; then
-    parking_is_wsl=true
+    stop_sign_is_wsl=true
 fi
 
-if [[ "${parking_is_wsl}" == true ]]; then
+if [[ "${stop_sign_is_wsl}" == true ]]; then
     if command -v powershell.exe >/dev/null 2>&1; then
         pass "WSL-to-Windows PowerShell bridge is available"
         if command -v go.exe >/dev/null 2>&1; then
@@ -46,7 +47,7 @@ if [[ "${parking_is_wsl}" == true ]]; then
         if command -v ffmpeg.exe >/dev/null 2>&1; then
             pass "Windows ffmpeg: $(command -v ffmpeg.exe)"
         else
-            fail "Windows ffmpeg is unavailable; install it for parking video capture"
+            fail "Windows ffmpeg is unavailable; install it for stop-sign video capture"
         fi
     else
         fail "powershell.exe is unavailable; live capture and virtual-controller work must run on Windows"
@@ -56,17 +57,23 @@ else
     check_command ffmpeg
 fi
 
-if "${parking_project_root}/scripts/python.sh" -B -c \
+if "${stop_sign_project_root}/scripts/python.sh" -B -c \
     'import PIL, torch, torchvision; print(f"ok    python stack: torch={torch.__version__} torchvision={torchvision.__version__} pillow={PIL.__version__}")'; then
     :
 else
     warn "Python ML dependencies are unavailable; collection works, but training/inference needs fsd_trainer/requirements.txt"
 fi
 
-if [[ -d "${parking_project_root}/fivem/node_modules" ]]; then
+if [[ -x "${stop_sign_project_root}/fivem/node_modules/.bin/tsc" ]]; then
     pass "FiveM dependencies are installed"
 else
-    fail "FiveM dependencies are missing; run npm --prefix fivem install"
+    fail "FiveM dependencies are missing; run npm run setup"
+fi
+
+if [[ -x "${stop_sign_project_root}/backend/cmd/web/node_modules/.bin/esbuild" ]]; then
+    pass "Stop Sign Lab web dependencies are installed"
+else
+    fail "Stop Sign Lab web dependencies are missing; run npm run setup"
 fi
 
 if [[ -n "${FSD_DATA_ROOT:-}" ]]; then
@@ -77,9 +84,9 @@ else
     warn "FSD_DATA_ROOT is unset; Windows runtime will default to S:\\fsd_fivem_data"
 fi
 
-if ((parking_failures > 0)); then
-    printf '\nDoctor found %d blocking issue(s).\n' "${parking_failures}"
+if ((stop_sign_failures > 0)); then
+    printf '\nDoctor found %d blocking issue(s).\n' "${stop_sign_failures}"
     exit 1
 fi
 
-printf '\nReady for Parking Lab development.\n'
+printf '\nReady. Start Stop Sign Lab with: npm start\n'

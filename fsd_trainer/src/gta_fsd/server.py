@@ -4,8 +4,10 @@ import argparse
 import base64
 import json
 import math
+import re
 import threading
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -16,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import torch
 
-from config import resolve_data_root_child
+from config import DEFAULT_FUTURE_OFFSETS, resolve_data_root_child
 from control_contract import (
     CONTROL_CONTRACT_NAME,
     CONTROL_HORIZON_DIRECTION,
@@ -38,21 +40,20 @@ from inference import (
     resolve_checkpoint_width_multiplier,
     resolve_checkpoint_frame_count,
     resolve_checkpoint_frame_stride,
+    require_checkpoint_image_size,
     resolve_existing_path,
     select_device,
 )
 from state_inputs import (
     DEFAULT_WIDTH_MULTIPLIER,
-    PARKING_TARGET_CONFIGURED_KEY,
-    resolve_route_direction_defaults,
     STATE_INPUT_DEFINITIONS,
     StateInputConfig,
     default_inference_state_input_config,
     normalize_state_input_value,
-    resolve_state_input_cap,
     state_input_config_from_metadata,
     state_inputs_metadata,
 )
+from stop_sign_contract import release_policy_metadata
 from target_transforms import (
     TargetTransform,
     denormalize_target_tensor,
@@ -60,6 +61,7 @@ from target_transforms import (
     target_transform_metadata,
 )
 from training_runtime import (
+    TrainingJobDuplicateError,
     TrainingJobError,
     TrainingJobNotActiveError,
     TrainingJobNotFoundError,
@@ -71,12 +73,40 @@ from training_runtime import (
 )
 
 
+def _http_status_for_exception(exc: Exception) -> HTTPStatus:
+    if isinstance(exc, TrainingJobRequestError):
+        return HTTPStatus.BAD_REQUEST
+    if isinstance(exc, TrainingJobNotFoundError):
+        return HTTPStatus.NOT_FOUND
+    if isinstance(
+        exc,
+        (
+            TrainingJobDuplicateError,
+            TrainingJobNotPendingError,
+            TrainingJobNotActiveError,
+            TrainingJobNotRequeueableError,
+            TrainingJobNotTerminalError,
+        ),
+    ):
+        return HTTPStatus.CONFLICT
+    if isinstance(exc, TrainingJobError):
+        return HTTPStatus.INTERNAL_SERVER_ERROR
+    if isinstance(exc, FileNotFoundError):
+        return HTTPStatus.NOT_FOUND
+    if isinstance(exc, ValueError):
+        return HTTPStatus.BAD_REQUEST
+    if isinstance(exc, RuntimeError):
+        return HTTPStatus.CONFLICT
+    return HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 @dataclass(frozen=True)
 class ModelOption:
     label: str
     path: str
     run_id: str
     epoch: int
+    variant: str
     is_best: bool
     updated_at: str
 
@@ -125,6 +155,85 @@ def load_training_runs_dir(config_path: Path) -> Path:
     raise ValueError(f"Unable to resolve output.base_dir from {config_path}")
 
 
+CHECKPOINT_NAME_PATTERN = re.compile(r"epoch-(?P<epoch>[0-9]+)(?P<ema>-ema)?\.pt")
+
+
+def _configured_validation_variant(metrics_payload: dict[str, Any]) -> str:
+    training = metrics_payload.get("training")
+    ema = training.get("ema") if isinstance(training, dict) else None
+    if not isinstance(ema, dict):
+        return "model"
+    eval_model = str(ema.get("eval_model", "")).strip().lower()
+    if eval_model in {"ema", "model"}:
+        return eval_model
+    return "ema" if ema.get("enabled") is True else "model"
+
+
+def _best_checkpoint_selection(metrics_payload: Any) -> tuple[int, str]:
+    if not isinstance(metrics_payload, dict):
+        return 0, "model"
+
+    raw_best_epoch = metrics_payload.get("best_epoch")
+    if isinstance(raw_best_epoch, bool):
+        return 0, "model"
+    try:
+        best_epoch = int(raw_best_epoch or 0)
+    except (TypeError, ValueError):
+        return 0, "model"
+    if best_epoch < 1:
+        return 0, "model"
+
+    configured_variant = _configured_validation_variant(metrics_payload)
+    epochs = metrics_payload.get("epochs")
+    if not isinstance(epochs, list):
+        return best_epoch, configured_variant
+    for epoch_payload in epochs:
+        if not isinstance(epoch_payload, dict):
+            continue
+        raw_epoch = epoch_payload.get("epoch")
+        if isinstance(raw_epoch, bool):
+            continue
+        try:
+            epoch = int(raw_epoch)
+        except (TypeError, ValueError):
+            continue
+        if epoch != best_epoch:
+            continue
+
+        val_metrics = epoch_payload.get("val_metrics")
+        if isinstance(val_metrics, dict):
+            eval_model = str(val_metrics.get("eval_model", "")).strip().lower()
+            if eval_model in {"ema", "model"}:
+                return best_epoch, eval_model
+
+        training = epoch_payload.get("training")
+        ema = training.get("ema") if isinstance(training, dict) else None
+        if isinstance(ema, dict):
+            eval_model = str(ema.get("eval_model", "")).strip().lower()
+            if eval_model in {"ema", "model"}:
+                return best_epoch, eval_model
+        return best_epoch, configured_variant
+    return best_epoch, configured_variant
+
+
+def _load_best_checkpoint_selection(run_dir: Path) -> tuple[int, str]:
+    metrics_path = run_dir / "run_metrics.json"
+    try:
+        metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return 0, "model"
+    return _best_checkpoint_selection(metrics_payload)
+
+
+def _checkpoint_identity(checkpoint_path: Path) -> tuple[int, str] | None:
+    match = CHECKPOINT_NAME_PATTERN.fullmatch(checkpoint_path.name)
+    if match is None:
+        return None
+    epoch = int(match.group("epoch"))
+    variant = "ema" if match.group("ema") else "model"
+    return epoch, variant
+
+
 def discover_models(config_path: Path) -> list[dict[str, Any]]:
     runs_dir = load_training_runs_dir(config_path)
     if not runs_dir.is_dir():
@@ -132,25 +241,19 @@ def discover_models(config_path: Path) -> list[dict[str, Any]]:
     models: list[ModelOption] = []
 
     for run_dir in sorted((path for path in runs_dir.iterdir() if path.is_dir()), reverse=True):
-        best_epoch = 0
-        metrics_path = run_dir / "run_metrics.json"
-        if metrics_path.is_file():
-            try:
-                metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-                best_epoch = int(metrics_payload.get("best_epoch", 0) or 0)
-            except Exception:
-                best_epoch = 0
+        best_epoch, best_variant = _load_best_checkpoint_selection(run_dir)
 
         checkpoints = sorted(run_dir.glob("epoch-*.pt"), reverse=True)
         for checkpoint_path in checkpoints:
-            stem = checkpoint_path.stem
-            try:
-                epoch = int(stem.split("-", 1)[1])
-            except Exception:
+            identity = _checkpoint_identity(checkpoint_path)
+            if identity is None:
                 continue
+            epoch, variant = identity
 
-            is_best = best_epoch > 0 and epoch == best_epoch
+            is_best = best_epoch > 0 and epoch == best_epoch and variant == best_variant
             label = f"{run_dir.name} - epoch {epoch:03d}"
+            if variant == "ema":
+                label += " EMA"
             if is_best:
                 label += " (best)"
 
@@ -159,19 +262,30 @@ def discover_models(config_path: Path) -> list[dict[str, Any]]:
                 path=str(checkpoint_path.resolve()),
                 run_id=run_dir.name,
                 epoch=epoch,
+                variant=variant,
                 is_best=is_best,
                 updated_at=datetime.fromtimestamp(
                     checkpoint_path.stat().st_mtime, tz=UTC
                 ).isoformat().replace("+00:00", "Z"),
             ))
 
-    models.sort(key=lambda item: (item.run_id, item.is_best, item.epoch, item.path), reverse=True)
+    models.sort(
+        key=lambda item: (
+            item.run_id,
+            item.is_best,
+            item.epoch,
+            item.variant == "ema",
+            item.path,
+        ),
+        reverse=True,
+    )
     return [
         {
             "label": item.label,
             "path": item.path,
             "runId": item.run_id,
             "epoch": item.epoch,
+            "variant": item.variant,
             "isBest": item.is_best,
             "updatedAt": item.updated_at,
         }
@@ -236,6 +350,7 @@ class ModelRuntime:
                 "telemetry_sample_interval_ms": self._telemetry_sample_interval_ms,
                 "control_horizon_dt_ms": list(self._control_horizon_dt_ms),
                 "control_contract": control_contract_metadata(),
+                "release_policy": release_policy_metadata(),
                 "telemetry_feature_names": list(self._telemetry_feature_names),
                 "control_target_names": list(self._control_target_names),
                 "aux_target_names": list(self._aux_target_names),
@@ -253,13 +368,14 @@ class ModelRuntime:
     ) -> dict[str, Any]:
         device = select_device(device_name)
         checkpoint = load_checkpoint(checkpoint_path, device)
+        checkpoint_image_size = require_checkpoint_image_size(checkpoint, image_size)
         model = build_model(checkpoint, device, frame_count)
         planner_format = str(checkpoint.get("planner_format", "")).strip()
         if planner_format != PLANNER_FORMAT:
             raise ValueError(LEGACY_SCALAR_HEAD_ERROR)
         width_multiplier = resolve_checkpoint_width_multiplier(checkpoint)
         state_input_config = state_input_config_from_metadata(checkpoint.get("state_inputs"))
-        future_offsets = list(checkpoint.get("future_offsets") or [1, 2, 3, 4, 5, 6])
+        future_offsets = list(checkpoint.get("future_offsets") or DEFAULT_FUTURE_OFFSETS)
         control_horizon_dt_ms = list(resolve_checkpoint_control_horizon_dt_ms(checkpoint))
         control_target_names = resolve_checkpoint_control_target_names(
             checkpoint,
@@ -280,7 +396,7 @@ class ModelRuntime:
             self._checkpoint_path = checkpoint_path
             self._planner_format = planner_format
             self._state_input_config = state_input_config
-            self._image_size = image_size
+            self._image_size = checkpoint_image_size
             self._frame_count = frame_count
             self._frame_stride = frame_stride
             self._width_multiplier = width_multiplier
@@ -302,8 +418,8 @@ class ModelRuntime:
             "planner_format": planner_format,
             "planner_format_version": PLANNER_FORMAT_VERSION,
             "image_size": {
-                "width": image_size[0],
-                "height": image_size[1],
+                "width": checkpoint_image_size[0],
+                "height": checkpoint_image_size[1],
             },
             "frame_window": {
                 "size": frame_count,
@@ -320,6 +436,7 @@ class ModelRuntime:
             "telemetry_sample_interval_ms": int(checkpoint["telemetry_sample_interval_ms"]),
             "control_horizon_dt_ms": control_horizon_dt_ms,
             "control_contract": control_contract_metadata(),
+            "release_policy": release_policy_metadata(),
             "telemetry_feature_names": checkpoint.get("telemetry_feature_names", []),
             "control_target_names": control_target_names,
             "aux_target_names": aux_target_names,
@@ -414,6 +531,12 @@ class ModelRuntime:
             "planner_format": planner_format,
             "planner_format_version": PLANNER_FORMAT_VERSION,
             "pred_controls": pred_controls_denorm.tolist(),
+            "motion_plan": {
+                "horizon_dt_ms": control_horizon_dt_ms,
+                "future_speed_mps": pred_controls_denorm[..., 0].tolist(),
+                "stop_intent": pred_controls_denorm[..., 1].tolist(),
+                "release_policy": release_policy_metadata(),
+            },
             "pred_aux": pred_aux_denorm.tolist(),
             "pred_controls_normalized": pred_controls.tolist(),
             "pred_aux_normalized": pred_aux.tolist(),
@@ -504,7 +627,6 @@ class ModelRuntime:
     ) -> tuple[dict[str, float | bool], dict[str, torch.Tensor]]:
         raw_state_inputs: dict[str, float | bool] = {}
         normalized_state_inputs: dict[str, torch.Tensor] = {}
-        route_direction_defaults = resolve_route_direction_defaults(payload)
         for definition in STATE_INPUT_DEFINITIONS:
             if not config.is_enabled(definition.key):
                 continue
@@ -513,25 +635,10 @@ class ModelRuntime:
                 raw_value = payload[definition.key]
             elif definition.camel_key in payload:
                 raw_value = payload[definition.camel_key]
-            elif route_direction_defaults is not None and definition.key in route_direction_defaults:
-                raw_value = route_direction_defaults[definition.key]
-            if definition.key == "lead_vehicle_distance" and raw_value is None:
-                has_lead = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
-                if has_lead in (False, 0, 0.0):
-                    raw_value = resolve_state_input_cap(config, definition.key)
-                else:
-                    raise ValueError(f"request must include {definition.key} for this checkpoint")
-            else:
-                if raw_value is None:
-                    raise ValueError(f"request must include {definition.key} for this checkpoint")
-            if definition.key == "lead_vehicle_distance":
-                has_lead_raw = payload.get("has_lead_vehicle", payload.get("hasLeadVehicle"))
-                if has_lead_raw in (False, 0, 0.0):
-                    raw_value = resolve_state_input_cap(config, definition.key)
+            if raw_value is None:
+                raise ValueError(f"request must include {definition.key} for this checkpoint")
             normalized = normalize_state_input_value(definition.key, raw_value, config)
-            if definition.key == PARKING_TARGET_CONFIGURED_KEY and normalized < 0.5:
-                raise ValueError("parking target must be configured before parking-model inference")
-            raw_state_inputs[definition.key] = (normalized >= 0.5) if definition.key == "has_lead_vehicle" else float(raw_value)
+            raw_state_inputs[definition.key] = float(raw_value)
             normalized_state_inputs[definition.key] = torch.tensor([normalized], dtype=torch.float32)
         return raw_state_inputs, normalized_state_inputs
 
@@ -561,15 +668,27 @@ class ModelServer(ThreadingHTTPServer):
         self.training = TrainingManager(config_path)
         self.config_path = config_path
 
+    def server_close(self) -> None:
+        try:
+            self.training.close()
+        finally:
+            super().server_close()
+
 
 class RequestHandler(BaseHTTPRequestHandler):
     server: ModelServer
 
     def do_GET(self) -> None:
+        self._handle_request(self._dispatch_get)
+
+    def _dispatch_get(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/healthz":
-            self._write_json(HTTPStatus.OK, {"status": "ok"})
+            self._write_json(HTTPStatus.OK, {
+                "status": "ok",
+                "service": "stop-sign-lab-model",
+            })
             return
         if path == "/model":
             self._write_json(HTTPStatus.OK, self.server.runtime.status())
@@ -597,49 +716,39 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
+        self._handle_request(self._dispatch_post)
+
+    def _dispatch_post(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        payload = self._read_json_body() if path != "/training/jobs" else self._read_json_value()
+        if path == "/model/load":
+            self._handle_model_load(payload)
+            return
+        if path == "/model/unload":
+            self._write_json(HTTPStatus.OK, self.server.runtime.unload_model())
+            return
+        if path == "/predict":
+            result = self.server.runtime.predict(payload)
+            self._write_json(HTTPStatus.OK, result)
+            return
+        if path == "/training/jobs":
+            jobs = self.server.training.enqueue(payload)
+            self._write_json(HTTPStatus.OK, {"status": "queued", "jobs": jobs})
+            return
+        if path == "/training/history/clear":
+            self._write_json(HTTPStatus.OK, self.server.training.clear_history())
+            return
+        if path.startswith("/training/jobs/"):
+            self._handle_training_post(path)
+            return
+        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _handle_request(self, action: Callable[[], None]) -> None:
         try:
-            parsed = urlparse(self.path)
-            path = parsed.path
-            payload = self._read_json_body() if path != "/training/jobs" else self._read_json_value()
-            if path == "/model/load":
-                self._handle_model_load(payload)
-                return
-            if path == "/model/unload":
-                self._write_json(HTTPStatus.OK, self.server.runtime.unload_model())
-                return
-            if path == "/predict":
-                result = self.server.runtime.predict(payload)
-                self._write_json(HTTPStatus.OK, result)
-                return
-            if path == "/training/jobs":
-                jobs = self.server.training.enqueue(payload)
-                self._write_json(HTTPStatus.OK, {"status": "queued", "jobs": jobs})
-                return
-            if path == "/training/history/clear":
-                self._write_json(HTTPStatus.OK, self.server.training.clear_history())
-                return
-            if path.startswith("/training/jobs/"):
-                self._handle_training_post(path)
-                return
-            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-        except FileNotFoundError as exc:
-            self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
-        except ValueError as exc:
-            self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except RuntimeError as exc:
-            self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
-        except TrainingJobNotFoundError as exc:
-            self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
-        except (TrainingJobNotPendingError, TrainingJobNotActiveError, TrainingJobNotRequeueableError) as exc:
-            self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
-        except TrainingJobNotTerminalError as exc:
-            self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
-        except TrainingJobRequestError as exc:
-            self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except TrainingJobError as exc:
-            self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            action()
         except Exception as exc:
-            self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            self._write_json(_http_status_for_exception(exc), {"error": str(exc)})
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -783,7 +892,12 @@ def main() -> None:
     print(f"Serving model API on http://{args.host}:{args.port}")
     print("POST /model/load to load a checkpoint into memory")
     print("POST /predict with frame_paths or frames_base64 to run inference")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

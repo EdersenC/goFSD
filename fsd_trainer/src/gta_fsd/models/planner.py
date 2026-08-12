@@ -7,7 +7,7 @@ import math
 import torch
 import torch.nn as nn
 
-from control_contract import apply_parking_control_activations, require_parking_control_target_names
+from control_contract import apply_stop_sign_control_activations, require_stop_sign_control_target_names
 
 
 def scaled_width(base: int, width_multiplier: float) -> int:
@@ -111,19 +111,19 @@ def build_horizon_decoder(
     return nn.Sequential(*layers)
 
 
-class DrivingCNN(nn.Module):
+class StopSignTemporalPlanner(nn.Module):
     def __init__(
         self,
         frame_count: int = 5,
         *,
-        telemetry_feature_dim: int = 6,
+        telemetry_feature_dim: int = 1,
         telemetry_hidden_dim: int = 128,
         telemetry_sequence_length: int = 9,
         horizon: int = 6,
         control_dim: int = 2,
         control_target_names: tuple[str, ...] | None = None,
         state_input_dim: int = 0,
-        aux_dim: int = 4,
+        aux_dim: int = 3,
         width_multiplier: float = 1.0,
         dropout: float = 0.1,
         visual_temporal_enabled: bool = True,
@@ -152,9 +152,9 @@ class DrivingCNN(nn.Module):
         if control_dim < 1:
             raise ValueError("control_dim must be > 0")
         if control_target_names is not None:
-            resolved_control_target_names = require_parking_control_target_names(
+            resolved_control_target_names = require_stop_sign_control_target_names(
                 control_target_names,
-                source="DrivingCNN.control_target_names",
+                source="StopSignTemporalPlanner.control_target_names",
             )
             if len(resolved_control_target_names) != control_dim:
                 raise ValueError(
@@ -400,11 +400,12 @@ class DrivingCNN(nn.Module):
         decoder_input = torch.cat((context_expanded, horizon_tokens), dim=-1)
         raw_controls = self.control_decoder(decoder_input)
         pred_controls = (
-            apply_parking_control_activations(raw_controls, self.control_target_names)
+            apply_stop_sign_control_activations(raw_controls, self.control_target_names)
             if self.control_target_names is not None
             else raw_controls
         )
-        pred_aux = self.aux_decoder(decoder_input)
+        raw_aux = self.aux_decoder(decoder_input)
+        pred_aux = torch.sigmoid(raw_aux)
         if pred_controls.ndim != 3 or pred_controls.shape[1:] != (self.horizon, self.control_dim):
             raise ValueError(
                 "control_decoder shape check failed: "
@@ -416,9 +417,11 @@ class DrivingCNN(nn.Module):
                 f"expected [B, {self.horizon}, {self.aux_dim}], got {tuple(pred_aux.shape)}"
             )
         return {
+            "pred_motion_plan": pred_controls,
             "pred_controls": pred_controls,
             "pred_control_logits": raw_controls,
             "pred_aux": pred_aux,
+            "pred_aux_logits": raw_aux,
         }
 
     @property

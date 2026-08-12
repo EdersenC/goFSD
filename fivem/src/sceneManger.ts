@@ -11,26 +11,71 @@ import {
     VehicleModel
 } from "./egoService";
 import {defaultScene} from "./datasets";
-import {
-    PARKING_EVALUATION_SCENE_NAME,
-    ParkingRunner,
-    PARKING_SCENE_NAME,
-} from "./parking/runner";
-import {ParkingGoal, ParkingTarget, ParkingTelemetry} from "./parking/types";
-import {resolveParkingAttemptCount} from "./parking/curriculum";
 import {createNoEgoControlTelemetry, EgoControlTelemetry} from "./controlTelemetry";
+import {completeSuccessfulScene} from "./scene-completion";
+import {
+    placeVehicleAtStopSignLocation,
+    StopSignLocationProbeOperations,
+} from "./stop-sign/location-probe";
+import {StopSignBatchHooks, StopSignRunner, STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
+import {StopSignJob, StopSignPose, StopSignTelemetry} from "./stop-sign/types";
+import {parseStopSignPose} from "./stop-sign/batch";
+import {positionVehicleAtStopSignPose} from "./stop-sign/vehicle-positioning";
+import {WorldIsolation} from "./world-isolation";
 
 export {syncFlash} from "./syncFlash";
 
 const egoService = new EgoService();
 const envService = new EnvironmentService();
-const parkingRunner = new ParkingRunner(egoService);
+const stopSignRunner = new StopSignRunner(egoService);
+const worldIsolation = new WorldIsolation(() => egoService.oldEgo?.vehicle.id ?? 0);
+const stopSignLocationProbeOperations: StopSignLocationProbeOperations = {
+    closestVehicleNode: ({x, y, z}) => {
+        const [found, position, heading] = GetClosestVehicleNodeWithHeading(x, y, z, 1, 3, 0);
+        return [found, position as [number, number, number], heading];
+    },
+    entityCoords: (entity) => GetEntityCoords(entity, false) as [number, number, number],
+    entityHeading: (entity) => GetEntityHeading(entity),
+    entityPitch: (entity) => GetEntityPitch(entity),
+    entityRoll: (entity) => GetEntityRoll(entity),
+    entitySpeed: (entity) => GetEntitySpeed(entity),
+    entityOnGround: (entity) => IsVehicleOnAllWheels(entity),
+    freezeEntity: (entity, frozen) => FreezeEntityPosition(entity, frozen),
+    setEntityCoords: (entity, [x, y, z]) => SetEntityCoordsNoOffset(entity, x, y, z, false, false, true),
+    setEntityHeading: (entity, heading) => SetEntityHeading(entity, heading),
+    setVehicleForwardSpeed: (vehicle, speedMps) => SetVehicleForwardSpeed(vehicle, speedMps),
+    setVehicleOnGround: (vehicle) => SetVehicleOnGroundProperly(vehicle),
+    setFocus: ([x, y, z]) => SetFocusPosAndVel(x, y, z, 0, 0, 0),
+    clearFocus: () => ClearFocus(),
+    startSceneLoad: ([x, y, z]) => {
+        SetHdArea(x, y, z, 120);
+        NewLoadSceneStartSphere(x, y, z, 120, 0);
+    },
+    stopSceneLoad: () => {
+        if (IsNewLoadSceneActive()) {
+            NewLoadSceneStop();
+        }
+        ClearHdArea();
+    },
+    requestPaths: ({x, y}) => {
+        RequestPathsPreferAccurateBoundingstruct(x - 80, y - 80, x + 80, y + 80);
+    },
+    requestCollision: ([x, y, z]) => RequestCollisionAtCoord(x, y, z),
+    collisionLoaded: (entity) => HasCollisionLoadedAroundEntity(entity),
+    wait,
+};
 export const newScene = defaultScene;
 const canonicalInnerCitySceneName = "inner-city-driving:default";
 
 export type SceneType = {
     environment: Environment
     ego:Ego
+}
+
+type SceneExecutionOptions = {
+    isCanceled: () => boolean
+    shuffleWaypoints?: boolean
+    runId?: string
 }
 
 function parseSceneName(sceneName: string): { sceneId: string; sceneVariant: string } {
@@ -190,10 +235,17 @@ export class SceneManager {
     private runningAllScenes = false;
     private egoControlActive = false;
 
-    public async executeScene(name: string, options?: { shuffleWaypoints?: boolean; runId?: string }) {
+    public constructor() {
+        worldIsolation.start();
+    }
+
+    public async executeScene(name: string, options: SceneExecutionOptions) {
         const resolvedName = this.resolveSceneName(name);
         const scene = this.Scenes.get(resolvedName);
         if (scene) {
+            if (options.isCanceled()) {
+                throw new Error(SceneStoppedErrorCode);
+            }
             if (this.activeSceneName) {
                 throw new Error(`Scene "${this.activeSceneName}" is already running`);
             }
@@ -207,13 +259,17 @@ export class SceneManager {
             }
             this.activeSceneName = resolvedName;
             this.stopCurrentSceneRequested = false;
+            const isCanceled = () => options.isCanceled()
+                || this.stopCurrentSceneRequested
+                || this.stopAllScenesRequested;
 
             try {
-                if (this.stopCurrentSceneRequested) {
+                if (isCanceled()) {
                     throw new Error(SceneStoppedErrorCode);
                 }
 
-                await egoService.execute(preparedScene.ego, resolvedName, runId, preparedScene.environment);
+                await egoService.execute(preparedScene.ego, resolvedName, isCanceled, runId, preparedScene.environment);
+                completeSuccessfulScene(resolvedName, egoService);
             } catch (error: any) {
                 if (this.isSceneStoppedError(error)) {
                     log(`Scene "${resolvedName}" stopped by command.`);
@@ -231,19 +287,19 @@ export class SceneManager {
         }
     }
 
-    public async executeAllScenes() {
+    public async executeAllScenes(isCanceled: () => boolean) {
         console.log("Executing all scenes...", this.Scenes);
         this.runningAllScenes = true;
         this.stopAllScenesRequested = false;
         const runId = createRunId();
         try {
             for (const [name] of this.Scenes.entries()) {
-                if (this.stopAllScenesRequested) {
+                if (this.stopAllScenesRequested || isCanceled()) {
                     log("endAllScenes requested; stopping queued scenes.");
                     break;
                 }
-                await this.executeScene(name, {shuffleWaypoints: true, runId})
-                if (this.stopAllScenesRequested) {
+                await this.executeScene(name, {isCanceled, shuffleWaypoints: true, runId})
+                if (this.stopAllScenesRequested || isCanceled()) {
                     log("endAllScenes requested; scene queue stopped.");
                     break;
                 }
@@ -256,14 +312,17 @@ export class SceneManager {
 
     public endScene(): boolean {
         if (!this.activeSceneName) {
+            if (this.disposeInactiveManagedEgo("endScene requested for retained managed ego")) {
+                return true;
+            }
             log("No active scene to end.");
             return !this.runningAllScenes;
         }
 
-        if (parkingRunner.isRunning()) {
+        if (stopSignRunner.isRunning()) {
             this.stopCurrentSceneRequested = true;
-            parkingRunner.requestStop();
-            console.log(`Stopping parking run "${this.activeSceneName}"...`);
+            stopSignRunner.requestStop();
+            console.log(`Stopping stop-sign run "${this.activeSceneName}"...`);
             return false;
         }
 
@@ -280,10 +339,10 @@ export class SceneManager {
 
     public endAllScenes(): boolean {
         this.stopAllScenesRequested = true;
-        if (parkingRunner.isRunning()) {
+        if (stopSignRunner.isRunning()) {
             this.stopCurrentSceneRequested = true;
-            parkingRunner.requestStop();
-            console.log("Stopping active parking run...");
+            stopSignRunner.requestStop();
+            console.log("Stopping active stop-sign batch...");
             return false;
         }
         if (this.egoControlActive) {
@@ -303,12 +362,20 @@ export class SceneManager {
             return false;
         }
 
+        if (this.disposeInactiveManagedEgo("endAllScenes requested for retained managed ego")) {
+            this.stopAllScenesRequested = false;
+            return true;
+        }
+
         this.stopAllScenesRequested = false;
         log("No active scenes to end.");
         return true;
     }
 
-    public async startEgoControl() {
+    public async startEgoControl(isCanceled: () => boolean = () => false) {
+        if (isCanceled()) {
+            throw new Error("Ego control start was canceled before initialization");
+        }
         if (this.activeSceneName) {
             throw new Error(`Scene "${this.activeSceneName}" is already running`);
         }
@@ -326,8 +393,21 @@ export class SceneManager {
 
         try {
             envService.execute(clonedScene.environment);
-            await egoService.executeEgo(clonedScene.ego, "ego-control", runId);
+            await egoService.executeEgo(clonedScene.ego, "ego-control", isCanceled, runId);
+            if (isCanceled()) {
+                egoService.disposeCurrentEgo();
+                throw new Error("Ego control start was canceled during initialization");
+            }
             egoService.configureManualRouteContext(clonedScene.ego);
+            if (isCanceled()) {
+                egoService.disposeCurrentEgo();
+                throw new Error("Ego control start was canceled before isolation setup");
+            }
+            const cleared = worldIsolation.start();
+            log(
+                `Continuous 1000m world isolation active: removed ${cleared.removedVehicles} vehicles `
+                + `and ${cleared.removedPeds} NPCs initially; your EGO car is protected.`
+            );
         } catch (error) {
             this.egoControlActive = false;
             this.activeSceneName = null;
@@ -341,67 +421,120 @@ export class SceneManager {
             return;
         }
 
-        parkingRunner.stopEvaluation();
-        egoService.disposeCurrentEgo();
+        egoService.forceSafeStopAndDisposeCurrentEgo("ego control stopped");
         this.egoControlActive = false;
         this.activeSceneName = null;
         this.stopCurrentSceneRequested = false;
         log("Stopped ego control.");
     }
 
-    public setParkingTarget(): ParkingTarget {
-        if (!this.egoControlActive) {
-            throw new Error("Parking calibration requires an active ego-control vehicle");
+    public shutdownWorldIsolation() {
+        worldIsolation.stop();
+    }
+
+    private disposeInactiveManagedEgo(reason: string): boolean {
+        if (!egoService.hasCurrentEgo()) {
+            return false;
         }
-        return parkingRunner.calibrateTargetFromCurrentEgo();
+        egoService.forceSafeStopAndDisposeCurrentEgo(reason);
+        log("Disposed retained managed ego.");
+        return true;
     }
 
-    public clearParkingTarget() {
-        parkingRunner.clearTarget();
+    public forceSafeCleanup(reason: string) {
+        this.stopCurrentSceneRequested = true;
+        this.stopAllScenesRequested = true;
+        stopSignRunner.requestStop();
+        egoService.forceSafeStopAndDisposeCurrentEgo(reason);
+        this.egoControlActive = false;
+        this.activeSceneName = null;
+        this.runningAllScenes = false;
+        this.stopCurrentSceneRequested = false;
+        this.stopAllScenesRequested = false;
     }
 
-    public async startParkingRun(attemptCount: unknown, seed?: string) {
+    public setStopSignTarget(): {signPose: StopSignPose; stopLinePose: StopSignPose; egoStopPose: StopSignPose; exitPose: StopSignPose} {
+        if (!this.egoControlActive || this.activeSceneName !== "ego-control") {
+            throw new Error("Stop-sign calibration requires the active setup car");
+        }
+        return stopSignRunner.calibrateTargetFromCurrentEgo();
+    }
+
+    public clearStopSignTarget() {
+        stopSignRunner.clearTarget();
+    }
+
+    public async probeStopSignTarget(rawRequest: unknown, assertCurrent: () => void) {
+        if (!this.egoControlActive || this.activeSceneName !== "ego-control") {
+            throw new Error("Stop-sign location probing requires the active setup car");
+        }
+        const ego = egoService.oldEgo;
+        if (!ego || !DoesEntityExist(ego.vehicle.id)) {
+            throw new Error("Stop-sign location probing requires a valid managed setup car");
+        }
+        if (GetPedInVehicleSeat(ego.vehicle.id, -1) !== PlayerPedId()) {
+            throw new Error("Stop-sign location probing requires the player in the managed driver seat");
+        }
+
+        const probe = await placeVehicleAtStopSignLocation(
+            ego.vehicle.id,
+            rawRequest,
+            stopSignLocationProbeOperations,
+            assertCurrent,
+        );
+        assertCurrent();
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        egoService.startCaptureCamera(ego);
+        const target = stopSignRunner.calibrateTargetFromCurrentEgo();
+        return {probe, target};
+    }
+
+    public async teleportStopSignStart(rawPose: unknown, assertCurrent: () => void) {
+        if (!this.egoControlActive || this.activeSceneName !== "ego-control") {
+            throw new Error("Saved Start teleport requires the active setup car");
+        }
+        const ego = egoService.oldEgo;
+        if (!ego || !DoesEntityExist(ego.vehicle.id)) {
+            throw new Error("Saved Start teleport requires a valid managed setup car");
+        }
+        if (GetPedInVehicleSeat(ego.vehicle.id, -1) !== PlayerPedId()) {
+            throw new Error("Saved Start teleport requires the player in the managed driver seat");
+        }
+
+        const pose = parseStopSignPose(rawPose, "stopSignStartPose");
+        await positionVehicleAtStopSignPose(ego.vehicle.id, pose, assertCurrent);
+        assertCurrent();
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        egoService.startCaptureCamera(ego);
+        return pose;
+    }
+
+    public async startStopSignBatch(
+        batchId: string,
+        jobs: StopSignJob[],
+        hooks: StopSignBatchHooks,
+    ): Promise<number> {
         if (this.activeSceneName && !this.egoControlActive) {
             throw new Error(`Scene "${this.activeSceneName}" is already running`);
         }
-        if (!parkingRunner.hasTarget()) {
-            throw new Error("Parking target is not configured; run setParkingTarget first");
-        }
-        const validatedAttemptCount = resolveParkingAttemptCount(attemptCount);
-
         if (this.egoControlActive) {
             this.egoControlActive = false;
             this.activeSceneName = null;
         }
-        this.activeSceneName = PARKING_SCENE_NAME;
+        const cleared = worldIsolation.start();
+        log(
+            `Stop-sign preflight cleared ${cleared.removedVehicles} unoccupied vehicles `
+            + `and ${cleared.removedPeds} NPCs before spawning the collection car.`
+        );
+        this.activeSceneName = STOP_SIGN_SCENE_NAME;
         this.stopCurrentSceneRequested = false;
         try {
-            await parkingRunner.run(validatedAttemptCount, seed);
+            return await stopSignRunner.runBatch(batchId, jobs, hooks);
         } finally {
-            this.activeSceneName = null;
-            this.stopCurrentSceneRequested = false;
-        }
-    }
-
-    public async prepareParkingEvaluation(seed?: string): Promise<ParkingGoal> {
-        if (this.activeSceneName && !this.egoControlActive) {
-            throw new Error(`Scene "${this.activeSceneName}" is already running`);
-        }
-        if (!parkingRunner.hasTarget()) {
-            throw new Error("Parking target is not configured; run setParkingTarget first");
-        }
-
-        this.egoControlActive = false;
-        this.activeSceneName = PARKING_EVALUATION_SCENE_NAME;
-        this.stopCurrentSceneRequested = false;
-        try {
-            const goal = await parkingRunner.prepareEvaluation(seed);
-            this.egoControlActive = true;
-            return goal;
-        } catch (error) {
-            this.activeSceneName = null;
-            throw error;
-        } finally {
+            this.egoControlActive = egoService.hasCurrentEgo();
+            this.activeSceneName = this.egoControlActive ? "ego-control" : null;
             this.stopCurrentSceneRequested = false;
         }
     }
@@ -418,12 +551,12 @@ export class SceneManager {
         return egoService.currentRouteForwardDelta();
     }
 
-    public currentEgoControlTelemetry(): EgoControlTelemetry & ParkingTelemetry {
+    public currentEgoControlTelemetry(): EgoControlTelemetry & StopSignTelemetry {
         const telemetry = egoService.currentControlTelemetry()
             ?? createNoEgoControlTelemetry(GetGameTimer());
         return {
             ...telemetry,
-            ...parkingRunner.currentTelemetry(),
+            ...stopSignRunner.currentTelemetry(),
         };
     }
 

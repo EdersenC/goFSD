@@ -3,6 +3,7 @@ package dataset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,18 +15,125 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestAttachImagePaths(t *testing.T) {
-	frames := []VideoFrame{{Index: 0, PTS: 0.0}, {Index: 1, PTS: 0.1}, {Index: 2, PTS: 0.2}}
+	frames := []VideoFrame{{Index: 0, PTS: 0.0}, {Index: 2, PTS: 0.1}, {Index: 3, PTS: 0.2}}
 	got := AttachImagePaths(frames, "frames")
-	want := []string{"frames/000001.jpg", "frames/000002.jpg", "frames/000003.jpg"}
+	want := []string{"frames/000001.jpg", "frames/000003.jpg", "frames/000004.jpg"}
 	for i := range want {
 		if got[i].ImagePath != want[i] {
 			t.Fatalf("unexpected image path at %d: got=%q want=%q", i, got[i].ImagePath, want[i])
 		}
+	}
+}
+
+func TestBuildFrameWindowAtOffsetsRejectsMissingSourceFrame(t *testing.T) {
+	frames := AttachImagePaths([]VideoFrame{
+		{Index: 0},
+		{Index: 2},
+		{Index: 3},
+	}, "frames")
+	if window, ok := buildFrameWindowAtOffsets(frames, 2, []int{-2, 0}); ok || window != nil {
+		t.Fatalf("missing source frame must not compact the timeline: %v", window)
+	}
+}
+
+func TestBuildFrameWindowAtOffsetsUsesExactNonUniformOffsets(t *testing.T) {
+	frames := make([]VideoFrame, 11)
+	for index := range frames {
+		frames[index] = VideoFrame{Index: index, ImagePath: fmt.Sprintf("frames/%06d.jpg", index+1)}
+	}
+
+	window, ok := buildFrameWindowAtOffsets(frames, 10, []int{-10, -7, -3, -1, 0})
+	if !ok {
+		t.Fatal("expected a complete nonuniform frame window")
+	}
+	want := []string{
+		"frames/000001.jpg",
+		"frames/000004.jpg",
+		"frames/000008.jpg",
+		"frames/000010.jpg",
+		"frames/000011.jpg",
+	}
+	if !reflect.DeepEqual(window, want) {
+		t.Fatalf("unexpected nonuniform frame window: got=%v want=%v", window, want)
+	}
+}
+
+func TestProcessorFingerprintUsesImageOffsetsAndIgnoresExecutionMode(t *testing.T) {
+	offsets := []int{-8, -5, -3, -1, 0}
+	full := NewProcessor(WithImageOffsets(offsets))
+	datasetOnly := NewProcessor(WithImageOffsets(offsets), WithDatasetOnly(true))
+	if full.ConfigFingerprint() != datasetOnly.ConfigFingerprint() {
+		t.Fatal("dataset-only execution must not invalidate equivalent published outputs")
+	}
+
+	differentTimeline := NewProcessor(WithImageOffsets([]int{-8, -6, -4, -2, 0}))
+	if full.ConfigFingerprint() == differentTimeline.ConfigFingerprint() {
+		t.Fatal("different image offsets must invalidate prior outputs")
+	}
+	offsets[0] = -99
+	if !reflect.DeepEqual(full.imageOffsets, []int{-8, -5, -3, -1, 0}) {
+		t.Fatal("WithImageOffsets must defensively copy caller-owned configuration")
+	}
+	status := full.newProcessingStatus("queued")
+	full.imageOffsets[0] = -77
+	full.telemetryOffsets[0] = -77
+	full.futureOffsets[0] = 77
+	if !reflect.DeepEqual(status.ImageOffsets, []int{-8, -5, -3, -1, 0}) ||
+		status.TelemetryOffsets[0] == -77 ||
+		status.FutureOffsets[0] == 77 {
+		t.Fatalf("processing status must own defensive timeline copies: %+v", status)
+	}
+}
+
+func TestWriteStatusFileNeverExposesPartialJSONToConcurrentReaders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "processing.json")
+	if err := writeStatusFile(path, ProcessingStatus{State: "queued"}); err != nil {
+		t.Fatalf("write initial status: %v", err)
+	}
+	done := make(chan struct{})
+	readErrors := make(chan error, 1)
+	var readers sync.WaitGroup
+	for reader := 0; reader < 4; reader++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				status, err := ReadStatusFile(path)
+				if err != nil || (status.State != "queued" && status.State != "running") {
+					select {
+					case readErrors <- fmt.Errorf("read atomic status: state=%q err=%v", status.State, err):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	for index := 0; index < 64; index++ {
+		status := ProcessingStatus{State: "running", FrameCount: index, SampleCount: index / 2}
+		if err := writeStatusFile(path, status); err != nil {
+			close(done)
+			readers.Wait()
+			t.Fatalf("write status %d: %v", index, err)
+		}
+	}
+	close(done)
+	readers.Wait()
+	select {
+	case err := <-readErrors:
+		t.Fatal(err)
+	default:
 	}
 }
 
@@ -123,7 +231,7 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 1 {
 		t.Fatalf("unexpected sample count: got=%d want=1", len(samples))
 	}
@@ -143,31 +251,19 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	if flatLabel["acceleration"] != nil {
 		t.Fatalf("expected raw acceleration to be dropped, label=%+v", flatLabel)
 	}
-	if flatLabel["future_speed_delta"] != 2.0 {
-		t.Fatalf("unexpected future_speed_delta: %+v", flatLabel)
-	}
-	if flatLabel["future_speed_delta_target"] != 1.0 {
-		t.Fatalf("unexpected future_speed_delta_target: %+v", flatLabel)
-	}
 	if flatLabel["future_speed"] != 8.0 {
 		t.Fatalf("unexpected future_speed: %+v", flatLabel)
 	}
 	if flatLabel["future_speed_target"] != 8.0 {
 		t.Fatalf("unexpected future_speed_target: %+v", flatLabel)
 	}
-	if flatLabel["future_yaw_delta"] != 8.0 {
-		t.Fatalf("unexpected future_yaw_delta: %+v", flatLabel)
-	}
 	if math.Abs(flatLabel["future_horizon_seconds"].(float64)-0.4) > 1e-6 {
 		t.Fatalf("unexpected future_horizon_seconds: %+v", flatLabel)
-	}
-	if flatLabel["yaw_rate"] != 4.0 {
-		t.Fatalf("unexpected yaw_rate: %+v", flatLabel)
 	}
 	if flatLabel["routeForwardDelta"] != 0.4 {
 		t.Fatalf("unexpected routeForwardDelta: %+v", flatLabel)
 	}
-	if samples[0].Label.Control.Steering == nil || samples[0].Label.Aux.FutureYawDelta == nil {
+	if samples[0].Label.Control.Steering == nil || samples[0].Label.Aux.FutureSpeedTarget == nil {
 		t.Fatalf("expected grouped label sections to be populated: %+v", samples[0].Label)
 	}
 	history := sampleTelemetryWindow(t, samples[0].TelemetryHistory, "telemetry_history")
@@ -184,7 +280,7 @@ func TestBuildDatasetSamplesUsesNearestRawLabel(t *testing.T) {
 	if len(future) != defaultFutureTelemetryCount {
 		t.Fatalf("unexpected telemetry future length: got=%d", len(future))
 	}
-	if future[0]["time"] != 500.0 || future[len(future)-1]["time"] != 1000.0 {
+	if future[0]["time"] != 500.0 || future[len(future)-1]["time"] != 800.0 {
 		t.Fatalf("unexpected telemetry future window: %+v", future)
 	}
 	if future[0]["acceleration"] != 0.25 {
@@ -215,7 +311,7 @@ func TestBuildTelemetryFutureUsesTimestampSlotsInsteadOfAdjacentRows(t *testing.
 		t.Fatal("expected a complete timestamp-aligned future horizon")
 	}
 	got := sampleTelemetryWindow(t, future, "telemetry_future")
-	wantTimes := []float64{449, 503, 548, 601, 652, 698}
+	wantTimes := []float64{449, 503, 548, 601}
 	for index, want := range wantTimes {
 		if got[index]["time"] != want {
 			t.Fatalf("unexpected horizon slot %d: got=%v want_time=%v", index, got[index], want)
@@ -363,7 +459,7 @@ func TestBuildDatasetSamplesSupportsConfigurableWindowSize(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 8, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 8, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 1 {
 		t.Fatalf("unexpected sample count: got=%d want=1", len(samples))
 	}
@@ -407,7 +503,7 @@ func TestBuildDatasetSamplesUsesIndependentSampleStride(t *testing.T) {
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 10, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples := buildDatasetSamples(frames, labels, 0.0, 5, 2, 10, 100*time.Millisecond, testTelemetryOffsets(5, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 3 {
 		t.Fatalf("unexpected sample count: got=%d want=3", len(samples))
 	}
@@ -451,7 +547,7 @@ func TestBuildDatasetSamplesSkipsIncompleteTelemetryWindows(t *testing.T) {
 		{RelativeSeconds: 1.0, Label: map[string]any{"time": 1000.0, "Steering": 0.2, "currentSpeed": 7.0, "acceleration": 0.8, "yaw": 34.0, "yawRate": 1.75, "routeForwardDelta": 0.7}},
 	}
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 0 {
 		t.Fatalf("unexpected sample count: got=%d want=0", len(samples))
 	}
@@ -507,9 +603,16 @@ func TestProbeVideoFramesParsesFFprobeJSON(t *testing.T) {
 	}
 }
 
-func TestQueueWritesConfiguredImageSizeToStatus(t *testing.T) {
+func TestQueueWritesConfiguredInterpretationMetadataToStatus(t *testing.T) {
 	tripDir := t.TempDir()
-	processor := NewProcessor(WithImageSize(320, 180))
+	imageOffsets := []int{-8, -5, -3, -1, 0}
+	telemetryOffsets := []int{-4, -2, 0}
+	futureOffsets := []int{1, 3, 6}
+	processor := NewProcessor(
+		WithImageSize(320, 180),
+		WithImageOffsets(imageOffsets),
+		WithTelemetryTimelineConfig(telemetryOffsets, futureOffsets, 75*time.Millisecond),
+	)
 
 	statusPath, err := processor.Queue(tripDir)
 	if err != nil {
@@ -522,6 +625,12 @@ func TestQueueWritesConfiguredImageSizeToStatus(t *testing.T) {
 	}
 	if status.ImageWidth != 320 || status.ImageHeight != 180 {
 		t.Fatalf("unexpected status image size: %+v", status)
+	}
+	if !reflect.DeepEqual(status.ImageOffsets, imageOffsets) ||
+		!reflect.DeepEqual(status.TelemetryOffsets, telemetryOffsets) ||
+		!reflect.DeepEqual(status.FutureOffsets, futureOffsets) ||
+		status.TelemetrySampleIntervalMs != 75 {
+		t.Fatalf("unexpected status timeline interpretation: %+v", status)
 	}
 }
 
@@ -562,45 +671,451 @@ func TestExtractFramesResizesToConfiguredImageSize(t *testing.T) {
 	}
 }
 
-func TestShouldSkipProcessing(t *testing.T) {
-	tmp := t.TempDir()
-	if shouldSkipProcessing(tmp) {
-		t.Fatalf("expected empty trip dir not to be skipped")
-	}
+func TestProcessorSkipRequiresCompleteOutputsAndMatchingFingerprint(t *testing.T) {
+	tripDir := t.TempDir()
+	processor := NewProcessor()
 
-	if err := os.WriteFile(filepath.Join(tmp, "dataset.jsonl"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write dataset.jsonl: %v", err)
+	if processor.shouldSkipTrip(tripDir) {
+		t.Fatal("empty trip must not be treated as complete")
 	}
-	if !shouldSkipProcessing(tmp) {
-		t.Fatalf("expected dataset.jsonl to trigger skip")
+	if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write partial dataset: %v", err)
 	}
-
-	if err := os.Remove(filepath.Join(tmp, "dataset.jsonl")); err != nil {
-		t.Fatalf("remove dataset.jsonl: %v", err)
+	if processor.shouldSkipTrip(tripDir) {
+		t.Fatal("dataset without frames and status must not be treated as complete")
 	}
-	framesDir := filepath.Join(tmp, "frames")
+	framesDir := filepath.Join(tripDir, "frames")
 	if err := os.MkdirAll(framesDir, 0o755); err != nil {
 		t.Fatalf("mkdir frames: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(framesDir, "000001.jpg"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write frame: %v", err)
+	if err := os.WriteFile(filepath.Join(framesDir, "000001.jpg"), []byte("partial"), 0o644); err != nil {
+		t.Fatalf("write partial frame: %v", err)
 	}
-	if !shouldSkipProcessing(tmp) {
-		t.Fatalf("expected non-empty frames dir to trigger skip")
+	if processor.shouldSkipTrip(tripDir) {
+		t.Fatal("partial outputs without a completed status must not be treated as complete")
+	}
+
+	writeCompletedProcessingFixture(t, tripDir, processor, 1, 1)
+	if !processor.shouldSkipTrip(tripDir) {
+		t.Fatal("complete outputs with a matching fingerprint should be skipped")
+	}
+	if !processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("public readiness check disagrees with processor skip rule")
+	}
+	status, err := ReadStatusFile(filepath.Join(tripDir, "processing.json"))
+	if err != nil {
+		t.Fatalf("read complete status: %v", err)
+	}
+	status.ImageOffsets = nil
+	if err := writeStatusFile(filepath.Join(tripDir, "processing.json"), status); err != nil {
+		t.Fatalf("write opaque complete status: %v", err)
+	}
+	if processor.shouldSkipTrip(tripDir) {
+		t.Fatal("same-fingerprint status without explicit timeline metadata must not be skipped")
+	}
+	writeCompletedProcessingFixture(t, tripDir, processor, 1, 1)
+	status, err = ReadStatusFile(filepath.Join(tripDir, "processing.json"))
+	if err != nil {
+		t.Fatalf("read status before dimension drift: %v", err)
+	}
+	status.ImageWidth = 0
+	if err := writeStatusFile(filepath.Join(tripDir, "processing.json"), status); err != nil {
+		t.Fatalf("write status without explicit dimensions: %v", err)
+	}
+	if processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("status without explicit image dimensions must not be current")
+	}
+	writeCompletedProcessingFixture(t, tripDir, processor, 1, 1)
+
+	changedProcessor := NewProcessor(WithImageSize(320, 180))
+	if changedProcessor.shouldSkipTrip(tripDir) {
+		t.Fatal("changed processing config must invalidate prior outputs")
 	}
 }
 
-func TestShouldSkipDatasetOnlyProcessing(t *testing.T) {
-	tmp := t.TempDir()
-	if shouldSkipDatasetOnlyProcessing(tmp) {
-		t.Fatalf("expected missing dataset.jsonl not to be skipped")
+func TestTripOutputsCurrentRequiresExplicitCountsAndCompletePublishedFiles(t *testing.T) {
+	processor := NewProcessor()
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, tripDir string)
+	}{
+		{
+			name: "missing sample count",
+			mutate: func(t *testing.T, tripDir string) {
+				statusPath := filepath.Join(tripDir, "processing.json")
+				body, err := os.ReadFile(statusPath)
+				if err != nil {
+					t.Fatalf("read status: %v", err)
+				}
+				var status map[string]any
+				if err := json.Unmarshal(body, &status); err != nil {
+					t.Fatalf("decode status: %v", err)
+				}
+				delete(status, "sampleCount")
+				writeJSONFile(t, statusPath, status)
+			},
+		},
+		{
+			name: "truncated dataset",
+			mutate: func(t *testing.T, tripDir string) {
+				if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), nil, 0o644); err != nil {
+					t.Fatalf("truncate dataset: %v", err)
+				}
+			},
+		},
+		{
+			name: "invalid dataset suffix",
+			mutate: func(t *testing.T, tripDir string) {
+				file, err := os.OpenFile(filepath.Join(tripDir, "dataset.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatalf("open dataset: %v", err)
+				}
+				if _, err := file.WriteString("not-json\n"); err != nil {
+					_ = file.Close()
+					t.Fatalf("append invalid dataset row: %v", err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatalf("close dataset: %v", err)
+				}
+			},
+		},
+		{
+			name: "gapped frames",
+			mutate: func(t *testing.T, tripDir string) {
+				if err := os.Rename(
+					filepath.Join(tripDir, "frames", "000001.jpg"),
+					filepath.Join(tripDir, "frames", "000002.jpg"),
+				); err != nil {
+					t.Fatalf("gap frames: %v", err)
+				}
+			},
+		},
+		{
+			name: "zero byte frame",
+			mutate: func(t *testing.T, tripDir string) {
+				if err := os.WriteFile(filepath.Join(tripDir, "frames", "000001.jpg"), nil, 0o644); err != nil {
+					t.Fatalf("truncate frame: %v", err)
+				}
+			},
+		},
 	}
 
-	if err := os.WriteFile(filepath.Join(tmp, "dataset.jsonl"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write dataset.jsonl: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tripDir := t.TempDir()
+			writeCompletedProcessingFixture(t, tripDir, processor, 1, 1)
+			test.mutate(t, tripDir)
+			if processor.TripOutputsCurrent(tripDir) {
+				t.Fatal("incomplete published output was reported current")
+			}
+		})
 	}
-	if !shouldSkipDatasetOnlyProcessing(tmp) {
-		t.Fatalf("expected dataset.jsonl to trigger dataset-only skip")
+}
+
+func TestTripOutputsCurrentAcceptsExplicitCompletedZeroSampleOutputs(t *testing.T) {
+	processor := NewProcessor()
+	tripDir := t.TempDir()
+	writeCompletedProcessingFixture(t, tripDir, processor, 0, 0)
+
+	if !processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("completed zero-sample output with an explicit empty dataset and frame directory must be current")
+	}
+}
+
+func TestTripOutputsCurrentAcceptsCompleteInspectionFramesBeyondTrainingReferences(t *testing.T) {
+	processor := NewProcessor()
+	tripDir := t.TempDir()
+	writeCompletedProcessingFixture(t, tripDir, processor, 3, 1)
+
+	datasetPath := filepath.Join(tripDir, "dataset.jsonl")
+	if err := os.WriteFile(datasetPath, []byte(`{"frame_paths":["frames/000002.jpg"]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write sparse training references: %v", err)
+	}
+	if !processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("complete stop-sign inspection frames may exceed the subset referenced by training rows")
+	}
+
+	if err := os.Remove(filepath.Join(tripDir, "frames", "000003.jpg")); err != nil {
+		t.Fatalf("remove unreferenced inspection frame: %v", err)
+	}
+	if processor.TripOutputsCurrent(tripDir) {
+		t.Fatal("a missing inspection frame must still invalidate the published output")
+	}
+}
+
+func TestValidateFrameSetRejectsTruncationAndDimensionDrift(t *testing.T) {
+	tripDir := t.TempDir()
+	framesDir := filepath.Join(tripDir, "frames")
+	if err := os.MkdirAll(framesDir, 0o755); err != nil {
+		t.Fatalf("mkdir frames: %v", err)
+	}
+	frames := AttachImagePaths([]VideoFrame{{Index: 0}, {Index: 1}}, "frames")
+	if err := writeJPEGFile(filepath.Join(framesDir, "000001.jpg"), 8, 8, 100); err != nil {
+		t.Fatalf("write first frame: %v", err)
+	}
+	if err := validateFrameSet(tripDir, frames, 8, 8); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("expected truncated frame set rejection, got %v", err)
+	}
+
+	if err := writeJPEGFile(filepath.Join(framesDir, "000002.jpg"), 4, 4, 100); err != nil {
+		t.Fatalf("write second frame: %v", err)
+	}
+	if err := validateFrameSet(tripDir, frames, 8, 8); err == nil || !strings.Contains(err.Error(), "dimensions") {
+		t.Fatalf("expected frame dimension rejection, got %v", err)
+	}
+}
+
+func TestProcessTripFailureDoesNotPublishStagedOutputs(t *testing.T) {
+	tmp := t.TempDir()
+	tripDir := filepath.Join(tmp, "trip-000")
+	if err := os.MkdirAll(tripDir, 0o755); err != nil {
+		t.Fatalf("mkdir trip: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tripDir, "video.mkv"), []byte("stub"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	writeJSONFile(t, filepath.Join(tripDir, "metadata.json"), tripMetadata{RunID: "run-a", TripIndex: 0})
+	writeJSONLinesFile(t, filepath.Join(tmp, "run.jsonl"), []runTripRecord{{RunID: "run-a", TripIndex: 0}})
+
+	processor := NewProcessor(
+		WithCommandFactory(func(_ context.Context, name string, args ...string) *exec.Cmd {
+			if name == "ffprobe" {
+				cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessFFprobe", "--")
+				cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=ffprobe")
+				return cmd
+			}
+			cmdArgs := append([]string{"-test.run=TestHelperProcessFFmpeg", "--"}, args...)
+			cmd := exec.Command(os.Args[0], cmdArgs...)
+			cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=ffmpeg")
+			return cmd
+		}),
+	)
+
+	err := processor.ProcessTrip(context.Background(), tripDir)
+	if err == nil {
+		t.Fatalf("expected staged processing to fail before publish, got %v", err)
+	}
+	if pathExists(filepath.Join(tripDir, "frames")) {
+		t.Fatal("failed processing must not publish staged frames")
+	}
+	if pathExists(filepath.Join(tripDir, "dataset.jsonl")) {
+		t.Fatal("failed processing must not publish a staged dataset")
+	}
+	workspaces, globErr := filepath.Glob(filepath.Join(tripDir, processingWorkspacePrefix+"*"))
+	if globErr != nil {
+		t.Fatalf("glob processing workspaces: %v", globErr)
+	}
+	if len(workspaces) != 0 {
+		t.Fatalf("failed processing workspace was not cleaned up: %v", workspaces)
+	}
+	status, statusErr := ReadStatusFile(filepath.Join(tripDir, "processing.json"))
+	if statusErr != nil {
+		t.Fatalf("read failed status: %v", statusErr)
+	}
+	if status.State != "failed" || status.ConfigFingerprint != processor.ConfigFingerprint() {
+		t.Fatalf("unexpected failed status: %+v", status)
+	}
+}
+
+func TestPromotionPrevalidatesEveryStagedOutputBeforeBackup(t *testing.T) {
+	tripDir := t.TempDir()
+	workspace := processingWorkspaceForRoot(filepath.Join(tripDir, processingWorkspacePrefix+"prevalidate"))
+	if err := os.MkdirAll(workspace.framesDir, 0o755); err != nil {
+		t.Fatalf("mkdir staged frames: %v", err)
+	}
+	writeGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+	if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write old dataset: %v", err)
+	}
+
+	err := promoteProcessingWorkspace(tripDir, workspace, true)
+	if err == nil || !strings.Contains(err.Error(), "staged processing output is missing") {
+		t.Fatalf("expected missing staged dataset failure, got %v", err)
+	}
+	assertGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+	assertFileContent(t, filepath.Join(tripDir, "dataset.jsonl"), "old\n")
+	if pathExists(filepath.Join(workspace.root, "previous-frames")) {
+		t.Fatal("prevalidation failure must not move an existing final into the workspace")
+	}
+}
+
+func TestPromotionCrashPhasesRollbackToOneCompleteGeneration(t *testing.T) {
+	for successfulRenames := 0; successfulRenames <= 4; successfulRenames++ {
+		t.Run(fmt.Sprintf("after-%d-renames", successfulRenames), func(t *testing.T) {
+			tripDir, workspace := createPromotionFixture(t)
+			calls := 0
+			injectedRename := func(source string, target string) error {
+				if calls == successfulRenames && successfulRenames < 4 {
+					return errors.New("injected promotion interruption")
+				}
+				calls++
+				return os.Rename(source, target)
+			}
+			err := promoteProcessingWorkspaceWithRename(tripDir, workspace, true, injectedRename)
+			if successfulRenames < 4 && err == nil {
+				t.Fatal("expected injected promotion interruption")
+			}
+			if successfulRenames == 4 && err != nil {
+				t.Fatalf("complete promotion: %v", err)
+			}
+			if err := rollbackProcessingWorkspace(tripDir, workspace); err != nil {
+				t.Fatalf("rollback crash phase: %v", err)
+			}
+			assertGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+			assertFileContent(t, filepath.Join(tripDir, "dataset.jsonl"), "old\n")
+		})
+	}
+}
+
+func TestPromotionPreservesBackupWhenRestoreFails(t *testing.T) {
+	tripDir, workspace := createPromotionFixture(t)
+	calls := 0
+	err := promoteProcessingWorkspaceWithRename(tripDir, workspace, true, func(source string, target string) error {
+		if calls == 3 {
+			return errors.New("injected dataset publish failure")
+		}
+		calls++
+		return os.Rename(source, target)
+	})
+	if err == nil {
+		t.Fatal("expected injected publish failure")
+	}
+
+	err = rollbackProcessingWorkspaceWithFS(
+		tripDir,
+		workspace,
+		func(source string, target string) error {
+			if filepath.Base(source) == "previous-frames" {
+				return errors.New("injected frame restore failure")
+			}
+			return os.Rename(source, target)
+		},
+		os.RemoveAll,
+	)
+	if err == nil {
+		t.Fatal("expected injected restore failure")
+	}
+	if !pathExists(filepath.Join(workspace.root, "previous-frames")) {
+		t.Fatal("failed rollback must preserve the only previous-generation backup")
+	}
+	if err := rollbackProcessingWorkspace(tripDir, workspace); err != nil {
+		t.Fatalf("retry rollback: %v", err)
+	}
+	assertGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+	assertFileContent(t, filepath.Join(tripDir, "dataset.jsonl"), "old\n")
+}
+
+func TestPromotionRecoveryHandlesCrashBetweenRenameAndJournalUpdate(t *testing.T) {
+	tests := []struct {
+		name       string
+		prepare    func(t *testing.T, tripDir string, workspace processingWorkspace, operation *promotionJournalOperation)
+		wantTarget bool
+	}{
+		{
+			name: "backup moved",
+			prepare: func(t *testing.T, tripDir string, workspace processingWorkspace, operation *promotionJournalOperation) {
+				operation.HadPrior = true
+				operation.BackupStarted = true
+				mustRename(t, filepath.Join(tripDir, "dataset.jsonl"), filepath.Join(workspace.root, "previous-dataset.jsonl"))
+			},
+			wantTarget: true,
+		},
+		{
+			name: "published over prior",
+			prepare: func(t *testing.T, tripDir string, workspace processingWorkspace, operation *promotionJournalOperation) {
+				operation.HadPrior = true
+				operation.BackupStarted = true
+				operation.BackupDone = true
+				operation.PublishStarted = true
+				mustRename(t, filepath.Join(tripDir, "dataset.jsonl"), filepath.Join(workspace.root, "previous-dataset.jsonl"))
+				mustRename(t, workspace.datasetPath, filepath.Join(tripDir, "dataset.jsonl"))
+			},
+			wantTarget: true,
+		},
+		{
+			name: "published without prior",
+			prepare: func(t *testing.T, tripDir string, workspace processingWorkspace, operation *promotionJournalOperation) {
+				operation.PublishStarted = true
+				if err := os.Remove(filepath.Join(tripDir, "dataset.jsonl")); err != nil {
+					t.Fatalf("remove prior dataset: %v", err)
+				}
+				mustRename(t, workspace.datasetPath, filepath.Join(tripDir, "dataset.jsonl"))
+			},
+			wantTarget: false,
+		},
+		{
+			name: "restore moved",
+			prepare: func(t *testing.T, tripDir string, workspace processingWorkspace, operation *promotionJournalOperation) {
+				operation.HadPrior = true
+				operation.BackupStarted = true
+				operation.BackupDone = true
+				operation.PublishStarted = true
+				operation.PublishDone = true
+				operation.RestoreStarted = true
+				mustRename(t, filepath.Join(tripDir, "dataset.jsonl"), filepath.Join(workspace.root, "previous-dataset.jsonl"))
+				mustRename(t, workspace.datasetPath, filepath.Join(tripDir, "dataset.jsonl"))
+				if err := os.Remove(filepath.Join(tripDir, "dataset.jsonl")); err != nil {
+					t.Fatalf("remove published dataset: %v", err)
+				}
+				mustRename(t, filepath.Join(workspace.root, "previous-dataset.jsonl"), filepath.Join(tripDir, "dataset.jsonl"))
+			},
+			wantTarget: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tripDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte("old\n"), 0o644); err != nil {
+				t.Fatalf("write old dataset: %v", err)
+			}
+			workspace, err := newProcessingWorkspace(tripDir)
+			if err != nil {
+				t.Fatalf("new workspace: %v", err)
+			}
+			if err := os.WriteFile(workspace.datasetPath, []byte("new\n"), 0o644); err != nil {
+				t.Fatalf("write staged dataset: %v", err)
+			}
+			journal := newPromotionJournal(false)
+			journal.Phase = "promoting"
+			test.prepare(t, tripDir, workspace, &journal.Operations[0])
+			if err := writePromotionJournal(workspace, journal); err != nil {
+				t.Fatalf("write crash journal: %v", err)
+			}
+			if err := rollbackProcessingWorkspace(tripDir, workspace); err != nil {
+				t.Fatalf("recover crash window: %v", err)
+			}
+			target := filepath.Join(tripDir, "dataset.jsonl")
+			if !test.wantTarget {
+				if pathExists(target) {
+					t.Fatal("new no-prior output survived rollback")
+				}
+				return
+			}
+			assertFileContent(t, target, "old\n")
+		})
+	}
+}
+
+func TestProcessorQueueRecoversStalePromotionBeforeDirectBatchWork(t *testing.T) {
+	tripDir, workspace := createPromotionFixture(t)
+	if err := promoteProcessingWorkspace(tripDir, workspace, true); err != nil {
+		t.Fatalf("publish simulated crashed promotion: %v", err)
+	}
+	writeJSONFile(t, filepath.Join(tripDir, "processing.json"), ProcessingStatus{State: "running"})
+
+	statusPath, err := NewProcessor(WithForce(true)).Queue(tripDir)
+	if err != nil {
+		t.Fatalf("Queue after stale promotion: %v", err)
+	}
+	assertGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+	assertFileContent(t, filepath.Join(tripDir, "dataset.jsonl"), "old\n")
+	if pathExists(workspace.root) {
+		t.Fatal("successfully recovered promotion workspace was not removed")
+	}
+	status, err := ReadStatusFile(statusPath)
+	if err != nil || status.State != "queued" {
+		t.Fatalf("direct batch recovery did not leave queued status: %+v err=%v", status, err)
 	}
 }
 
@@ -618,100 +1133,6 @@ func TestSmoothedFutureSpeedUsesAvailableNeighbors(t *testing.T) {
 	}
 	if got != 7.0 {
 		t.Fatalf("unexpected smoothed future speed: got=%v want=7.0", got)
-	}
-}
-
-func TestSmoothedFutureYawWrapsAcrossZeroDegrees(t *testing.T) {
-	labels := []timedLabel{
-		{RelativeSeconds: 0.2, Label: map[string]any{"yaw": 359.0}},
-		{RelativeSeconds: 0.4, Label: map[string]any{"yaw": 1.0}},
-		{RelativeSeconds: 0.6, Label: map[string]any{"yaw": 3.0}},
-	}
-
-	got, ok := smoothedFutureYaw(labels, 1, 1)
-	if !ok {
-		t.Fatal("expected smoothedFutureYaw to succeed")
-	}
-	if math.Abs(got-1.0) > 1e-6 {
-		t.Fatalf("unexpected smoothed future yaw: got=%v want=1.0", got)
-	}
-}
-
-func TestWrapHeadingDeltaDegreesWrapsAcrossZero(t *testing.T) {
-	if got := wrapHeadingDeltaDegrees(359.0 - 1.0); math.Abs(got+2.0) > 1e-6 {
-		t.Fatalf("unexpected wrapped heading delta: got=%v want=-2.0", got)
-	}
-	if got := wrapHeadingDeltaDegrees(1.0 - 359.0); math.Abs(got-2.0) > 1e-6 {
-		t.Fatalf("unexpected wrapped heading delta: got=%v want=2.0", got)
-	}
-}
-
-func TestSmoothedYawRateUsesAvailableNeighbors(t *testing.T) {
-	labels := []timedLabel{
-		{RelativeSeconds: 0.2, Label: map[string]any{"yawRate": -3.0}},
-		{RelativeSeconds: 0.4, Label: map[string]any{"yawRate": 0.0}},
-		{RelativeSeconds: 0.6, Label: map[string]any{"yawRate": 6.0}},
-	}
-
-	got, ok := smoothedYawRate(labels, 1, 1)
-	if !ok {
-		t.Fatal("expected smoothedYawRate to succeed")
-	}
-	if math.Abs(got-1.0) > 1e-6 {
-		t.Fatalf("unexpected smoothed yaw rate: got=%v want=1.0", got)
-	}
-}
-
-func TestSmoothedYawRateDerivesFromYawWhenRawFieldIsMissing(t *testing.T) {
-	labels := []timedLabel{
-		{RelativeSeconds: 0.2, Label: map[string]any{"yaw": 359.0}},
-		{RelativeSeconds: 0.4, Label: map[string]any{"yaw": 1.0}},
-		{RelativeSeconds: 0.6, Label: map[string]any{"yaw": 3.0}},
-	}
-
-	got, ok := smoothedYawRate(labels, 1, 0)
-	if !ok {
-		t.Fatal("expected smoothedYawRate to derive from yaw")
-	}
-	want := degreesToRadians(4.0) / 0.4
-	if math.Abs(got-want) > 1e-6 {
-		t.Fatalf("unexpected derived yaw rate: got=%v want=%v", got, want)
-	}
-}
-
-func TestBuildDatasetSamplesWithStatsTracksMissingFutureYawTargets(t *testing.T) {
-	rawFrames := make([]VideoFrame, 0, 13)
-	labels := make([]timedLabel, 0, 12)
-	for index := 0; index < 13; index++ {
-		rawFrames = append(rawFrames, VideoFrame{Index: index, PTS: float64(index) * 0.1})
-		if index < 12 {
-			labels = append(labels, timedLabel{
-				RelativeSeconds: float64(index) * 0.1,
-				Label: map[string]any{
-					"time":              float64(index) * 100.0,
-					"Steering":          0.1,
-					"currentSpeed":      3.0 + float64(index),
-					"acceleration":      0.1,
-					"routeForwardDelta": 0.2,
-				},
-			})
-		}
-	}
-	frames := AttachImagePaths(rawFrames, "frames")
-
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 4, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
-	if len(samples) != 0 {
-		t.Fatalf("expected no samples, got=%d", len(samples))
-	}
-	if stats.MissingFutureYawTargetCount != 1 {
-		t.Fatalf("unexpected missing future-yaw count: %+v", stats)
-	}
-	if stats.GeneratedSampleCount != 0 {
-		t.Fatalf("unexpected generated sample count: %+v", stats)
-	}
-	reasons := stats.zeroSampleReasons()
-	if reasons["missing_future_yaw_target"] != 1 {
-		t.Fatalf("unexpected zero sample reasons: %+v", reasons)
 	}
 }
 
@@ -741,7 +1162,7 @@ func TestBuildDatasetSamplesWithStatsTracksIncompleteFrameHistory(t *testing.T) 
 		})
 	}
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 10, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 10, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 0 {
 		t.Fatalf("expected no samples, got=%d", len(samples))
 	}
@@ -775,7 +1196,7 @@ func TestBuildDatasetSamplesWithStatsTracksIncompleteTelemetryFuture(t *testing.
 	}
 	frames := AttachImagePaths(rawFrames, "frames")
 
-	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 8, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond, 2.0, true)
+	samples, stats := buildDatasetSamplesWithStats(frames, labels, 0.0, 3, 2, 8, 100*time.Millisecond, testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond)
 	if len(samples) != 0 {
 		t.Fatalf("expected no samples, got=%d", len(samples))
 	}
@@ -806,7 +1227,7 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 		"yawRate":      1.25,
 	}
 
-	derived, ok := buildTrainingLabel(current, future, 5.25, 18.0, 1.25, 0.75, 1.0, 2.0, true)
+	derived, ok := buildTrainingLabel(current, future, 5.25, 0.75, 1.0)
 	if !ok {
 		t.Fatal("expected training label to be derived")
 	}
@@ -817,12 +1238,6 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 	if flatDerived["currentSpeed"] != nil {
 		t.Fatalf("expected currentSpeed to be omitted from derived label: %+v", flatDerived)
 	}
-	if flatDerived["future_speed_delta"] != 1.25 {
-		t.Fatalf("unexpected future_speed_delta in derived label: %+v", flatDerived)
-	}
-	if flatDerived["future_speed_delta_target"] != 0.625 {
-		t.Fatalf("unexpected future_speed_delta_target in derived label: %+v", flatDerived)
-	}
 	if flatDerived["future_speed"] != 6.5 {
 		t.Fatalf("unexpected future_speed in derived label: %+v", flatDerived)
 	}
@@ -832,16 +1247,10 @@ func TestBuildTrainingLabelDropsAccelerationAndAddsFutureTargets(t *testing.T) {
 	if flatDerived["routeForwardDelta"] != 0.75 {
 		t.Fatalf("unexpected routeForwardDelta in derived label: %+v", flatDerived)
 	}
-	if flatDerived["future_yaw_delta"] != 6.0 {
-		t.Fatalf("unexpected future_yaw_delta in derived label: %+v", flatDerived)
-	}
 	if flatDerived["future_horizon_seconds"] != 1.0 {
 		t.Fatalf("unexpected future_horizon_seconds in derived label: %+v", flatDerived)
 	}
-	if flatDerived["yaw_rate"] != 1.25 {
-		t.Fatalf("unexpected yaw_rate in derived label: %+v", flatDerived)
-	}
-	if derived.Control.Steering == nil || derived.Aux.FutureSpeedDelta == nil {
+	if derived.Control.Steering == nil || derived.Aux.FutureSpeedTarget == nil {
 		t.Fatalf("expected grouped derived label sections: %+v", derived)
 	}
 }
@@ -953,6 +1362,7 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 	processor := NewProcessor(
 		WithForce(true),
 		WithDatasetOnly(true),
+		WithImageSize(8, 8),
 		WithSamplingConfig(3, 2, 2),
 		WithTelemetryTimelineConfig(testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond),
 		WithCommandFactory(func(_ context.Context, name string, _ ...string) *exec.Cmd {
@@ -974,7 +1384,7 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 		t.Fatalf("read dataset.jsonl: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	if len(lines) != 3 {
+	if len(lines) != 4 {
 		t.Fatalf("unexpected dataset line count after thinning: got=%d body=%s", len(lines), string(body))
 	}
 
@@ -991,8 +1401,9 @@ func TestProcessTripDatasetOnlyThinsStoppedTail(t *testing.T) {
 		sampleCurrentTelemetryValue(samples[0], "isStopped"),
 		sampleCurrentTelemetryValue(samples[1], "isStopped"),
 		sampleCurrentTelemetryValue(samples[2], "isStopped"),
+		sampleCurrentTelemetryValue(samples[3], "isStopped"),
 	}
-	wantStopped := []any{false, true, true}
+	wantStopped := []any{false, true, true, false}
 	if !reflect.DeepEqual(gotStopped, wantStopped) {
 		t.Fatalf("unexpected stopped labels after thinning: got=%v want=%v", gotStopped, wantStopped)
 	}
@@ -1052,6 +1463,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 	processor := NewProcessor(
 		WithForce(true),
 		WithDatasetOnly(true),
+		WithImageSize(8, 8),
 		WithSamplingConfig(3, 2, 2),
 		WithTelemetryTimelineConfig(testTelemetryOffsets(3, 2), defaultFutureOffsets(), 100*time.Millisecond),
 		WithCommandFactory(func(_ context.Context, name string, _ ...string) *exec.Cmd {
@@ -1073,7 +1485,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		t.Fatalf("read dataset.jsonl: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
-	if len(lines) != 1 {
+	if len(lines) != 2 {
 		t.Fatalf("unexpected dataset line count: got=%d body=%s", len(lines), string(body))
 	}
 	var sample DatasetSample
@@ -1081,20 +1493,11 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		t.Fatalf("parse dataset sample: %v", err)
 	}
 	flatLabel := flattenedLabel(sample.Label)
-	if flatLabel["future_speed_delta"] != 2.0 {
-		t.Fatalf("unexpected future_speed_delta in rewritten dataset: %+v", flatLabel)
-	}
-	if flatLabel["future_speed_delta_target"] != 1.0 {
-		t.Fatalf("unexpected future_speed_delta_target in rewritten dataset: %+v", flatLabel)
-	}
 	if flatLabel["future_speed"] != 6.0 {
 		t.Fatalf("unexpected future_speed in rewritten dataset: %+v", flatLabel)
 	}
 	if flatLabel["future_speed_target"] != 6.0 {
 		t.Fatalf("unexpected future_speed_target in rewritten dataset: %+v", flatLabel)
-	}
-	if math.Abs(flatLabel["future_yaw_delta"].(float64)-4.0) > 1e-6 {
-		t.Fatalf("unexpected future_yaw_delta in rewritten dataset: %+v", flatLabel)
 	}
 	if math.Abs(flatLabel["future_horizon_seconds"].(float64)-0.2) > 1e-6 {
 		t.Fatalf("unexpected future_horizon_seconds in rewritten dataset: %+v", flatLabel)
@@ -1115,7 +1518,7 @@ func TestProcessTripDatasetOnlyRewritesDatasetWithoutFFmpeg(t *testing.T) {
 		t.Fatalf("expected serialized telemetry history to keep acceleration in control: %+v", sample.TelemetryHistory[0])
 	}
 	if len(sample.TelemetryFuture) != defaultFutureTelemetryCount {
-		t.Fatalf("expected telemetry_future to be serialized with 6 entries: %+v", sample)
+		t.Fatalf("expected telemetry_future to be serialized with 4 entries: %+v", sample)
 	}
 	if sample.TelemetryFuture[0].Control.Acceleration != 0.25 {
 		t.Fatalf("expected serialized telemetry future to keep acceleration in control: %+v", sample.TelemetryFuture[0])
@@ -1173,6 +1576,176 @@ func TestHelperProcessFFprobeStoppedTail(t *testing.T) {
 	}
 	_, _ = os.Stdout.Write([]byte(`{"frames":[{"pts_time":"0.0"},{"pts_time":"0.1"},{"pts_time":"0.2"},{"pts_time":"0.3"},{"pts_time":"0.4"},{"pts_time":"0.5"},{"pts_time":"0.6"},{"pts_time":"0.7"},{"pts_time":"0.8"},{"pts_time":"0.9"},{"pts_time":"1.0"},{"pts_time":"1.1"},{"pts_time":"1.2"},{"pts_time":"1.3"},{"pts_time":"1.4"}]}`))
 	os.Exit(0)
+}
+
+func TestPruneUnreferencedJPEGFramesKeepsOnlyDatasetFramesAndLeavesVideo(t *testing.T) {
+	tripDir := t.TempDir()
+	framesDir := filepath.Join(tripDir, "frames")
+	if err := os.MkdirAll(framesDir, 0o755); err != nil {
+		t.Fatalf("mkdir frames: %v", err)
+	}
+	for index := 1; index <= 5; index++ {
+		if err := os.WriteFile(filepath.Join(framesDir, formatFrameName(index)), []byte("jpeg"), 0o644); err != nil {
+			t.Fatalf("write staged frame: %v", err)
+		}
+	}
+	videoPath := filepath.Join(tripDir, "video.mkv")
+	if err := os.WriteFile(videoPath, []byte("video-stays"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	samples := []DatasetSample{{FramePaths: []string{
+		"frames/000001.jpg",
+		"frames/000003.jpg",
+		"frames/000005.jpg",
+	}}}
+
+	count, err := pruneUnreferencedJPEGFrames(framesDir, samples)
+	if err != nil {
+		t.Fatalf("prune staged frames: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("unexpected retained count: got=%d want=3", count)
+	}
+	entries, err := os.ReadDir(framesDir)
+	if err != nil {
+		t.Fatalf("read pruned frames: %v", err)
+	}
+	gotNames := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		gotNames = append(gotNames, entry.Name())
+	}
+	wantNames := []string{"000001.jpg", "000003.jpg", "000005.jpg"}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("unexpected retained frames: got=%v want=%v", gotNames, wantNames)
+	}
+	video, err := os.ReadFile(videoPath)
+	if err != nil || string(video) != "video-stays" {
+		t.Fatalf("video was changed by frame pruning: body=%q err=%v", video, err)
+	}
+}
+
+func writeCompletedProcessingFixture(
+	t *testing.T,
+	tripDir string,
+	processor *Processor,
+	frameCount int,
+	sampleCount int,
+) {
+	t.Helper()
+	framesDir := filepath.Join(tripDir, "frames")
+	if err := os.RemoveAll(framesDir); err != nil {
+		t.Fatalf("clear fixture frames: %v", err)
+	}
+	if err := os.MkdirAll(framesDir, 0o755); err != nil {
+		t.Fatalf("mkdir fixture frames: %v", err)
+	}
+	for index := 1; index <= frameCount; index++ {
+		if err := os.WriteFile(filepath.Join(framesDir, formatFrameName(index)), []byte("frame"), 0o644); err != nil {
+			t.Fatalf("write fixture frame: %v", err)
+		}
+	}
+	datasetFile, err := os.Create(filepath.Join(tripDir, "dataset.jsonl"))
+	if err != nil {
+		t.Fatalf("create fixture dataset: %v", err)
+	}
+	framePaths := make([]string, 0, frameCount)
+	for index := 1; index <= frameCount; index++ {
+		framePaths = append(framePaths, "frames/"+formatFrameName(index))
+	}
+	encoder := json.NewEncoder(datasetFile)
+	for index := 0; index < sampleCount; index++ {
+		if err := encoder.Encode(map[string]any{"sample": index, "frame_paths": framePaths}); err != nil {
+			_ = datasetFile.Close()
+			t.Fatalf("write fixture dataset: %v", err)
+		}
+	}
+	if err := datasetFile.Close(); err != nil {
+		t.Fatalf("close fixture dataset: %v", err)
+	}
+	writeJSONFile(t, filepath.Join(tripDir, "processing.json"), ProcessingStatus{
+		State:                     "completed",
+		ConfigFingerprint:         processor.ConfigFingerprint(),
+		CompletedAt:               time.Now().Format(time.RFC3339),
+		FramesDir:                 "frames",
+		DatasetFile:               "dataset.jsonl",
+		ImageWidth:                processor.imageWidth,
+		ImageHeight:               processor.imageHeight,
+		ImageOffsets:              append([]int(nil), processor.imageOffsets...),
+		TelemetryOffsets:          append([]int(nil), processor.telemetryOffsets...),
+		FutureOffsets:             append([]int(nil), processor.futureOffsets...),
+		TelemetrySampleIntervalMs: float64(processor.telemetrySampleInterval) / float64(time.Millisecond),
+		FrameCount:                frameCount,
+		SampleCount:               sampleCount,
+	})
+}
+
+func createPromotionFixture(t *testing.T) (string, processingWorkspace) {
+	t.Helper()
+	tripDir := t.TempDir()
+	writeGenerationFixture(t, filepath.Join(tripDir, "frames"), "old")
+	if err := os.WriteFile(filepath.Join(tripDir, "dataset.jsonl"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write old dataset: %v", err)
+	}
+	workspace, err := newProcessingWorkspace(tripDir)
+	if err != nil {
+		t.Fatalf("new processing workspace: %v", err)
+	}
+	writeGenerationFixture(t, workspace.framesDir, "new")
+	if err := os.WriteFile(workspace.datasetPath, []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write staged dataset: %v", err)
+	}
+	return tripDir, workspace
+}
+
+func writeGenerationFixture(t *testing.T, dir string, generation string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir generation fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generation.txt"), []byte(generation), 0o644); err != nil {
+		t.Fatalf("write generation fixture: %v", err)
+	}
+}
+
+func assertGenerationFixture(t *testing.T, dir string, want string) {
+	t.Helper()
+	assertFileContent(t, filepath.Join(dir, "generation.txt"), want)
+}
+
+func assertFileContent(t *testing.T, path string, want string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(body) != want {
+		t.Fatalf("unexpected %s content: got=%q want=%q", path, string(body), want)
+	}
+}
+
+func mustRename(t *testing.T, source string, target string) {
+	t.Helper()
+	if err := os.Rename(source, target); err != nil {
+		t.Fatalf("rename %s to %s: %v", source, target, err)
+	}
+}
+
+func writeJSONLinesFile(t *testing.T, path string, rows []runTripRecord) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create JSONL file: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	for _, row := range rows {
+		if err := encoder.Encode(row); err != nil {
+			_ = file.Close()
+			t.Fatalf("encode JSONL row: %v", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close JSONL file: %v", err)
+	}
 }
 
 func writeJPEG(t *testing.T, path string, brightness uint8) {

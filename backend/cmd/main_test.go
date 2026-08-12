@@ -2,10 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"awesomeProject/internal/capture"
 	datasetproc "awesomeProject/internal/dataset"
 )
 
@@ -31,6 +39,42 @@ func TestBackendListenAddressDefaultsToLoopback(t *testing.T) {
 	}
 }
 
+func TestBackendHealthResponseIdentifiesStopSignLab(t *testing.T) {
+	health := backendHealthResponse()
+	if health["status"] != "ok" || health["service"] != "stop-sign-lab-backend" {
+		t.Fatalf("unexpected backend health identity: %+v", health)
+	}
+}
+
+func TestWriteJSONDisablesBrowserCaching(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeJSON(recorder, http.StatusOK, map[string]bool{"fivemConnected": true})
+
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("unexpected JSON cache policy: got=%q want=%q", got, "no-store")
+	}
+	if !strings.Contains(recorder.Body.String(), `"fivemConnected":true`) {
+		t.Fatalf("unexpected JSON body: %s", recorder.Body.String())
+	}
+}
+
+func TestRunBackendReturnsListenerFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve listener: %v", err)
+	}
+	defer listener.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	t.Setenv("HOST", "127.0.0.1")
+	t.Setenv("PORT", strconv.Itoa(port))
+
+	err = runBackend([]string{"serve"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "failed to bind capture API") {
+		t.Fatalf("unexpected backend startup result: %v", err)
+	}
+}
+
 func TestRunReportRunsWritesDatasetReport(t *testing.T) {
 	root := t.TempDir()
 	runDir := filepath.Join(root, "run-001")
@@ -53,12 +97,9 @@ func TestRunReportRunsWritesDatasetReport(t *testing.T) {
 					Steering: 0.1,
 				},
 				Aux: datasetproc.GroupedLabelAux{
-					FutureYawDelta:         15.0,
-					FutureHorizonSeconds:   0.2,
-					FutureSpeedDelta:       0.0,
-					FutureSpeedDeltaTarget: 0.0,
-					FutureSpeed:            5.0,
-					FutureSpeedTarget:      5.0,
+					FutureHorizonSeconds: 0.2,
+					FutureSpeed:          5.0,
+					FutureSpeedTarget:    5.0,
 				},
 			},
 			TelemetryHistory: []datasetproc.GroupedTelemetryItem{
@@ -104,6 +145,24 @@ func TestRunProcessRunsWritesDatasetReport(t *testing.T) {
 
 	configPath := writeCLIConfig(t)
 	t.Setenv("FSD_CONFIG_PATH", configPath)
+	datasetConfig, err := capture.LoadDatasetConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadDatasetConfig: %v", err)
+	}
+	processor := datasetproc.NewProcessor(datasetProcessorOptions(datasetConfig)...)
+	writeCommandJSONFile(t, filepath.Join(tripDir, "processing.json"), datasetproc.ProcessingStatus{
+		State:                     "completed",
+		ConfigFingerprint:         processor.ConfigFingerprint(),
+		ImageWidth:                datasetConfig.ImageWidth,
+		ImageHeight:               datasetConfig.ImageHeight,
+		ImageOffsets:              append([]int(nil), datasetConfig.ImageOffsets...),
+		TelemetryOffsets:          append([]int(nil), datasetConfig.TelemetryOffsets...),
+		FutureOffsets:             append([]int(nil), datasetConfig.FutureOffsets...),
+		TelemetrySampleIntervalMs: float64(datasetConfig.TelemetrySampleInterval) / float64(time.Millisecond),
+		FrameCount:                1,
+		SampleCount:               0,
+	})
+	writeCommandDatasetJSONL(t, filepath.Join(tripDir, "dataset.jsonl"), nil)
 
 	if err := runProcessRuns([]string{"-root", root, "-workers", "1"}); err != nil {
 		t.Fatalf("runProcessRuns: %v", err)
@@ -125,8 +184,6 @@ window_size = 3
 frame_stride = 2
 sample_stride = 2
 label_tolerance = "100ms"
-future_speed_delta_clip = 2.0
-future_speed_delta_normalize = true
 sync_flash_brightness_threshold = 245.0
 sync_flash_frame_limit = 90
 `)

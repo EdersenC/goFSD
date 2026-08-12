@@ -20,22 +20,22 @@ func TestLoadInferenceConfigReadsBackendInferenceSection(t *testing.T) {
 image_width = 320
 image_height = 180
 window_size = 5
-image_offsets = [-8, -6, -4, -2, 0]
+image_offsets = [-20, -15, -10, -5, 0]
 frame_stride = 2
 	sample_stride = 10
 	telemetry_sample_interval_ms = 50
-telemetry_offsets = [-8, -7, -6, -5, -4, -3, -2, -1, 0]
-future_offsets = [1, 2, 3, 4, 5, 6]
+telemetry_offsets = [-20, -15, -10, -5, 0]
+future_offsets = [2, 5, 10, 20]
 telemetry_feature_names = ["current_speed", "yaw_sin", "yaw_cos", "yaw_rate", "steering", "acceleration"]
-	control_target_names = ["desired_wheel_steer_normalized", "desired_speed_mps", "stop_probability"]
-aux_target_names = ["future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"]
+	control_target_names = ["future_speed_mps", "stop_intent"]
+aux_target_names = ["expert_throttle", "expert_brake", "actual_brake_pressure"]
 label_tolerance = "120ms"
 sync_flash_brightness_threshold = 250.0
 sync_flash_frame_limit = 45
 
 	[backend.inference]
-	planner_format = "temporal_telemetry_gru_v2"
-	control_contract = "parking_setpoint_v1"
+	planner_format = "temporal_stop_sign_v1"
+	control_contract = "stop_sign_motion_plan_v1"
 model_server_url = "http://127.0.0.1:9090"
 model_device = "cuda"
 source_id = "monitor-7"
@@ -82,7 +82,7 @@ jpeg_quality = 82
 	if cfg.TelemetrySampleInterval != 50*time.Millisecond {
 		t.Fatalf("unexpected telemetry sample interval: %s", cfg.TelemetrySampleInterval)
 	}
-	expectedHorizon := []int{50, 100, 150, 200, 250, 300}
+	expectedHorizon := []int{100, 250, 500, 1000}
 	if err := validateExactInts("test control horizon", cfg.ControlHorizonDtMs, expectedHorizon); err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +111,9 @@ func TestLoadInferenceConfigFallsBackToDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.PredictionTimeout != defaultPredictionTimeout {
 		t.Fatalf("unexpected default inference timeout: %s", cfg.PredictionTimeout)
 	}
+	if cfg.SourceID != autoInferenceSourceID {
+		t.Fatalf("unexpected default inference source: %s", cfg.SourceID)
+	}
 	if cfg.AlignmentTolerance != defaultAlignmentTolerance {
 		t.Fatalf("unexpected default alignment tolerance: %s", cfg.AlignmentTolerance)
 	}
@@ -128,8 +131,6 @@ frame_stride = 3
 	sample_stride = 9
 	telemetry_sample_interval_ms = 40
 label_tolerance = "75ms"
-future_speed_delta_clip = 1.5
-future_speed_delta_normalize = false
 sync_flash_brightness_threshold = 200.5
 sync_flash_frame_limit = 25
 `)
@@ -152,9 +153,6 @@ sync_flash_frame_limit = 25
 	}
 	if cfg.LabelTolerance != 75*time.Millisecond {
 		t.Fatalf("unexpected label tolerance: %s", cfg.LabelTolerance)
-	}
-	if cfg.FutureSpeedDeltaClip != 1.5 || cfg.FutureSpeedDeltaNormalize {
-		t.Fatalf("unexpected future-speed-delta transform config: %+v", cfg)
 	}
 	if cfg.SyncFlashBrightnessThreshold != 200.5 || cfg.SyncFlashFrameLimit != 25 {
 		t.Fatalf("unexpected sync-flash config: %+v", cfg)
@@ -212,5 +210,36 @@ sample_stride = 10
 
 	if _, err := LoadDatasetConfig(path); err == nil {
 		t.Fatalf("expected invalid image size config to fail")
+	}
+}
+
+func TestValidateDatasetConfigRejectsInvalidPastTimelines(t *testing.T) {
+	tests := []struct {
+		name             string
+		imageOffsets     []int
+		telemetryOffsets []int
+	}{
+		{name: "image offsets do not end at zero", imageOffsets: []int{-4, -2, -1}},
+		{name: "image offsets are unordered", imageOffsets: []int{-8, -4, -6, -2, 0}},
+		{name: "image offsets contain future frame", imageOffsets: []int{-4, 1, 0}},
+		{name: "telemetry offsets do not end at zero", telemetryOffsets: []int{-2, -1}},
+		{name: "telemetry offsets are duplicated", telemetryOffsets: []int{-2, -1, -1, 0}},
+		{name: "telemetry offsets contain future sample", telemetryOffsets: []int{-2, 1, 0}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := DefaultDatasetConfig()
+			if test.imageOffsets != nil {
+				config.ImageOffsets = test.imageOffsets
+				config.WindowSize = len(test.imageOffsets)
+			}
+			if test.telemetryOffsets != nil {
+				config.TelemetryOffsets = test.telemetryOffsets
+			}
+			if err := validateDatasetConfig("dataset", config); err == nil {
+				t.Fatal("expected invalid past timeline to fail")
+			}
+		})
 	}
 }

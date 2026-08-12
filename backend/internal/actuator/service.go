@@ -11,18 +11,18 @@ import (
 	"time"
 
 	"awesomeProject/internal/control"
-	"awesomeProject/internal/parkingcontrol"
+	"awesomeProject/internal/stopsigncontrol"
 )
 
 var ErrNotReady = errors.New("virtual controller is not ready")
 var ErrInvalidInputMode = errors.New("invalid actuator input mode")
-var ErrParkingControllerNotReady = errors.New("parking setpoint controller is not ready")
-var ErrParkingSessionOwned = errors.New("actuator is owned by an active parking inference session")
+var ErrStopSignControllerNotReady = errors.New("stop-sign motion controller is not ready")
+var ErrStopSignSessionOwned = errors.New("actuator is owned by an active stop-sign inference session")
 
 const InputModeNormalized = "normalized"
 
 const (
-	OwnerParkingInference  = "parking-inference"
+	OwnerStopSignInference = "stop-sign-inference"
 	OwnerCalibration       = "calibration"
 	maxTelemetryFutureSkew = 50 * time.Millisecond
 )
@@ -75,79 +75,79 @@ type commandEnvelope struct {
 	Owner       string `json:"owner,omitempty"`
 }
 
-type ParkingControllerState struct {
-	Ready                       bool               `json:"ready"`
-	Contract                    string             `json:"contract"`
-	Calibration                 ParkingCalibration `json:"calibration"`
-	PlanTimeoutMs               int64              `json:"planTimeoutMs"`
-	TelemetryTimeoutMs          int64              `json:"telemetryTimeoutMs"`
-	EstimatedActuationLatencyMs int64              `json:"estimatedActuationLatencyMs"`
-	ExpectedHorizonDtMs         []int              `json:"expectedHorizonDtMs"`
-	Owner                       string             `json:"owner,omitempty"`
-	Stopping                    bool               `json:"stopping"`
-	LastPlanID                  int64              `json:"lastPlanId,omitempty"`
-	LastPlanAcceptedAt          string             `json:"lastPlanAcceptedAt,omitempty"`
-	LastPlanAppliedID           int64              `json:"lastPlanAppliedId,omitempty"`
-	LastPlanAppliedAt           string             `json:"lastPlanAppliedAt,omitempty"`
-	LastFault                   string             `json:"lastFault,omitempty"`
+type StopSignControllerState struct {
+	Ready                       bool                `json:"ready"`
+	Contract                    string              `json:"contract"`
+	Calibration                 StopSignCalibration `json:"calibration"`
+	PlanTimeoutMs               int64               `json:"planTimeoutMs"`
+	TelemetryTimeoutMs          int64               `json:"telemetryTimeoutMs"`
+	EstimatedActuationLatencyMs int64               `json:"estimatedActuationLatencyMs"`
+	ExpectedHorizonDtMs         []int               `json:"expectedHorizonDtMs"`
+	Owner                       string              `json:"owner,omitempty"`
+	Stopping                    bool                `json:"stopping"`
+	LastPlanID                  int64               `json:"lastPlanId,omitempty"`
+	LastPlanAcceptedAt          string              `json:"lastPlanAcceptedAt,omitempty"`
+	LastPlanAppliedID           int64               `json:"lastPlanAppliedId,omitempty"`
+	LastPlanAppliedAt           string              `json:"lastPlanAppliedAt,omitempty"`
+	LastFault                   string              `json:"lastFault,omitempty"`
 }
 
-type ParkingControlDebug struct {
-	PlanID               int64                    `json:"plan_id"`
-	PlanState            string                   `json:"plan_state"`
-	PlanAgeMs            float64                  `json:"plan_age_ms"`
-	TargetDtMs           float64                  `json:"target_dt_ms"`
-	TelemetryAgeMs       float64                  `json:"telemetry_age_ms"`
-	SourceTelemetryAgeMs float64                  `json:"source_telemetry_age_ms"`
-	SourceReceiptSkewMs  float64                  `json:"source_receipt_skew_ms"`
-	SelectedSetpoint     *parkingcontrol.Setpoint `json:"selected_setpoint,omitempty"`
-	MeasuredWheelSteer   *float64                 `json:"measured_wheel_steer,omitempty"`
-	CurrentSpeedMPS      float64                  `json:"current_speed_mps"`
-	ControllerOutput     parkingcontrol.Output    `json:"controller_output"`
-	RequestedThrottle    float64                  `json:"requested_throttle"`
-	RequestedBrake       float64                  `json:"requested_brake"`
-	AppliedSteer         float64                  `json:"applied_steer"`
-	AppliedThrottle      float64                  `json:"applied_throttle"`
-	AppliedBrake         float64                  `json:"applied_brake"`
-	AppliedHandbrake     bool                     `json:"applied_handbrake"`
-	HorizonClamped       bool                     `json:"horizon_clamped"`
-	FailSafe             bool                     `json:"fail_safe"`
-	Fault                string                   `json:"fault,omitempty"`
+type StopSignControlDebug struct {
+	PlanID               int64                     `json:"plan_id"`
+	PlanState            string                    `json:"plan_state"`
+	PlanAgeMs            float64                   `json:"plan_age_ms"`
+	TargetDtMs           float64                   `json:"target_dt_ms"`
+	TelemetryAgeMs       float64                   `json:"telemetry_age_ms"`
+	SourceTelemetryAgeMs float64                   `json:"source_telemetry_age_ms"`
+	SourceReceiptSkewMs  float64                   `json:"source_receipt_skew_ms"`
+	SelectedSetpoint     *stopsigncontrol.Setpoint `json:"selected_setpoint,omitempty"`
+	MeasuredWheelSteer   *float64                  `json:"measured_wheel_steer,omitempty"`
+	CurrentSpeedMPS      float64                   `json:"current_speed_mps"`
+	ControllerOutput     stopsigncontrol.Output    `json:"controller_output"`
+	RequestedThrottle    float64                   `json:"requested_throttle"`
+	RequestedBrake       float64                   `json:"requested_brake"`
+	AppliedSteer         float64                   `json:"applied_steer"`
+	AppliedThrottle      float64                   `json:"applied_throttle"`
+	AppliedBrake         float64                   `json:"applied_brake"`
+	AppliedHandbrake     bool                      `json:"applied_handbrake"`
+	HorizonClamped       bool                      `json:"horizon_clamped"`
+	FailSafe             bool                      `json:"fail_safe"`
+	Fault                string                    `json:"fault,omitempty"`
 }
 
 type controllerSnapshot struct {
 	controlState
-	CommandID int64                `json:"commandId,omitempty"`
-	PlanID    int64                `json:"planId,omitempty"`
-	Enabled   bool                 `json:"enabled"`
-	Stale     bool                 `json:"stale"`
-	Holding   bool                 `json:"holding"`
-	TimedOut  bool                 `json:"timedOut"`
-	UpdatedAt string               `json:"updatedAt,omitempty"`
-	Safety    SafetyDebug          `json:"safety"`
-	Parking   *ParkingControlDebug `json:"parking,omitempty"`
+	CommandID int64                 `json:"commandId,omitempty"`
+	PlanID    int64                 `json:"planId,omitempty"`
+	Enabled   bool                  `json:"enabled"`
+	Stale     bool                  `json:"stale"`
+	Holding   bool                  `json:"holding"`
+	TimedOut  bool                  `json:"timedOut"`
+	UpdatedAt string                `json:"updatedAt,omitempty"`
+	Safety    SafetyDebug           `json:"safety"`
+	StopSign  *StopSignControlDebug `json:"stopSign,omitempty"`
 }
 
 type AppliedState = controllerSnapshot
 
 type State struct {
-	Supported                   bool                   `json:"supported"`
-	Ready                       bool                   `json:"ready"`
-	Platform                    string                 `json:"platform"`
-	ControllerType              string                 `json:"controllerType"`
-	TickHz                      int                    `json:"tickHz"`
-	StaleTimeoutMs              int64                  `json:"staleTimeoutMs"`
-	LastError                   string                 `json:"lastError,omitempty"`
-	LastCommand                 *commandEnvelope       `json:"lastCommand,omitempty"`
-	LastCommandID               int64                  `json:"lastCommandId,omitempty"`
-	Target                      controllerSnapshot     `json:"target"`
-	Applied                     AppliedState           `json:"applied"`
-	LastApplyError              string                 `json:"lastApplyError,omitempty"`
-	LastApplyAttemptedAt        string                 `json:"lastApplyAttemptedAt,omitempty"`
-	LastApplyAttemptedCommandID int64                  `json:"lastApplyAttemptedCommandId,omitempty"`
-	LastApplyAttemptedPlanID    int64                  `json:"lastApplyAttemptedPlanId,omitempty"`
-	LastApplySucceededAt        string                 `json:"lastApplySucceededAt,omitempty"`
-	ParkingController           ParkingControllerState `json:"parkingController"`
+	Supported                   bool                    `json:"supported"`
+	Ready                       bool                    `json:"ready"`
+	Platform                    string                  `json:"platform"`
+	ControllerType              string                  `json:"controllerType"`
+	TickHz                      int                     `json:"tickHz"`
+	StaleTimeoutMs              int64                   `json:"staleTimeoutMs"`
+	LastError                   string                  `json:"lastError,omitempty"`
+	LastCommand                 *commandEnvelope        `json:"lastCommand,omitempty"`
+	LastCommandID               int64                   `json:"lastCommandId,omitempty"`
+	Target                      controllerSnapshot      `json:"target"`
+	Applied                     AppliedState            `json:"applied"`
+	LastApplyError              string                  `json:"lastApplyError,omitempty"`
+	LastApplyAttemptedAt        string                  `json:"lastApplyAttemptedAt,omitempty"`
+	LastApplyAttemptedCommandID int64                   `json:"lastApplyAttemptedCommandId,omitempty"`
+	LastApplyAttemptedPlanID    int64                   `json:"lastApplyAttemptedPlanId,omitempty"`
+	LastApplySucceededAt        string                  `json:"lastApplySucceededAt,omitempty"`
+	StopSignController          StopSignControllerState `json:"stopSignController"`
 }
 
 type Service struct {
@@ -175,33 +175,33 @@ type Service struct {
 	liveTuning                  Tuning
 	savedTuning                 Tuning
 	telemetry                   telemetryProvider
-	parkingController           *parkingcontrol.Controller
-	parkingControllerErr        error
-	parkingPlan                 *parkingcontrol.Plan
-	parkingPlanSampler          *parkingcontrol.PlanSampler
-	parkingPlanID               int64
-	nextParkingPlanID           int64
-	parkingPlanAcceptedAt       time.Time
-	lastParkingTickAt           time.Time
-	parkingOwner                string
-	parkingStopping             bool
-	lastParkingAppliedID        int64
-	lastParkingAppliedAt        string
-	lastParkingFault            string
+	stopSignController          *stopsigncontrol.Controller
+	stopSignControllerErr       error
+	stopSignPlan                *stopsigncontrol.Plan
+	stopSignPlanSampler         *stopsigncontrol.PlanSampler
+	stopSignPlanID              int64
+	nextStopSignPlanID          int64
+	stopSignPlanAcceptedAt      time.Time
+	lastStopSignTickAt          time.Time
+	stopSignOwner               string
+	stopSignStopping            bool
+	lastStopSignAppliedID       int64
+	lastStopSignAppliedAt       string
+	lastStopSignFault           string
 }
 
 func NewService(cfg Config, configPath string, telemetry ...telemetryProvider) *Service {
 	tuning := cfg.Tuning()
-	parkingController, parkingControllerErr := parkingcontrol.New(cfg.ParkingController)
+	stopSignController, stopSignControllerErr := stopsigncontrol.New(cfg.StopSignController)
 	service := &Service{
-		cfg:                  cfg,
-		nowFunc:              time.Now,
-		supported:            runtime.GOOS == "windows",
-		configPath:           configPath,
-		liveTuning:           tuning,
-		savedTuning:          tuning,
-		parkingController:    parkingController,
-		parkingControllerErr: parkingControllerErr,
+		cfg:                   cfg,
+		nowFunc:               time.Now,
+		supported:             runtime.GOOS == "windows",
+		configPath:            configPath,
+		liveTuning:            tuning,
+		savedTuning:           tuning,
+		stopSignController:    stopSignController,
+		stopSignControllerErr: stopSignControllerErr,
 		applied: AppliedState{
 			Enabled: false,
 			Stale:   true,
@@ -267,13 +267,13 @@ func (s *Service) Close() error {
 	s.lastCmd = nil
 	s.applied = AppliedState{Enabled: false, Stale: true}
 	s.target = controllerSnapshot{Enabled: false, Stale: true}
-	s.resetParkingControlLocked()
-	s.parkingOwner = ""
-	s.parkingStopping = false
-	s.parkingPlanID = 0
-	s.lastParkingAppliedID = 0
-	s.lastParkingAppliedAt = ""
-	s.lastParkingFault = ""
+	s.resetStopSignControlLocked()
+	s.stopSignOwner = ""
+	s.stopSignStopping = false
+	s.stopSignPlanID = 0
+	s.lastStopSignAppliedID = 0
+	s.lastStopSignAppliedAt = ""
+	s.lastStopSignFault = ""
 	s.lastApplyError = ""
 	s.lastApplyAttemptedAt = ""
 	s.lastApplyAttemptedCommandID = 0
@@ -313,25 +313,25 @@ func (s *Service) Submit(req CommandRequest) (State, error) {
 	s.nextCommandID++
 	cmd.CommandID = s.nextCommandID
 	s.lastCmd = &cmd
-	if cmd.Owner == OwnerParkingInference && cmd.Enabled {
-		s.resetParkingControlLocked()
-		s.parkingOwner = cmd.Owner
-		s.parkingStopping = false
-		s.lastParkingFault = ""
+	if cmd.Owner == OwnerStopSignInference && cmd.Enabled {
+		s.resetStopSignControlLocked()
+		s.stopSignOwner = cmd.Owner
+		s.stopSignStopping = false
+		s.lastStopSignFault = ""
 	}
-	if !cmd.Enabled || cmd.Owner != OwnerParkingInference {
-		s.resetParkingControlLocked()
-		s.parkingStopping = false
+	if !cmd.Enabled || cmd.Owner != OwnerStopSignInference {
+		s.resetStopSignControlLocked()
+		s.stopSignStopping = false
 		if !cmd.Enabled {
-			s.parkingOwner = ""
+			s.stopSignOwner = ""
 		}
 	}
 	return s.stateLocked(), nil
 }
 
-// RequestParkingSafetyStop keeps the parking session under actuator ownership
+// RequestStopSignSafetyStop keeps the stopSign session under actuator ownership
 // while transitioning from service brake to handbrake using fresh vehicle speed.
-func (s *Service) RequestParkingSafetyStop() (State, error) {
+func (s *Service) RequestStopSignSafetyStop() (State, error) {
 	now := s.nowFunc().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -341,8 +341,8 @@ func (s *Service) RequestParkingSafetyStop() (State, error) {
 	if !s.ready || s.controller == nil {
 		return s.stateLocked(), ErrNotReady
 	}
-	if s.parkingOwner != "" && s.parkingOwner != OwnerParkingInference {
-		return s.stateLocked(), fmt.Errorf("%w: owner=%q", ErrParkingSessionOwned, s.parkingOwner)
+	if s.stopSignOwner != "" && s.stopSignOwner != OwnerStopSignInference {
+		return s.stateLocked(), fmt.Errorf("%w: owner=%q", ErrStopSignSessionOwned, s.stopSignOwner)
 	}
 
 	s.nextCommandID++
@@ -351,32 +351,32 @@ func (s *Service) RequestParkingSafetyStop() (State, error) {
 		Enabled:    true,
 		InputMode:  InputModeNormalized,
 		ReceivedAt: now.Format(time.RFC3339Nano),
-		Owner:      OwnerParkingInference,
+		Owner:      OwnerStopSignInference,
 	}
 	s.lastCmd = &cmd
-	s.parkingOwner = OwnerParkingInference
-	s.parkingStopping = true
-	s.resetParkingControlLocked()
-	s.lastParkingFault = ""
+	s.stopSignOwner = OwnerStopSignInference
+	s.stopSignStopping = true
+	s.resetStopSignControlLocked()
+	s.lastStopSignFault = ""
 	return s.stateLocked(), nil
 }
 
 func (s *Service) authorizeDirectCommandLocked(cmd commandEnvelope) error {
-	if s.parkingOwner != "" && cmd.Owner != s.parkingOwner {
+	if s.stopSignOwner != "" && cmd.Owner != s.stopSignOwner {
 		if !cmd.Enabled {
 			return nil
 		}
-		return fmt.Errorf("%w: owner=%q", ErrParkingSessionOwned, s.parkingOwner)
+		return fmt.Errorf("%w: owner=%q", ErrStopSignSessionOwned, s.stopSignOwner)
 	}
-	if cmd.Owner == OwnerParkingInference && cmd.Enabled && !controlStateEqual(cmd.controlState, controlState{}) {
-		return fmt.Errorf("%w: parking inference may submit only a neutral arm command or setpoint plan", ErrParkingSessionOwned)
+	if cmd.Owner == OwnerStopSignInference && cmd.Enabled && !controlStateEqual(cmd.controlState, controlState{}) {
+		return fmt.Errorf("%w: stopSign inference may submit only a neutral arm command or setpoint plan", ErrStopSignSessionOwned)
 	}
 	return nil
 }
 
-// SubmitParkingSetpointPlan accepts only the versioned physical-state contract
-// while an explicitly armed parking inference session owns the actuator.
-func (s *Service) SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (State, error) {
+// SubmitStopSignMotionPlan accepts only the versioned physical-state contract
+// while an explicitly armed stop-sign inference session owns the actuator.
+func (s *Service) SubmitStopSignMotionPlan(plan stopsigncontrol.Plan) (State, error) {
 	now := s.nowFunc().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -386,53 +386,53 @@ func (s *Service) SubmitParkingSetpointPlan(plan parkingcontrol.Plan) (State, er
 	if !s.ready || s.controller == nil {
 		return s.stateLocked(), ErrNotReady
 	}
-	if s.parkingControllerErr != nil || s.parkingController == nil || !s.cfg.ParkingCalibration.Verified {
-		return s.stateLocked(), fmt.Errorf("%w: verified vehicle calibration is required", ErrParkingControllerNotReady)
+	if s.stopSignControllerErr != nil || s.stopSignController == nil || !s.cfg.StopSignCalibration.Verified {
+		return s.stateLocked(), fmt.Errorf("%w: verified vehicle calibration is required", ErrStopSignControllerNotReady)
 	}
-	if s.parkingOwner != OwnerParkingInference || s.lastCmd == nil || !s.lastCmd.Enabled || s.lastCmd.Owner != OwnerParkingInference {
-		return s.stateLocked(), fmt.Errorf("%w: parking inference has not armed the actuator", ErrParkingSessionOwned)
+	if s.stopSignOwner != OwnerStopSignInference || s.lastCmd == nil || !s.lastCmd.Enabled || s.lastCmd.Owner != OwnerStopSignInference {
+		return s.stateLocked(), fmt.Errorf("%w: stopSign inference has not armed the actuator", ErrStopSignSessionOwned)
 	}
-	if s.parkingStopping {
-		return s.stateLocked(), fmt.Errorf("%w: parking safety stop is active", ErrParkingSessionOwned)
+	if s.stopSignStopping {
+		return s.stateLocked(), fmt.Errorf("%w: stopSign safety stop is active", ErrStopSignSessionOwned)
 	}
 	if detail := strings.TrimSpace(s.lastApplyError); detail != "" {
-		return s.stateLocked(), fmt.Errorf("parking controller apply fault is active: %s", detail)
+		return s.stateLocked(), fmt.Errorf("stopSign controller apply fault is active: %s", detail)
 	}
 	plan.ReceivedAtS = timeToSeconds(now)
-	if err := parkingcontrol.ValidatePlan(plan); err != nil {
+	if err := stopsigncontrol.ValidatePlan(plan); err != nil {
 		return s.stateLocked(), err
 	}
-	if err := validateParkingPlanTiming(plan.Points, s.cfg.ParkingExpectedHorizonDtMs); err != nil {
+	if err := validateStopSignPlanTiming(plan.Points, s.cfg.StopSignExpectedHorizonDtMs); err != nil {
 		return s.stateLocked(), err
 	}
-	if age := now.Sub(secondsToTime(plan.SampledAtS)); age < 0 || age > s.cfg.ParkingPlanTimeout {
-		return s.stateLocked(), fmt.Errorf("parking setpoint observation age %s is outside [0, %s]", age, s.cfg.ParkingPlanTimeout)
+	if age := now.Sub(secondsToTime(plan.SampledAtS)); age < 0 || age > s.cfg.StopSignPlanTimeout {
+		return s.stateLocked(), fmt.Errorf("stopSign setpoint observation age %s is outside [0, %s]", age, s.cfg.StopSignPlanTimeout)
 	}
-	if s.parkingPlan != nil && plan.SampledAtS <= s.parkingPlan.SampledAtS {
-		return s.stateLocked(), fmt.Errorf("parking setpoint sampled_at_s %.9f did not advance beyond %.9f", plan.SampledAtS, s.parkingPlan.SampledAtS)
+	if s.stopSignPlan != nil && plan.SampledAtS <= s.stopSignPlan.SampledAtS {
+		return s.stateLocked(), fmt.Errorf("stopSign setpoint sampled_at_s %.9f did not advance beyond %.9f", plan.SampledAtS, s.stopSignPlan.SampledAtS)
 	}
-	sampler, err := parkingcontrol.NewPlanSampler(plan)
+	sampler, err := stopsigncontrol.NewPlanSampler(plan)
 	if err != nil {
 		return s.stateLocked(), err
 	}
 	copyPlan := plan
-	copyPlan.Points = append([]parkingcontrol.Setpoint(nil), plan.Points...)
-	s.nextParkingPlanID++
-	s.parkingPlanID = s.nextParkingPlanID
-	s.parkingPlan = &copyPlan
-	s.parkingPlanSampler = sampler
-	s.parkingPlanAcceptedAt = now
-	s.lastParkingFault = ""
+	copyPlan.Points = append([]stopsigncontrol.Setpoint(nil), plan.Points...)
+	s.nextStopSignPlanID++
+	s.stopSignPlanID = s.nextStopSignPlanID
+	s.stopSignPlan = &copyPlan
+	s.stopSignPlanSampler = sampler
+	s.stopSignPlanAcceptedAt = now
+	s.lastStopSignFault = ""
 	return s.stateLocked(), nil
 }
 
-func validateParkingPlanTiming(points []parkingcontrol.Setpoint, expected []int) error {
+func validateStopSignPlanTiming(points []stopsigncontrol.Setpoint, expected []int) error {
 	if len(points) != len(expected) {
-		return fmt.Errorf("parking setpoint horizon timing differs: got %d points want %d", len(points), len(expected))
+		return fmt.Errorf("stopSign setpoint horizon timing differs: got %d points want %d", len(points), len(expected))
 	}
 	for index := range expected {
 		if points[index].DtMs != expected[index] {
-			return fmt.Errorf("parking setpoint horizon timing differs at %d: got=%dms want=%dms", index, points[index].DtMs, expected[index])
+			return fmt.Errorf("stopSign setpoint horizon timing differs at %d: got=%dms want=%dms", index, points[index].DtMs, expected[index])
 		}
 	}
 	return nil
@@ -482,7 +482,7 @@ func (s *Service) step(now time.Time) error {
 		TimedOut:     target.TimedOut,
 		UpdatedAt:    now.Format(time.RFC3339Nano),
 	}
-	if target.TimedOut && target.Parking == nil {
+	if target.TimedOut && target.StopSign == nil {
 		nextApplied.controlState = controlState{}
 		nextApplied.Enabled = false
 	}
@@ -493,14 +493,14 @@ func (s *Service) step(now time.Time) error {
 	if err := s.controller.Apply(nextApplied.controlState); err != nil {
 		s.lastApplyError = err.Error()
 		if nextApplied.PlanID > 0 {
-			s.lastParkingFault = err.Error()
+			s.lastStopSignFault = err.Error()
 		}
 		return err
 	}
 	s.applied = nextApplied
-	if target.Parking != nil && target.PlanID > 0 {
-		s.lastParkingAppliedID = target.PlanID
-		s.lastParkingAppliedAt = now.Format(time.RFC3339Nano)
+	if target.StopSign != nil && target.PlanID > 0 {
+		s.lastStopSignAppliedID = target.PlanID
+		s.lastStopSignAppliedAt = now.Format(time.RFC3339Nano)
 	}
 	s.recordAppliedControlsLocked(now, nextApplied.controlState)
 	s.lastApplyError = ""
@@ -509,14 +509,14 @@ func (s *Service) step(now time.Time) error {
 }
 
 func (s *Service) targetLocked(now time.Time) controllerSnapshot {
-	if s.parkingOwner == OwnerParkingInference {
-		if s.parkingStopping {
-			return s.parkingStopTargetLocked(now, "stopping")
+	if s.stopSignOwner == OwnerStopSignInference {
+		if s.stopSignStopping {
+			return s.stopSignStopTargetLocked(now, "stopping")
 		}
-		if s.parkingPlan != nil {
-			return s.parkingTargetLocked(now)
+		if s.stopSignPlan != nil {
+			return s.stopSignTargetLocked(now)
 		}
-		return s.parkingStopTargetLocked(now, "awaiting-plan")
+		return s.stopSignStopTargetLocked(now, "awaiting-plan")
 	}
 	target, stale, enabled, timedOut := resolveTarget(s.lastCmd, s.cfg.StaleTimeout, now)
 	var safety SafetyDebug
@@ -568,59 +568,59 @@ func commandID(cmd *commandEnvelope) int64 {
 	return cmd.CommandID
 }
 
-func (s *Service) parkingTargetLocked(now time.Time) controllerSnapshot {
-	trace := ParkingControlDebug{
-		PlanID:    s.parkingPlanID,
+func (s *Service) stopSignTargetLocked(now time.Time) controllerSnapshot {
+	trace := StopSignControlDebug{
+		PlanID:    s.stopSignPlanID,
 		PlanState: "active",
 	}
-	if s.parkingPlan == nil || s.parkingPlanSampler == nil {
-		return s.parkingFailSafeTargetLocked(now, trace, "parking setpoint plan is unavailable")
+	if s.stopSignPlan == nil || s.stopSignPlanSampler == nil {
+		return s.stopSignFailSafeTargetLocked(now, trace, "stopSign setpoint plan is unavailable")
 	}
 
-	planAge := now.Sub(secondsToTime(s.parkingPlan.SampledAtS))
+	planAge := now.Sub(secondsToTime(s.stopSignPlan.SampledAtS))
 	trace.PlanAgeMs = durationMs(planAge)
-	if planAge < 0 || planAge > s.cfg.ParkingPlanTimeout || now.Sub(s.parkingPlanAcceptedAt) > s.cfg.ParkingPlanTimeout {
-		return s.parkingFailSafeTargetLocked(now, trace, fmt.Sprintf("parking setpoint plan is stale: age=%s", planAge))
+	if planAge < 0 || planAge > s.cfg.StopSignPlanTimeout || now.Sub(s.stopSignPlanAcceptedAt) > s.cfg.StopSignPlanTimeout {
+		return s.stopSignFailSafeTargetLocked(now, trace, fmt.Sprintf("stopSign setpoint plan is stale: age=%s", planAge))
 	}
 
 	egoState, telemetryAt := s.latestActuatorEgoStateSnapshotLocked()
 	if egoState == nil {
-		return s.parkingFailSafeTargetLocked(now, trace, "actuator ego telemetry is unavailable")
+		return s.stopSignFailSafeTargetLocked(now, trace, "actuator ego telemetry is unavailable")
 	}
 	trace.CurrentSpeedMPS = egoState.SpeedMPS
 	trace.MeasuredWheelSteer = cloneFloatPtr(egoState.SteeringActual)
-	receiptAge, sourceAge, receiptSkew, err := s.validateParkingTelemetryTimingLocked(now, *egoState, telemetryAt)
+	receiptAge, sourceAge, receiptSkew, err := s.validateStopSignTelemetryTimingLocked(now, *egoState, telemetryAt)
 	trace.TelemetryAgeMs = durationMs(receiptAge)
 	trace.SourceTelemetryAgeMs = durationMs(sourceAge)
 	trace.SourceReceiptSkewMs = durationMs(receiptSkew)
 	if err != nil {
-		return s.parkingFailSafeTargetLocked(now, trace, err.Error())
+		return s.stopSignFailSafeTargetLocked(now, trace, err.Error())
 	}
-	if err := s.validateParkingEgoStateLocked(*egoState); err != nil {
-		return s.parkingFailSafeTargetLocked(now, trace, err.Error())
+	if err := s.validateStopSignEgoStateLocked(*egoState); err != nil {
+		return s.stopSignFailSafeTargetLocked(now, trace, err.Error())
 	}
 
 	dt := time.Second / time.Duration(s.cfg.TickHz)
-	if !s.lastParkingTickAt.IsZero() {
-		dt = now.Sub(s.lastParkingTickAt)
+	if !s.lastStopSignTickAt.IsZero() {
+		dt = now.Sub(s.lastStopSignTickAt)
 	}
-	s.lastParkingTickAt = now
-	if dt <= 0 || dt > s.cfg.ParkingController.MaxDT {
-		return s.parkingFailSafeTargetLocked(now, trace, fmt.Sprintf("parking controller dt %s is outside (0, %s]", dt, s.cfg.ParkingController.MaxDT))
+	s.lastStopSignTickAt = now
+	if dt <= 0 || dt > s.cfg.StopSignController.MaxDT {
+		return s.stopSignFailSafeTargetLocked(now, trace, fmt.Sprintf("stopSign controller dt %s is outside (0, %s]", dt, s.cfg.StopSignController.MaxDT))
 	}
 
-	targetAgeMs := durationMs(planAge + s.cfg.ParkingEstimatedActuationLatency)
+	targetAgeMs := durationMs(planAge + s.cfg.StopSignEstimatedActuationLatency)
 	trace.TargetDtMs = targetAgeMs
-	firstDt := float64(s.parkingPlan.Points[0].DtMs)
-	lastDt := float64(s.parkingPlan.Points[len(s.parkingPlan.Points)-1].DtMs)
+	firstDt := float64(s.stopSignPlan.Points[0].DtMs)
+	lastDt := float64(s.stopSignPlan.Points[len(s.stopSignPlan.Points)-1].DtMs)
 	trace.HorizonClamped = targetAgeMs < firstDt || targetAgeMs > lastDt
-	setpoint, err := s.parkingPlanSampler.SampleByAge(targetAgeMs)
+	setpoint, err := s.stopSignPlanSampler.SampleByAge(targetAgeMs)
 	if err != nil {
-		return s.parkingFailSafeTargetLocked(now, trace, err.Error())
+		return s.stopSignFailSafeTargetLocked(now, trace, err.Error())
 	}
 	setpointCopy := setpoint
 	trace.SelectedSetpoint = &setpointCopy
-	output, err := s.parkingController.Step(parkingcontrol.Input{
+	output, err := s.stopSignController.Step(stopsigncontrol.Input{
 		DesiredWheelSteer:  setpoint.DesiredWheelSteerNormalized,
 		DesiredSpeedMPS:    setpoint.DesiredSpeedMPS,
 		StopProbability:    setpoint.StopProbability,
@@ -630,7 +630,7 @@ func (s *Service) parkingTargetLocked(now time.Time) controllerSnapshot {
 	})
 	trace.ControllerOutput = output
 	if err != nil {
-		return s.parkingFailSafeTargetLocked(now, trace, err.Error())
+		return s.stopSignFailSafeTargetLocked(now, trace, err.Error())
 	}
 	throttle, brake := output.ThrottleBrake()
 	trace.RequestedThrottle = throttle
@@ -642,7 +642,7 @@ func (s *Service) parkingTargetLocked(now time.Time) controllerSnapshot {
 		Handbrake: output.Hold,
 	}
 	var safety SafetyDebug
-	target, safety = s.applyParkingSafetyLocked(target, egoState.SpeedMPS)
+	target, safety = s.applyStopSignSafetyLocked(target, egoState.SpeedMPS)
 	trace.AppliedSteer = target.Steer
 	trace.AppliedThrottle = target.Throttle
 	trace.AppliedBrake = target.Brake
@@ -651,18 +651,18 @@ func (s *Service) parkingTargetLocked(now time.Time) controllerSnapshot {
 	return controllerSnapshot{
 		controlState: target,
 		CommandID:    commandID(s.lastCmd),
-		PlanID:       s.parkingPlanID,
+		PlanID:       s.stopSignPlanID,
 		Enabled:      true,
 		Stale:        false,
 		Holding:      target.Handbrake,
 		TimedOut:     false,
 		UpdatedAt:    now.Format(time.RFC3339Nano),
 		Safety:       safety,
-		Parking:      &traceCopy,
+		StopSign:     &traceCopy,
 	}
 }
 
-func (s *Service) validateParkingEgoStateLocked(ego control.ActuatorEgoState) error {
+func (s *Service) validateStopSignEgoStateLocked(ego control.ActuatorEgoState) error {
 	if !ego.Valid {
 		reason := strings.TrimSpace(ego.InvalidReason)
 		if reason == "" {
@@ -676,15 +676,15 @@ func (s *Service) validateParkingEgoStateLocked(ego control.ActuatorEgoState) er
 	if math.IsNaN(ego.SpeedMPS) || math.IsInf(ego.SpeedMPS, 0) || ego.SpeedMPS < 0 {
 		return errors.New("measured speed is invalid")
 	}
-	if ego.VehicleModelHash != s.cfg.ParkingCalibration.VehicleModelHash {
-		return fmt.Errorf("vehicle model hash %d does not match calibrated hash %d", ego.VehicleModelHash, s.cfg.ParkingCalibration.VehicleModelHash)
+	if ego.VehicleModelHash != s.cfg.StopSignCalibration.VehicleModelHash {
+		return fmt.Errorf("vehicle model hash %d does not match calibrated hash %d", ego.VehicleModelHash, s.cfg.StopSignCalibration.VehicleModelHash)
 	}
 	return nil
 }
 
-func (s *Service) validateParkingTelemetryTimingLocked(now time.Time, ego control.ActuatorEgoState, receivedAt time.Time) (time.Duration, time.Duration, time.Duration, error) {
+func (s *Service) validateStopSignTelemetryTimingLocked(now time.Time, ego control.ActuatorEgoState, receivedAt time.Time) (time.Duration, time.Duration, time.Duration, error) {
 	receiptAge := now.Sub(receivedAt)
-	if receivedAt.IsZero() || receiptAge < 0 || receiptAge > s.cfg.ParkingTelemetryTimeout {
+	if receivedAt.IsZero() || receiptAge < 0 || receiptAge > s.cfg.StopSignTelemetryTimeout {
 		return receiptAge, 0, 0, fmt.Errorf("actuator ego telemetry receipt is stale: age=%s", receiptAge)
 	}
 	if ego.TimestampS <= 0 || math.IsNaN(ego.TimestampS) || math.IsInf(ego.TimestampS, 0) {
@@ -693,39 +693,39 @@ func (s *Service) validateParkingTelemetryTimingLocked(now time.Time, ego contro
 	sourceAt := secondsToTime(ego.TimestampS)
 	sourceAge := now.Sub(sourceAt)
 	receiptSkew := receivedAt.Sub(sourceAt)
-	if sourceAge < -maxTelemetryFutureSkew || sourceAge > s.cfg.ParkingTelemetryTimeout {
+	if sourceAge < -maxTelemetryFutureSkew || sourceAge > s.cfg.StopSignTelemetryTimeout {
 		return receiptAge, sourceAge, receiptSkew, fmt.Errorf("actuator ego telemetry source is stale: age=%s", sourceAge)
 	}
-	if receiptSkew < -maxTelemetryFutureSkew || receiptSkew > s.cfg.ParkingTelemetryTimeout {
+	if receiptSkew < -maxTelemetryFutureSkew || receiptSkew > s.cfg.StopSignTelemetryTimeout {
 		return receiptAge, sourceAge, receiptSkew, fmt.Errorf("actuator ego telemetry source/receipt skew is invalid: skew=%s", receiptSkew)
 	}
 	return receiptAge, sourceAge, receiptSkew, nil
 }
 
-func (s *Service) parkingFailSafeTargetLocked(now time.Time, trace ParkingControlDebug, fault string) controllerSnapshot {
-	s.parkingController.Reset()
-	s.lastParkingTickAt = time.Time{}
-	s.lastParkingFault = strings.TrimSpace(fault)
+func (s *Service) stopSignFailSafeTargetLocked(now time.Time, trace StopSignControlDebug, fault string) controllerSnapshot {
+	s.stopSignController.Reset()
+	s.lastStopSignTickAt = time.Time{}
+	s.lastStopSignFault = strings.TrimSpace(fault)
 	trace.PlanState = "fault"
 	trace.FailSafe = true
-	trace.Fault = s.lastParkingFault
-	return s.parkingStopSnapshotLocked(now, trace, true)
+	trace.Fault = s.lastStopSignFault
+	return s.stopSignStopSnapshotLocked(now, trace, true)
 }
 
-func (s *Service) parkingStopTargetLocked(now time.Time, planState string) controllerSnapshot {
-	trace := ParkingControlDebug{
-		PlanID:    s.parkingPlanID,
+func (s *Service) stopSignStopTargetLocked(now time.Time, planState string) controllerSnapshot {
+	trace := StopSignControlDebug{
+		PlanID:    s.stopSignPlanID,
 		PlanState: planState,
 	}
-	return s.parkingStopSnapshotLocked(now, trace, false)
+	return s.stopSignStopSnapshotLocked(now, trace, false)
 }
 
-func (s *Service) parkingStopSnapshotLocked(now time.Time, trace ParkingControlDebug, failed bool) controllerSnapshot {
+func (s *Service) stopSignStopSnapshotLocked(now time.Time, trace StopSignControlDebug, failed bool) controllerSnapshot {
 	ego, receivedAt := s.latestActuatorEgoStateSnapshotLocked()
 	speed := 0.0
 	speedKnown := false
 	if ego != nil {
-		receiptAge, sourceAge, receiptSkew, timingErr := s.validateParkingTelemetryTimingLocked(now, *ego, receivedAt)
+		receiptAge, sourceAge, receiptSkew, timingErr := s.validateStopSignTelemetryTimingLocked(now, *ego, receivedAt)
 		trace.TelemetryAgeMs = durationMs(receiptAge)
 		trace.SourceTelemetryAgeMs = durationMs(sourceAge)
 		trace.SourceReceiptSkewMs = durationMs(receiptSkew)
@@ -735,13 +735,13 @@ func (s *Service) parkingStopSnapshotLocked(now time.Time, trace ParkingControlD
 		}
 	}
 	target := controlState{}
-	if speedKnown && speed <= s.cfg.ParkingController.HoldSpeedMPS {
+	if speedKnown && speed <= s.cfg.StopSignController.HoldSpeedMPS {
 		target.Handbrake = true
 	} else {
-		target.Brake = s.cfg.ParkingController.StopBrakeEffort
+		target.Brake = s.cfg.StopSignController.StopBrakeEffort
 	}
 	var safety SafetyDebug
-	target, safety = s.applyParkingSafetyLocked(target, speed)
+	target, safety = s.applyStopSignSafetyLocked(target, speed)
 	trace.CurrentSpeedMPS = speed
 	trace.AppliedSteer = target.Steer
 	trace.AppliedThrottle = target.Throttle
@@ -750,7 +750,7 @@ func (s *Service) parkingStopSnapshotLocked(now time.Time, trace ParkingControlD
 	traceCopy := trace
 	planID := int64(0)
 	if failed {
-		planID = s.parkingPlanID
+		planID = s.stopSignPlanID
 	}
 	return controllerSnapshot{
 		controlState: target,
@@ -762,11 +762,11 @@ func (s *Service) parkingStopSnapshotLocked(now time.Time, trace ParkingControlD
 		TimedOut:     failed,
 		UpdatedAt:    now.Format(time.RFC3339Nano),
 		Safety:       safety,
-		Parking:      &traceCopy,
+		StopSign:     &traceCopy,
 	}
 }
 
-func (s *Service) applyParkingSafetyLocked(input controlState, currentSpeedMPS float64) (controlState, SafetyDebug) {
+func (s *Service) applyStopSignSafetyLocked(input controlState, currentSpeedMPS float64) (controlState, SafetyDebug) {
 	target := controlState{
 		Steer:     clamp(input.Steer, -1, 1),
 		Throttle:  clamp(input.Throttle, 0, 1),
@@ -939,14 +939,14 @@ func (s *Service) latestActuatorEgoStateSnapshotLocked() (*control.ActuatorEgoSt
 	return s.telemetry.LatestActuatorEgoStateSnapshot()
 }
 
-func (s *Service) resetParkingControlLocked() {
-	if s.parkingController != nil {
-		s.parkingController.Reset()
+func (s *Service) resetStopSignControlLocked() {
+	if s.stopSignController != nil {
+		s.stopSignController.Reset()
 	}
-	s.parkingPlan = nil
-	s.parkingPlanSampler = nil
-	s.parkingPlanAcceptedAt = time.Time{}
-	s.lastParkingTickAt = time.Time{}
+	s.stopSignPlan = nil
+	s.stopSignPlanSampler = nil
+	s.stopSignPlanAcceptedAt = time.Time{}
+	s.lastStopSignTickAt = time.Time{}
 }
 
 func (s *Service) recordAppliedControlsLocked(now time.Time, applied controlState) {
@@ -978,24 +978,24 @@ func (s *Service) stateLocked() State {
 		LastApplyAttemptedCommandID: s.lastApplyAttemptedCommandID,
 		LastApplyAttemptedPlanID:    s.lastApplyAttemptedPlanID,
 		LastApplySucceededAt:        s.lastApplySucceededAt,
-		ParkingController: ParkingControllerState{
-			Ready:                       s.parkingController != nil && s.parkingControllerErr == nil && s.cfg.ParkingCalibration.Verified,
-			Contract:                    parkingcontrol.ParkingSetpointContractV1,
-			Calibration:                 s.cfg.ParkingCalibration,
-			PlanTimeoutMs:               s.cfg.ParkingPlanTimeout.Milliseconds(),
-			TelemetryTimeoutMs:          s.cfg.ParkingTelemetryTimeout.Milliseconds(),
-			EstimatedActuationLatencyMs: s.cfg.ParkingEstimatedActuationLatency.Milliseconds(),
-			ExpectedHorizonDtMs:         append([]int(nil), s.cfg.ParkingExpectedHorizonDtMs...),
-			Owner:                       s.parkingOwner,
-			Stopping:                    s.parkingStopping,
-			LastPlanID:                  s.parkingPlanID,
-			LastPlanAppliedID:           s.lastParkingAppliedID,
-			LastPlanAppliedAt:           s.lastParkingAppliedAt,
-			LastFault:                   s.lastParkingFault,
+		StopSignController: StopSignControllerState{
+			Ready:                       s.stopSignController != nil && s.stopSignControllerErr == nil && s.cfg.StopSignCalibration.Verified,
+			Contract:                    stopsigncontrol.StopSignMotionPlanContractV1,
+			Calibration:                 s.cfg.StopSignCalibration,
+			PlanTimeoutMs:               s.cfg.StopSignPlanTimeout.Milliseconds(),
+			TelemetryTimeoutMs:          s.cfg.StopSignTelemetryTimeout.Milliseconds(),
+			EstimatedActuationLatencyMs: s.cfg.StopSignEstimatedActuationLatency.Milliseconds(),
+			ExpectedHorizonDtMs:         append([]int(nil), s.cfg.StopSignExpectedHorizonDtMs...),
+			Owner:                       s.stopSignOwner,
+			Stopping:                    s.stopSignStopping,
+			LastPlanID:                  s.stopSignPlanID,
+			LastPlanAppliedID:           s.lastStopSignAppliedID,
+			LastPlanAppliedAt:           s.lastStopSignAppliedAt,
+			LastFault:                   s.lastStopSignFault,
 		},
 	}
-	if !s.parkingPlanAcceptedAt.IsZero() {
-		state.ParkingController.LastPlanAcceptedAt = s.parkingPlanAcceptedAt.Format(time.RFC3339Nano)
+	if !s.stopSignPlanAcceptedAt.IsZero() {
+		state.StopSignController.LastPlanAcceptedAt = s.stopSignPlanAcceptedAt.Format(time.RFC3339Nano)
 	}
 	if s.lastCmd != nil {
 		copyCmd := *s.lastCmd
@@ -1057,7 +1057,7 @@ func buildCommandEnvelope(req CommandRequest, now time.Time) (commandEnvelope, e
 		ReceivedAt:  now.Format(time.RFC3339Nano),
 		Owner:       strings.ToLower(strings.TrimSpace(req.Owner)),
 	}
-	if cmd.Owner != "" && cmd.Owner != OwnerParkingInference && cmd.Owner != OwnerCalibration {
+	if cmd.Owner != "" && cmd.Owner != OwnerStopSignInference && cmd.Owner != OwnerCalibration {
 		return commandEnvelope{}, fmt.Errorf("invalid actuator owner %q", req.Owner)
 	}
 	if req.Enabled != nil {

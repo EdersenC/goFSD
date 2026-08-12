@@ -32,6 +32,7 @@ var (
 	ErrNotRunning          = errors.New("capture is not running")
 	ErrStartFailed         = errors.New("failed to start capture")
 	ErrStopFailed          = errors.New("failed to stop capture")
+	ErrSnapshotFailed      = errors.New("failed to capture snapshot")
 	ErrUnsupportedFFmpeg   = errors.New("ffmpeg build does not support required capture features")
 )
 
@@ -48,6 +49,8 @@ type Source struct {
 	Height       int    `json:"height,omitempty"`
 	IsFallback   bool   `json:"isFallback"`
 	OutputIndex  int    `json:"-"`
+	ProcessName  string `json:"-"`
+	WindowClass  string `json:"-"`
 }
 
 type StartRequest struct {
@@ -77,6 +80,23 @@ type StopResult struct {
 	OutputBytes int64  `json:"outputBytes"`
 }
 
+type SnapshotRequest struct {
+	SourceID           string `json:"sourceId"`
+	OutputFile         string `json:"outputFile,omitempty"`
+	PreferredMonitorID string `json:"preferredMonitorId,omitempty"`
+	CropToWindow       *bool  `json:"cropToWindow,omitempty"`
+}
+
+type SnapshotResult struct {
+	Status            string        `json:"status"`
+	OutputFile        string        `json:"outputFile"`
+	OutputBytes       int64         `json:"outputBytes"`
+	CaptureBackend    string        `json:"captureBackend,omitempty"`
+	SelectedMonitorID string        `json:"selectedMonitorId,omitempty"`
+	CropApplied       bool          `json:"cropApplied,omitempty"`
+	DetectedWindow    *WindowBounds `json:"detectedWindowBounds,omitempty"`
+}
+
 type CommandFactory func(name string, args ...string) *exec.Cmd
 type SourceDiscovery func(ctx context.Context) ([]Source, error)
 type CapabilityProbe func(ctx context.Context, ffmpegBin string, capability string) (bool, error)
@@ -97,7 +117,8 @@ type Service struct {
 	discover   SourceDiscovery
 	probe      CapabilityProbe
 
-	active *session
+	active         *session
+	snapshotActive bool
 }
 
 type session struct {
@@ -119,12 +140,14 @@ type monitorInfo struct {
 }
 
 type windowInfo struct {
-	Handle string
-	Title  string
-	X      int
-	Y      int
-	Width  int
-	Height int
+	Handle      string
+	Title       string
+	ProcessName string
+	WindowClass string
+	X           int
+	Y           int
+	Width       int
+	Height      int
 }
 
 type WindowBounds struct {
@@ -248,7 +271,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 	}
 
 	s.mu.Lock()
-	if s.active != nil {
+	if s.active != nil || s.snapshotActive {
 		s.mu.Unlock()
 		return StartResult{}, ErrAlreadyRunning
 	}
@@ -310,6 +333,80 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (StartResult, err
 		PID:               cmd.Process.Pid,
 		OutputFile:        outputFile,
 		LogFile:           logFile,
+		CaptureBackend:    spec.backend,
+		SelectedMonitorID: spec.selectedMonitorID,
+		CropApplied:       spec.cropApplied,
+		DetectedWindow:    spec.detectedWindow,
+	}, nil
+}
+
+// Snapshot captures one visual evidence frame without starting a recording session.
+// It is intentionally unavailable while capture is active so probe evidence cannot
+// compete with a training recording for the same GPU desktop source.
+func (s *Service) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotResult, error) {
+	sources, err := s.discover(ctx)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	spec, err := s.resolveCaptureSpec(
+		ctx,
+		sources,
+		strings.TrimSpace(req.SourceID),
+		strings.TrimSpace(req.PreferredMonitorID),
+		shouldCropToWindowSnapshot(req),
+	)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+
+	s.mu.Lock()
+	if s.active != nil || s.snapshotActive {
+		s.mu.Unlock()
+		return SnapshotResult{}, ErrAlreadyRunning
+	}
+	s.snapshotActive = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.snapshotActive = false
+		s.mu.Unlock()
+	}()
+
+	stamp := s.nowFunc().UTC().Format("20060102T150405.000000000Z")
+	requested := strings.TrimSpace(req.OutputFile)
+	if requested == "" {
+		requested = path.Join("probe-evidence", "snapshot-"+stamp+".png")
+	}
+	outputFile, err := s.resolveOutputFile("probe-"+stamp, requested)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	ext := strings.ToLower(filepath.Ext(outputFile))
+	if ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
+		return SnapshotResult{}, fmt.Errorf("%w: snapshot output must use .png, .jpg, or .jpeg", ErrInvalidRequest)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
+		return SnapshotResult{}, fmt.Errorf("%w: %v", ErrSnapshotFailed, err)
+	}
+
+	cmd := s.newCommand(s.ffmpegBin, buildSnapshotFFmpegArgs(spec, outputFile)...)
+	combined, err := cmd.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(combined))
+		if len(message) > 1000 {
+			message = message[len(message)-1000:]
+		}
+		return SnapshotResult{}, fmt.Errorf("%w: %v: %s", ErrSnapshotFailed, err, message)
+	}
+	info, err := os.Stat(outputFile)
+	if err != nil || info.Size() <= 0 {
+		return SnapshotResult{}, fmt.Errorf("%w: output validation failed for %s", ErrSnapshotFailed, outputFile)
+	}
+
+	return SnapshotResult{
+		Status:            "captured",
+		OutputFile:        outputFile,
+		OutputBytes:       info.Size(),
 		CaptureBackend:    spec.backend,
 		SelectedMonitorID: spec.selectedMonitorID,
 		CropApplied:       spec.cropApplied,
@@ -509,7 +606,7 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 	for _, w := range windows {
 		title := strings.TrimSpace(w.Title)
 		handle := strings.TrimSpace(w.Handle)
-		if title == "" || handle == "" || !isFiveMTitle(title) {
+		if title == "" || handle == "" || !isFiveMGameWindow(w) {
 			continue
 		}
 
@@ -542,6 +639,8 @@ func buildSources(windows []windowInfo, monitors []monitorInfo) []Source {
 			OffsetY:      w.Y,
 			Width:        w.Width,
 			Height:       w.Height,
+			ProcessName:  w.ProcessName,
+			WindowClass:  w.WindowClass,
 		})
 	}
 
@@ -596,6 +695,8 @@ public class Win32 {
   [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
 }
 "@
 
@@ -615,7 +716,16 @@ $windows = New-Object System.Collections.Generic.List[string]
     $height = $rect.Bottom - $rect.Top
     if ($width -le 0 -or $height -le 0) { return $true }
     $handle = ('0x{0:X}' -f [Int64]$hWnd)
-    $windows.Add("$handle|$title|$($rect.Left)|$($rect.Top)|$width|$height")
+    $processId = [uint32]0
+    [void][Win32]::GetWindowThreadProcessId($hWnd, [ref]$processId)
+    $processName = ""
+    if ($processId -gt 0) {
+      try { $processName = [System.Diagnostics.Process]::GetProcessById([int]$processId).ProcessName } catch {}
+    }
+    $classNameBuilder = New-Object System.Text.StringBuilder(256)
+    [void][Win32]::GetClassName($hWnd, $classNameBuilder, $classNameBuilder.Capacity)
+    $className = $classNameBuilder.ToString()
+    $windows.Add("$handle|$title|$($rect.Left)|$($rect.Top)|$width|$height|$processName|$className")
   }
   return $true
 }, [IntPtr]::Zero) | Out-Null
@@ -638,8 +748,8 @@ func parseWindows(raw string) []windowInfo {
 			continue
 		}
 
-		parts := strings.SplitN(line, "|", 6)
-		if len(parts) != 6 {
+		parts := strings.SplitN(line, "|", 8)
+		if len(parts) != 8 {
 			continue
 		}
 		handle := strings.TrimSpace(parts[0])
@@ -648,17 +758,21 @@ func parseWindows(raw string) []windowInfo {
 		y, errY := strconv.Atoi(strings.TrimSpace(parts[3]))
 		width, errW := strconv.Atoi(strings.TrimSpace(parts[4]))
 		height, errH := strconv.Atoi(strings.TrimSpace(parts[5]))
+		processName := strings.TrimSpace(parts[6])
+		windowClass := strings.TrimSpace(parts[7])
 		if handle == "" || title == "" || errX != nil || errY != nil || errW != nil || errH != nil || width <= 0 || height <= 0 {
 			continue
 		}
 
 		windows = append(windows, windowInfo{
-			Handle: handle,
-			Title:  title,
-			X:      x,
-			Y:      y,
-			Width:  width,
-			Height: height,
+			Handle:      handle,
+			Title:       title,
+			ProcessName: processName,
+			WindowClass: windowClass,
+			X:           x,
+			Y:           y,
+			Width:       width,
+			Height:      height,
 		})
 	}
 	return windows
@@ -749,6 +863,30 @@ func buildFFmpegArgs(spec captureSpec, outputFile string) []string {
 	)
 
 	return args
+}
+
+func buildSnapshotFFmpegArgs(spec captureSpec, outputFile string) []string {
+	args := []string{"-y"}
+	switch spec.backend {
+	case "ddagrab":
+		args = append(args, "-f", spec.inputFormat, "-i", spec.input, "-vf", spec.videoFilter)
+	case "gdigrab":
+		args = append(args,
+			"-f", spec.inputFormat,
+			"-framerate", "30",
+			"-draw_mouse", "0",
+			"-i", spec.input,
+			"-vf", spec.videoFilter,
+		)
+	}
+	return append(args, "-frames:v", "1", outputFile)
+}
+
+func shouldCropToWindowSnapshot(req SnapshotRequest) bool {
+	if req.CropToWindow == nil {
+		return true
+	}
+	return *req.CropToWindow
 }
 
 func selectSource(sources []Source, sourceID string) (Source, error) {
@@ -958,7 +1096,7 @@ func bestMonitorForWindow(sources []Source, window Source) (Source, bool) {
 
 func preferredWindowSource(sources []Source) (Source, bool) {
 	for _, source := range sources {
-		if source.CaptureType == "window" && isPreferredGameWindow(source.Name) {
+		if source.CaptureType == "window" && isPreferredGameSource(source) {
 			return source, true
 		}
 	}
@@ -1071,6 +1209,35 @@ func isPreferredGameWindow(name string) bool {
 		return false
 	}
 	return true
+}
+
+func isPreferredGameSource(source Source) bool {
+	if isFiveMGameProcess(source.ProcessName) || isFiveMGameWindowClass(source.WindowClass) {
+		return isFiveMTitle(source.Name)
+	}
+	return isPreferredGameWindow(source.Name)
+}
+
+func isFiveMGameWindow(window windowInfo) bool {
+	if !isFiveMTitle(window.Title) {
+		return false
+	}
+	if isFiveMGameProcess(window.ProcessName) || isFiveMGameWindowClass(window.WindowClass) {
+		return true
+	}
+	if strings.TrimSpace(window.ProcessName) != "" || strings.TrimSpace(window.WindowClass) != "" {
+		return false
+	}
+	return isPreferredGameWindow(window.Title)
+}
+
+func isFiveMGameProcess(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(n, "fivem") && strings.Contains(n, "gtaprocess")
+}
+
+func isFiveMGameWindowClass(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "grcWindow")
 }
 
 func runPowerShell(ctx context.Context, script string) (string, error) {

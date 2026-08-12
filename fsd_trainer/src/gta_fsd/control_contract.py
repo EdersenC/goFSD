@@ -7,53 +7,50 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from stop_sign_contract import RELEASE_POLICY_NAME
 
-LEGACY_PLANNER_FORMAT = "temporal_telemetry_gru_v1"
-PLANNER_FORMAT = "temporal_telemetry_gru_v2"
-PLANNER_FORMAT_VERSION = 2
 
-CONTROL_CONTRACT_NAME = "parking_setpoint_v1"
+LEGACY_PLANNER_FORMAT = "temporal_telemetry_gru_v2"
+PLANNER_FORMAT = "temporal_stop_sign_v1"
+PLANNER_FORMAT_VERSION = 1
+
+CONTROL_CONTRACT_NAME = "stop_sign_motion_plan_v1"
 CONTROL_CONTRACT_VERSION = 1
 CONTROL_HORIZON_DIRECTION = "forward"
-MAX_DESIRED_SPEED_MPS = 2.22
-DESIRED_WHEEL_STEER_NORMALIZED = "desired_wheel_steer_normalized"
-DESIRED_SPEED_MPS = "desired_speed_mps"
-STOP_PROBABILITY = "stop_probability"
-PARKING_CONTROL_TARGET_NAMES = (
-    DESIRED_WHEEL_STEER_NORMALIZED,
-    DESIRED_SPEED_MPS,
-    STOP_PROBABILITY,
+MAX_DESIRED_SPEED_MPS = 15.0
+FUTURE_SPEED_MPS = "future_speed_mps"
+STOP_INTENT = "stop_intent"
+STOP_SIGN_CONTROL_TARGET_NAMES = (
+    FUTURE_SPEED_MPS,
+    STOP_INTENT,
 )
 CONTROL_OUTPUT_ACTIVATIONS = {
-    DESIRED_WHEEL_STEER_NORMALIZED: "tanh",
-    DESIRED_SPEED_MPS: "sigmoid",
-    STOP_PROBABILITY: "sigmoid",
+    FUTURE_SPEED_MPS: "sigmoid",
+    STOP_INTENT: "sigmoid",
 }
 CONTROL_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
-    DESIRED_WHEEL_STEER_NORMALIZED: (-1.0, 1.0),
-    DESIRED_SPEED_MPS: (0.0, MAX_DESIRED_SPEED_MPS),
-    STOP_PROBABILITY: (0.0, 1.0),
+    FUTURE_SPEED_MPS: (0.0, MAX_DESIRED_SPEED_MPS),
+    STOP_INTENT: (0.0, 1.0),
 }
 DEFAULT_TELEMETRY_SAMPLE_INTERVAL_MS = 50
 
 LEGACY_CONTROL_CONTRACT_ERROR = (
-    "Checkpoint uses the incompatible legacy actuator-output contract "
-    "(steering, acceleration, brakePressureAvg). The parking planner requires "
-    "(desired_wheel_steer_normalized, desired_speed_mps, stop_probability); "
-    "legacy acceleration/brake heads cannot be safely adapted, so retraining is required."
+    "Checkpoint uses an incompatible actuator-output contract. "
+    "The stop-sign planner requires (future_speed_mps, stop_intent) at fixed future "
+    "horizons; legacy outputs cannot be safely adapted, so retraining is required."
 )
 
 
-def require_parking_control_target_names(
+def require_stop_sign_control_target_names(
     names: Sequence[Any],
     *,
     source: str,
 ) -> tuple[str, ...]:
     resolved = tuple(str(name).strip() for name in names)
-    if resolved != PARKING_CONTROL_TARGET_NAMES:
+    if resolved != STOP_SIGN_CONTROL_TARGET_NAMES:
         raise ValueError(
-            f"{source} must exactly match the parking control contract: "
-            f"expected={list(PARKING_CONTROL_TARGET_NAMES)} actual={list(resolved)}"
+            f"{source} must exactly match the stop-sign motion-plan contract: "
+            f"expected={list(STOP_SIGN_CONTROL_TARGET_NAMES)} actual={list(resolved)}"
         )
     return resolved
 
@@ -63,7 +60,7 @@ def control_contract_metadata() -> dict[str, Any]:
         "name": CONTROL_CONTRACT_NAME,
         "version": CONTROL_CONTRACT_VERSION,
         "direction": CONTROL_HORIZON_DIRECTION,
-        "targets": list(PARKING_CONTROL_TARGET_NAMES),
+        "targets": list(STOP_SIGN_CONTROL_TARGET_NAMES),
         "output_activations": dict(CONTROL_OUTPUT_ACTIVATIONS),
         "output_ranges": {
             name: list(value_range)
@@ -72,24 +69,23 @@ def control_contract_metadata() -> dict[str, Any]:
     }
 
 
-def apply_parking_control_activations(
+def apply_stop_sign_control_activations(
     raw_controls: Tensor,
     control_target_names: Sequence[Any],
 ) -> Tensor:
-    names = require_parking_control_target_names(
+    names = require_stop_sign_control_target_names(
         control_target_names,
         source="model control_target_names",
     )
     if raw_controls.ndim < 1 or raw_controls.shape[-1] != len(names):
         raise ValueError(
-            "raw control output width must match the parking control contract: "
+            "raw control output width must match the stop-sign motion-plan contract: "
             f"shape={tuple(raw_controls.shape)} targets={len(names)}"
         )
     return torch.stack(
         (
-            torch.tanh(raw_controls[..., 0]),
+            torch.sigmoid(raw_controls[..., 0]),
             torch.sigmoid(raw_controls[..., 1]),
-            torch.sigmoid(raw_controls[..., 2]),
         ),
         dim=-1,
     )
@@ -117,13 +113,13 @@ def derive_control_horizon_dt_ms(
 def resolve_checkpoint_control_horizon_dt_ms(checkpoint: Mapping[str, Any]) -> tuple[int, ...]:
     future_offsets = checkpoint.get("future_offsets")
     if not isinstance(future_offsets, list) or not future_offsets:
-        raise ValueError("parking checkpoint must include non-empty future_offsets")
+        raise ValueError("stop-sign checkpoint must include non-empty future_offsets")
     interval_ms = checkpoint.get("telemetry_sample_interval_ms")
     expected = derive_control_horizon_dt_ms(future_offsets, interval_ms)
 
     raw_horizon = checkpoint.get("control_horizon_dt_ms")
     if not isinstance(raw_horizon, list) or not raw_horizon:
-        raise ValueError("parking checkpoint must include non-empty control_horizon_dt_ms")
+        raise ValueError("stop-sign checkpoint must include non-empty control_horizon_dt_ms")
     actual = tuple(
         _positive_int(value, source=f"control_horizon_dt_ms[{index}]")
         for index, value in enumerate(raw_horizon)
@@ -165,7 +161,7 @@ def validate_checkpoint_control_contract(checkpoint: Mapping[str, Any]) -> tuple
 
     raw_contract = checkpoint.get("control_contract")
     if not isinstance(raw_contract, Mapping):
-        raise ValueError("parking checkpoint must include control_contract metadata")
+        raise ValueError("stop-sign checkpoint must include control_contract metadata")
     contract_name = str(raw_contract.get("name", "")).strip()
     if contract_name != CONTROL_CONTRACT_NAME:
         raise ValueError(
@@ -188,15 +184,15 @@ def validate_checkpoint_control_contract(checkpoint: Mapping[str, Any]) -> tuple
 
     checkpoint_names = checkpoint.get("control_target_names")
     if not isinstance(checkpoint_names, list):
-        raise ValueError("parking checkpoint must include control_target_names")
-    names = require_parking_control_target_names(
+        raise ValueError("stop-sign checkpoint must include control_target_names")
+    names = require_stop_sign_control_target_names(
         checkpoint_names,
         source="checkpoint control_target_names",
     )
     contract_targets = raw_contract.get("targets")
     if not isinstance(contract_targets, list):
         raise ValueError("control_contract.targets must be a list")
-    require_parking_control_target_names(
+    require_stop_sign_control_target_names(
         contract_targets,
         source="control_contract.targets",
     )
@@ -223,6 +219,17 @@ def validate_checkpoint_control_contract(checkpoint: Mapping[str, Any]) -> tuple
     if names != tuple(contract_targets):
         raise AssertionError("validated checkpoint control target metadata diverged unexpectedly")
 
+    release_policy = checkpoint.get("release_policy")
+    if release_policy is not None and not isinstance(release_policy, Mapping):
+        raise ValueError("stop-sign checkpoint release_policy metadata must be a mapping")
+    if isinstance(release_policy, Mapping) and (
+        release_policy.get("name") != RELEASE_POLICY_NAME
+        or release_policy.get("learned") is not False
+    ):
+        raise ValueError(
+            f"release_policy must be non-learned {RELEASE_POLICY_NAME}"
+        )
+
     return resolve_checkpoint_control_horizon_dt_ms(checkpoint)
 
 
@@ -230,8 +237,8 @@ def _looks_like_legacy_controls(checkpoint: Mapping[str, Any]) -> bool:
     raw_names = checkpoint.get("control_target_names")
     if not isinstance(raw_names, list):
         return False
-    names = {str(name).strip() for name in raw_names}
-    return bool(names & {"steering", "acceleration", "brakePressureAvg"})
+    names = tuple(str(name).strip() for name in raw_names)
+    return names != STOP_SIGN_CONTROL_TARGET_NAMES
 
 
 def _normalize_output_ranges(raw_ranges: Mapping[Any, Any]) -> dict[str, tuple[float, float]]:

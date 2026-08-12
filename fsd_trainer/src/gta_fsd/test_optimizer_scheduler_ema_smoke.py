@@ -38,16 +38,16 @@ class OptimizerSchedulerEmaSmokeTests(unittest.TestCase):
 
         torch.manual_seed(0)
         horizon = 2
-        control_dim = 3
-        aux_dim = 4
+        control_dim = 2
+        aux_dim = 3
         sample_count = 8
         batch_size = 2
 
         images = torch.randn(sample_count, 5, 3, 16, 16)
-        telemetry = torch.randn(sample_count, 9, 6)
-        state_inputs = torch.randn(sample_count, 3)
-        target_controls = torch.randn(sample_count, horizon, control_dim)
-        target_aux = torch.randn(sample_count, horizon, aux_dim)
+        telemetry = torch.randn(sample_count, 9, 1)
+        state_inputs = torch.rand(sample_count, 1)
+        target_controls = torch.rand(sample_count, horizon, control_dim)
+        target_aux = torch.rand(sample_count, horizon, aux_dim)
 
         loader = DataLoader(
             TensorDataset(images, telemetry, state_inputs, target_controls, target_aux),
@@ -71,8 +71,8 @@ class OptimizerSchedulerEmaSmokeTests(unittest.TestCase):
                 )
                 logits = self.proj(features).view(-1, horizon, control_dim + aux_dim)
                 return {
-                    "pred_controls": logits[:, :, :control_dim],
-                    "pred_aux": logits[:, :, control_dim:],
+                    "pred_controls": torch.sigmoid(logits[:, :, :control_dim]),
+                    "pred_aux": torch.sigmoid(logits[:, :, control_dim:]),
                 }
 
         model = TinyPlanner()
@@ -99,13 +99,9 @@ class OptimizerSchedulerEmaSmokeTests(unittest.TestCase):
             torch.device("cpu"),
             grad_clip_norm=1.0,
             future_offsets=(1, 2),
-            state_input_names=(
-                "route_direction_unknown",
-                "route_direction_keep_straight",
-                "route_direction_turn_left",
-            ),
-            control_target_names=("steering", "acceleration", "brakePressureAvg"),
-            aux_target_names=("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"),
+            state_input_names=("current_speed",),
+            control_target_names=("future_speed_mps", "stop_intent"),
+            aux_target_names=("expert_throttle", "expert_brake", "actual_brake_pressure"),
             aux_loss_weight=0.4,
             horizon_loss_weights=(1.0, 1.0),
             target_loss_weights={},
@@ -122,8 +118,8 @@ class OptimizerSchedulerEmaSmokeTests(unittest.TestCase):
                 model,
                 torch.device("cpu"),
                 future_offsets=(1, 2),
-                control_target_names=("steering", "acceleration", "brakePressureAvg"),
-                aux_target_names=("future_speed", "future_speed_delta", "future_yaw_delta", "future_yaw_rate"),
+                control_target_names=("future_speed_mps", "stop_intent"),
+                aux_target_names=("expert_throttle", "expert_brake", "actual_brake_pressure"),
                 target_transforms=None,
                 aux_loss_weight=0.4,
                 horizon_loss_weights=(1.0, 1.0),

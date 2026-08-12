@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-parking_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+stop_sign_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+stop_sign_backend_mode="${1:-serve}"
+
+if [[ "${stop_sign_backend_mode}" == "serve" ]]; then
+    npm --prefix "${stop_sign_project_root}/backend/cmd/web" run build
+fi
 
 if [[ "$(uname -s)" == "Linux" ]] \
     && uname -r | grep -qi microsoft \
     && command -v powershell.exe >/dev/null 2>&1 \
     && command -v wslpath >/dev/null 2>&1; then
-    parking_windows_script="$(wslpath -w "${parking_project_root}/scripts/dev-backend.ps1")"
-    parking_powershell_args=(
+    stop_sign_windows_script="$(wslpath -w "${stop_sign_project_root}/scripts/dev-backend.ps1")"
+    stop_sign_powershell_args=(
         -NoLogo
         -NoProfile
         -NonInteractive
         -ExecutionPolicy Bypass
-        -File "${parking_windows_script}"
+        -File "${stop_sign_windows_script}"
     )
     if [[ -n "${FSD_DATA_ROOT:-}" ]]; then
-        parking_data_root="${FSD_DATA_ROOT}"
-        if [[ "${parking_data_root}" == /* ]]; then
-            parking_data_root="$(wslpath -w "${parking_data_root}")"
+        stop_sign_data_root="${FSD_DATA_ROOT}"
+        if [[ "${stop_sign_data_root}" == /* ]]; then
+            stop_sign_data_root="$(wslpath -w "${stop_sign_data_root}")"
         fi
-        parking_powershell_args+=(-DataRoot "${parking_data_root}")
+        stop_sign_powershell_args+=(-DataRoot "${stop_sign_data_root}")
     fi
-    exec powershell.exe "${parking_powershell_args[@]}"
+    # The WSL launcher already built the bundle with the working Linux Node runtime.
+    stop_sign_powershell_args+=(-SkipWebBuild)
+    stop_sign_powershell_args+=("$@")
+    exec powershell.exe "${stop_sign_powershell_args[@]}"
 fi
 
-cd "${parking_project_root}/backend"
-exec go run ./cmd
+cd "${stop_sign_project_root}/backend"
+exec go run ./cmd "$@"
