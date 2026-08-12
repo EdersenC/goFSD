@@ -9,10 +9,14 @@ export const STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v5";
 export const STOP_SIGN_COLLECTION_QUEUE_STORAGE_KEY = "fsd.stop-sign-collection-queue.v1";
 export const LEGACY_IMPLICIT_STOP_SIGN_PLAN_STORAGE_KEY = "fsd.stop-sign-scenes.v4";
 export const DEFAULT_VARIANT_COUNT = 50;
+export const MINIMUM_VARIANT_COUNT = 2;
 export const DEFAULT_MOTION_VARIANCE_PCT = 20;
 export const MAXIMUM_MOTION_VARIANCE_PCT = 25;
 export const MAXIMUM_TARGET_SPEED_MPS = 15;
+export const MINIMUM_AUTO_TARGET_SPEED_MPS = 10;
 export const MINIMUM_ROLLING_CRUISE_SECONDS = 1.25;
+export const MINIMUM_CAPTURED_START_M = 16;
+export const MAXIMUM_START_DISTANCE_M = 250;
 const STOP_SIGN_LAUNCH_ACCELERATION_MPS2 = 3.5;
 const STOP_SIGN_BRAKING_DECELERATION_MPS2 = 3.8;
 const MPS_TO_MPH = 2.2369362921;
@@ -52,9 +56,9 @@ export function createStopSignEntry(index: number, location?: CatalogLocation): 
         autoVariations: {count: DEFAULT_VARIANT_COUNT, motionVariancePct: DEFAULT_MOTION_VARIANCE_PCT},
         stopDistanceM: 4,
         egoCenterOffsetM: 2.5,
-        startDistanceM: 35,
+        startDistanceM: 40,
         exitDistanceM: 8,
-        targetSpeedMps: 5,
+        targetSpeedMps: MINIMUM_AUTO_TARGET_SPEED_MPS,
         stopConfirmationMs: 250,
         attemptCount: 1,
         weather: "EXTRASUNNY",
@@ -230,15 +234,14 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
     if (entry.startPose && entry.egoStopPose && entry.exitPose) {
         const start = relativeTo(entry.startPose, entry.egoStopPose);
         const end = relativeTo(entry.exitPose, entry.egoStopPose);
-        const minimumRollingStartM = requiredRollingStartDistanceM(entry.targetSpeedMps);
-        if (start.longitudinal > -minimumRollingStartM) {
-            errors.push(`Start must be at least ${minimumRollingStartM.toFixed(0)} m before Stop to reach ${formatSpeed(entry.targetSpeedMps)} and record stable cruise.`);
+        if (start.longitudinal > -MINIMUM_CAPTURED_START_M) {
+            errors.push(`Start must be at least ${MINIMUM_CAPTURED_START_M} m before Stop to define the approach lane and cruise buffer.`);
         }
         if (end.longitudinal < 8) {
             errors.push("End must be at least 8 m beyond Stop so the release clip has enough temporal context.");
         }
-        if (distance(entry.startPose, entry.egoStopPose) > 250) {
-            errors.push("Start must be within 250 m of Stop.");
+        if (distance(entry.startPose, entry.egoStopPose) > MAXIMUM_START_DISTANCE_M) {
+            errors.push(`Start must be within ${MAXIMUM_START_DISTANCE_M} m of Stop.`);
         }
         if (distance(entry.exitPose, entry.egoStopPose) > 50) {
             errors.push("End must be within 50 m of Stop.");
@@ -248,14 +251,14 @@ export function validateStopSignEntry(entry: StopSignPlanEntry): string[] {
         }
     }
     const generated = entry.autoVariations;
-    if (!generated || !Number.isInteger(generated.count) || generated.count < 1 || generated.count > 100) {
-        errors.push("generated variant count must be a whole number from 1 to 100.");
+    if (!generated || !Number.isInteger(generated.count) || generated.count < MINIMUM_VARIANT_COUNT || generated.count > 100) {
+        errors.push(`generated variant count must be a whole number from ${MINIMUM_VARIANT_COUNT} to 100.`);
     }
     if (!generated || !Number.isFinite(generated.motionVariancePct) || generated.motionVariancePct < 0 || generated.motionVariancePct > MAXIMUM_MOTION_VARIANCE_PCT) {
         errors.push(`motion variance must be from 0 to ${MAXIMUM_MOTION_VARIANCE_PCT}%.`);
     }
-    if (!Number.isFinite(entry.targetSpeedMps) || entry.targetSpeedMps < .5 || entry.targetSpeedMps > MAXIMUM_TARGET_SPEED_MPS) {
-        errors.push(`target speed must be from 0.5 to ${MAXIMUM_TARGET_SPEED_MPS} m/s.`);
+    if (entry.targetSpeedMps !== MINIMUM_AUTO_TARGET_SPEED_MPS) {
+        errors.push(`automatic variants use a fixed ${MINIMUM_AUTO_TARGET_SPEED_MPS}–${MAXIMUM_TARGET_SPEED_MPS} m/s target-speed range.`);
     }
     if (!Number.isInteger(entry.stopConfirmationMs) || entry.stopConfirmationMs < 100 || entry.stopConfirmationMs > 1000) {
         errors.push("stop confirmation must be a whole number from 100 to 1,000 ms.");
@@ -271,6 +274,19 @@ export function requiredRollingStartDistanceM(targetSpeedMps: number): number {
     const cruiseDistanceM = targetSpeedMps * MINIMUM_ROLLING_CRUISE_SECONDS;
     const brakingDistanceM = targetSpeedMps ** 2 / (2 * STOP_SIGN_BRAKING_DECELERATION_MPS2);
     return accelerationDistanceM + cruiseDistanceM + brakingDistanceM;
+}
+
+export function automaticTargetSpeedRange(): {minimumMps: number, maximumMps: number} {
+    return {
+        minimumMps: MINIMUM_AUTO_TARGET_SPEED_MPS,
+        maximumMps: MAXIMUM_TARGET_SPEED_MPS,
+    };
+}
+
+export function coupledVariantStartDistanceM(baseStartDistanceM: number, baseTargetSpeedMps: number, targetSpeedMps: number): number {
+    const capturedCruiseBufferM = Math.max(0, baseStartDistanceM - requiredRollingStartDistanceM(baseTargetSpeedMps));
+    const targetDistanceM = requiredRollingStartDistanceM(targetSpeedMps) + capturedCruiseBufferM;
+    return Math.min(MAXIMUM_START_DISTANCE_M, Math.max(MINIMUM_CAPTURED_START_M, targetDistanceM));
 }
 
 export function metersPerSecondToMph(speedMps: number): number {
@@ -333,12 +349,15 @@ function cloneEntry(entry: StopSignPlanEntry): StopSignPlanEntry {
         startPose: entry.startPose ? {...entry.startPose} : undefined,
         egoStopPose: entry.egoStopPose ? {...entry.egoStopPose} : undefined,
         exitPose: entry.exitPose ? {...entry.exitPose} : undefined,
-        autoVariations: entry.autoVariations ? {...entry.autoVariations} : undefined,
+        autoVariations: entry.autoVariations ? {
+            ...entry.autoVariations,
+            count: Math.max(MINIMUM_VARIANT_COUNT, entry.autoVariations.count),
+        } : undefined,
         stopDistanceM: entry.stopDistanceM,
         egoCenterOffsetM: entry.egoCenterOffsetM,
         startDistanceM: entry.startDistanceM,
         exitDistanceM: entry.exitDistanceM,
-        targetSpeedMps: entry.targetSpeedMps,
+        targetSpeedMps: MINIMUM_AUTO_TARGET_SPEED_MPS,
         stopConfirmationMs: entry.stopConfirmationMs,
         attemptCount: entry.attemptCount,
         weather: entry.weather,

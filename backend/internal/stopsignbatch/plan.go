@@ -15,12 +15,13 @@ const (
 	MaximumExpandedJobs = 5000
 	MaximumAttemptCount = 50
 	MaximumAutoVariants = 100
+	MinimumAutoVariants = 2
 
 	DefaultStopDistanceM      = 3.0
 	DefaultEgoCenterOffsetM   = 2.5
 	DefaultStartDistanceM     = 40.0
 	DefaultExitDistanceM      = 8.0
-	DefaultTargetSpeedMPS     = 5.0
+	DefaultTargetSpeedMPS     = 10.0
 	DefaultStopConfirmationMS = 250
 	DefaultAttemptCount       = 1
 	DefaultWeather            = "EXTRASUNNY"
@@ -36,6 +37,7 @@ const (
 	minimumExitDistanceM      = 2.0
 	maximumExitDistanceM      = 50.0
 	minimumTargetSpeedMPS     = 0.5
+	minimumAutoTargetSpeedMPS = 10.0
 	maximumTargetSpeedMPS     = 15.0
 	minimumStopConfirmationMS = 100
 	maximumStopConfirmationMS = 1_000
@@ -108,8 +110,10 @@ type Variation struct {
 }
 
 // AutoVariationSpec expands one captured scene into deterministic collection
-// jobs. MotionVariancePct bounds route-distance and speed changes; the stop
-// target itself only receives a small absolute tolerance jitter.
+// jobs. MotionVariancePct bounds route and exit changes. Target speeds cover
+// the configured minimum through the global maximum. Each generated start is
+// derived from its target speed so faster jobs have enough
+// acceleration, stable-cruise, and braking distance.
 type AutoVariationSpec struct {
 	Count             int     `json:"count"`
 	MotionVariancePct float64 `json:"motionVariancePct"`
@@ -342,8 +346,8 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		return nil, err
 	}
 	spec := *entry.AutoVariations
-	if spec.Count < 1 || spec.Count > MaximumAutoVariants {
-		return nil, invalid("%s.autoVariations.count must be between 1 and %d", label, MaximumAutoVariants)
+	if spec.Count < MinimumAutoVariants || spec.Count > MaximumAutoVariants {
+		return nil, invalid("%s.autoVariations.count must be between %d and %d", label, MinimumAutoVariants, MaximumAutoVariants)
 	}
 	if math.IsNaN(spec.MotionVariancePct) || math.IsInf(spec.MotionVariancePct, 0) ||
 		spec.MotionVariancePct < 0 || spec.MotionVariancePct > maximumMotionVariancePct {
@@ -355,30 +359,33 @@ func expandCapturedEntry(seed, entryID string, entry Entry, entryIndex int) ([]J
 		return nil, err
 	}
 	baseStartDistanceM := planarDistance(*entry.StartPose, *entry.EgoStopPose)
-	if err := validateRollingApproachDistance(label, baseStartDistanceM, base.targetSpeedMPS); err != nil {
-		return nil, err
+	if base.targetSpeedMPS != minimumAutoTargetSpeedMPS {
+		return nil, invalid("%s.targetSpeedMps must equal %.1f for the automatic %.1f-%.1fm/s range", label, minimumAutoTargetSpeedMPS, minimumAutoTargetSpeedMPS, maximumTargetSpeedMPS)
 	}
 	jobs := make([]Job, 0, spec.Count)
 	for variantIndex := 0; variantIndex < spec.Count; variantIndex++ {
 		variationID := fmt.Sprintf("auto-%03d", variantIndex+1)
 		variantSeed := seed + ":" + entryID + ":" + variationID
+		baseline := variantIndex == 0
+		resolved := capturedVariantSettings(base, variantSeed, variantIndex)
 		startPose, stopPose, exitPose := capturedVariantPoses(
 			variantSeed,
 			*entry.StartPose,
 			*entry.EgoStopPose,
 			*entry.ExitPose,
 			spec.MotionVariancePct,
-			variantIndex == 0,
+			baseline,
 		)
-		resolved := capturedVariantSettings(base, variantSeed, spec.MotionVariancePct, variantIndex == 0)
-		startDistanceM := planarDistance(startPose, stopPose)
+		startDistanceM := coupledVariantStartDistanceM(baseStartDistanceM, base.targetSpeedMPS, resolved.targetSpeedMPS)
+		startPose = poseAtApproachDistance(startPose, stopPose, startDistanceM)
+		startDistanceM = planarDistance(startPose, stopPose)
 		exitDistanceM := planarDistance(stopPose, exitPose)
 		resolved.startDistanceM = startDistanceM
 		resolved.exitDistanceM = exitDistanceM
-		if variantIndex > 0 {
-			resolved.targetSpeedMPS = math.Min(resolved.targetSpeedMPS, maximumRollingTargetSpeedMPS(startDistanceM))
-		}
 		if err := validateSettings(resolved, label+"."+variationID); err != nil {
+			return nil, err
+		}
+		if err := validateRollingApproachDistance(label+"."+variationID, startDistanceM, resolved.targetSpeedMPS); err != nil {
 			return nil, err
 		}
 		if err := validateCapturedRoute(label+"."+variationID, startPose, stopPose, exitPose); err != nil {
@@ -435,10 +442,10 @@ func requiredRollingStartDistanceM(targetSpeedMPS float64) float64 {
 	return accelerationDistanceM + cruiseDistanceM + brakingDistanceM
 }
 
-func maximumRollingTargetSpeedMPS(startDistanceM float64) float64 {
-	quadratic := 1/(2*launchAccelerationMPS2) + 1/(2*brakingDecelerationMPS2)
-	discriminant := minimumRollingCruiseS*minimumRollingCruiseS + 4*quadratic*startDistanceM
-	return math.Min(maximumTargetSpeedMPS, (-minimumRollingCruiseS+math.Sqrt(discriminant))/(2*quadratic))
+func coupledVariantStartDistanceM(baseStartDistanceM, baseTargetSpeedMPS, targetSpeedMPS float64) float64 {
+	capturedCruiseBufferM := math.Max(0, baseStartDistanceM-requiredRollingStartDistanceM(baseTargetSpeedMPS))
+	targetDistanceM := requiredRollingStartDistanceM(targetSpeedMPS) + capturedCruiseBufferM
+	return math.Min(maximumStartDistanceM, math.Max(minimumCapturedStartM, targetDistanceM))
 }
 
 func capturedVariantPoses(seed string, start, stop, exit Pose, variancePct float64, baseline bool) (Pose, Pose, Pose) {
@@ -467,12 +474,15 @@ func capturedVariantPoses(seed string, start, stop, exit Pose, variancePct float
 	return start, stop, exit
 }
 
-func capturedVariantSettings(base settings, seed string, variancePct float64, baseline bool) settings {
+func capturedVariantSettings(base settings, seed string, jobIndex int) settings {
 	resolved := cloneSettings(base)
-	if baseline {
+	if jobIndex == 0 {
 		return resolved
 	}
-	resolved.targetSpeedMPS *= 1 + centeredVariant(seed, "target-speed")*(variancePct/100)
+	resolved.targetSpeedMPS = maximumTargetSpeedMPS
+	if jobIndex > 1 {
+		resolved.targetSpeedMPS = base.targetSpeedMPS + variantUnit(seed, "target-speed")*(maximumTargetSpeedMPS-base.targetSpeedMPS)
+	}
 	weatherPool := []string{"CLEAR", "EXTRASUNNY", "CLOUDS", "OVERCAST", "RAIN", "FOGGY", "SMOG", "THUNDER"}
 	resolved.weather = weatherPool[variantIndex(seed, "weather", len(weatherPool))]
 	resolved.time = TimeOfDay{
@@ -543,6 +553,22 @@ func scalePoseFromAnchor(pose, anchor Pose, scale float64) Pose {
 	pose.Y = anchor.Y + (pose.Y-anchor.Y)*scale
 	pose.Z = anchor.Z + (pose.Z-anchor.Z)*scale
 	return pose
+}
+
+func poseAtApproachDistance(pose, anchor Pose, distanceM float64) Pose {
+	currentDistanceM := planarDistance(pose, anchor)
+	if currentDistanceM <= 0 {
+		panic("stop-sign variant invariant violated: captured start and stop poses must be distinct")
+	}
+	relative := poseRelativeTo(pose, anchor)
+	if distanceM <= math.Abs(relative.lateral) {
+		panic("stop-sign variant invariant violated: generated start distance must exceed its lane offset")
+	}
+	forward, right := headingBasis(anchor.Heading)
+	resolved := translatePose(anchor, forward, right, -math.Sqrt(distanceM*distanceM-relative.lateral*relative.lateral), relative.lateral)
+	resolved.Z = anchor.Z + (pose.Z-anchor.Z)*(distanceM/currentDistanceM)
+	resolved.Heading = pose.Heading
+	return resolved
 }
 
 func translatePose(pose Pose, forward, right [2]float64, longitudinal, lateral float64) Pose {
@@ -636,6 +662,9 @@ func ValidateExpandedJob(job Job) error {
 			return err
 		}
 		if err := validateCapturedRoute("expanded job", job.StartPose, job.EgoStopPose, job.ExitPose); err != nil {
+			return err
+		}
+		if err := validateRollingApproachDistance("expanded job", job.StartDistanceM, job.TargetSpeedMPS); err != nil {
 			return err
 		}
 		expectedStopLine := poseAhead(job.EgoStopPose, job.EgoCenterOffsetM)

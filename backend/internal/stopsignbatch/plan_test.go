@@ -99,7 +99,7 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 			EgoStopPose:        &stop,
 			ExitPose:           &exit,
 			AutoVariations:     &AutoVariationSpec{Count: 50, MotionVariancePct: 20},
-			TargetSpeedMPS:     float64Ptr(5),
+			TargetSpeedMPS:     float64Ptr(10),
 			StopConfirmationMS: intPtr(250),
 			AttemptCount:       intPtr(1),
 		}},
@@ -124,22 +124,39 @@ func TestExpandCapturedSceneBuildsDeterministicBoundedVariants(t *testing.T) {
 		baseline.CatalogPosition == nil || baseline.StartPose != start || baseline.EgoStopPose != stop || baseline.ExitPose != exit {
 		t.Fatalf("baseline did not preserve captured scene: %+v", baseline)
 	}
+	minimumSpeedJob := baseline
+	maximumSpeedJob := baseline
 	for index, job := range first {
 		if err := ValidateExpandedJob(job); err != nil {
 			t.Fatalf("generated job %d is invalid: %v", index, err)
 		}
-		if job.StartDistanceM < 31.5 || job.StartDistanceM > 48.5 {
-			t.Fatalf("generated start distance escaped 20%% bound: %+v", job)
-		}
 		if job.ExitDistanceM < 9.4 || job.ExitDistanceM > 14.6 {
 			t.Fatalf("generated end distance escaped 20%% bound: %+v", job)
 		}
-		if job.TargetSpeedMPS < 4 || job.TargetSpeedMPS > 6 {
-			t.Fatalf("generated speed escaped 20%% bound: %+v", job)
+		if job.TargetSpeedMPS < 10 || job.TargetSpeedMPS > 15 {
+			t.Fatalf("generated speed escaped automatic target range: %+v", job)
+		}
+		if index > 0 {
+			wantStartDistanceM := coupledVariantStartDistanceM(40, 10, job.TargetSpeedMPS)
+			if math.Abs(job.StartDistanceM-wantStartDistanceM) > 1e-6 {
+				t.Fatalf("generated start distance is not coupled to target speed: got=%.6f want=%.6f job=%+v", job.StartDistanceM, wantStartDistanceM, job)
+			}
+		}
+		if job.TargetSpeedMPS < minimumSpeedJob.TargetSpeedMPS {
+			minimumSpeedJob = job
+		}
+		if job.TargetSpeedMPS > maximumSpeedJob.TargetSpeedMPS {
+			maximumSpeedJob = job
 		}
 		if planarDistance(job.EgoStopPose, stop) > .35 {
 			t.Fatalf("stop target jitter is too large: %+v", job.EgoStopPose)
 		}
+	}
+	if minimumSpeedJob.TargetSpeedMPS != 10 || maximumSpeedJob.TargetSpeedMPS != 15 {
+		t.Fatalf("seeded jobs must cover the configured target-speed range: min=%+v max=%+v", minimumSpeedJob, maximumSpeedJob)
+	}
+	if minimumSpeedJob.StartDistanceM >= maximumSpeedJob.StartDistanceM {
+		t.Fatalf("faster target must produce a farther start: min=%+v max=%+v", minimumSpeedJob, maximumSpeedJob)
 	}
 	if first[1].Weather == baseline.Weather && first[1].Time == baseline.Time && reflect.DeepEqual(first[1].Vehicle.Color, baseline.Vehicle.Color) {
 		t.Fatalf("generated conditions did not vary: %+v", first[1])
@@ -164,27 +181,53 @@ func TestExpandCapturedSceneRejectsIncompleteOrBackwardsRoutes(t *testing.T) {
 	}
 }
 
-func TestExpandCapturedSceneRequiresRoomForStableRollingCaptureAtHighSpeed(t *testing.T) {
-	start := Pose{X: 0, Y: -70, Z: 30, Heading: 0}
+func TestExpandCapturedSceneDerivesStartForAutomaticSpeedRange(t *testing.T) {
+	start := Pose{X: 0, Y: -35, Z: 30, Heading: 0}
 	stop := Pose{X: 0, Y: 0, Z: 30, Heading: 0}
 	exit := Pose{X: 0, Y: 12, Z: 30, Heading: 0}
-	targetSpeed := 15.0
-	plan := Plan{ID: "high-speed", Seed: "seed", Entries: []Entry{{
+	targetSpeed := 10.0
+	plan := Plan{ID: "speed-range", Seed: "seed", Entries: []Entry{{
 		ID: "sign", CatalogID: "gta-v-sign-0001", CatalogPosition: &WorldPosition{X: 1, Y: 2, Z: 3},
 		StartPose: &start, EgoStopPose: &stop, ExitPose: &exit,
-		AutoVariations: &AutoVariationSpec{Count: 1}, TargetSpeedMPS: &targetSpeed,
+		AutoVariations: &AutoVariationSpec{Count: 2}, TargetSpeedMPS: &targetSpeed,
 	}}}
-	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "record stable cruise") {
-		t.Fatalf("short high-speed approach must be rejected with actionable guidance: %v", err)
-	}
-
-	start.Y = -90
 	jobs, err := Expand(plan)
 	if err != nil {
-		t.Fatalf("long high-speed approach should be accepted: %v", err)
+		t.Fatalf("valid automatic speed range should be accepted: %v", err)
 	}
-	if len(jobs) != 1 || jobs[0].TargetSpeedMPS != 15 {
-		t.Fatalf("high-speed job did not preserve the selected target: %+v", jobs)
+	if len(jobs) != 2 || jobs[0].TargetSpeedMPS != 10 || jobs[1].TargetSpeedMPS != 15 {
+		t.Fatalf("automatic variants did not guarantee range endpoints: %+v", jobs)
+	}
+	if jobs[1].StartDistanceM <= jobs[0].StartDistanceM || jobs[1].StartDistanceM < requiredRollingStartDistanceM(15) {
+		t.Fatalf("maximum-speed job did not move Start far enough back: %+v", jobs)
+	}
+	if jobs[0].StartDistanceM < requiredRollingStartDistanceM(10) {
+		t.Fatalf("minimum-speed job did not extend the captured Start far enough back: %+v", jobs)
+	}
+	targetSpeed = 9
+	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "automatic 10.0-15.0m/s range") {
+		t.Fatalf("automatic range must reject a different minimum target: %v", err)
+	}
+	targetSpeed = 10
+	plan.Entries[0].AutoVariations.Count = 1
+	if _, err := Expand(plan); err == nil || !strings.Contains(err.Error(), "between 2 and") {
+		t.Fatalf("automatic range needs at least two jobs to cover both endpoints: %v", err)
+	}
+}
+
+func TestPoseAtApproachDistancePreservesLaneOffset(t *testing.T) {
+	stop := Pose{X: 100, Y: 200, Z: 20, Heading: 0}
+	captured := Pose{X: 102, Y: 180, Z: 19, Heading: 2}
+	resolved := poseAtApproachDistance(captured, stop, 80)
+	relative := poseRelativeTo(resolved, stop)
+	if math.Abs(planarDistance(resolved, stop)-80) > 1e-6 {
+		t.Fatalf("resolved Start has the wrong planar distance: %+v", resolved)
+	}
+	if math.Abs(relative.lateral-2) > 1e-6 {
+		t.Fatalf("speed coupling moved Start out of its captured lane offset: %+v", resolved)
+	}
+	if relative.longitudinal >= 0 || resolved.Heading != captured.Heading {
+		t.Fatalf("resolved Start lost approach direction or heading: %+v", resolved)
 	}
 }
 

@@ -63,16 +63,16 @@ The red **Hold** control stays available at the bottom-right. `Alt+Shift+H` is t
 
 1. Search the **Stop-sign catalog** and press **Teleport** on any of the 463 signs. Teleport only previews the location and does not modify the scene library.
 2. Inspect the location and press **Use this stop sign** only when it is suitable.
-3. Move the car to the exact beginning of the demonstration and press **Capture Start**.
+3. Move the car at least 16 m before Stop, aligned with the approach lane, and press **Capture Start**. This anchors direction and optional extra cruise distance; generated runs derive their exact reset point.
 4. Move it to the exact vehicle-center stopping point and press **Capture Stop**.
 5. Move it beyond the sign to the desired continuation point and press **Capture End**.
-6. Keep the default **50 variants** and **20% motion variance**, or adjust them. Motion variance is capped at `25%`; weather, clock time, and vehicle color vary broadly.
+6. Keep the default **50 variants** and **20% motion variance**, or adjust them. Target speed spans `10–15 m/s`, and each seeded speed recalculates its own Start distance; weather, clock time, and vehicle color vary broadly. Motion variance is capped at `25%`.
 7. In **Collection queue**, choose **All ready**, **Current only**, or a custom ordered subset of saved signs.
 8. Press **Collect**. The unattended batch runs signs in queue order and every variant produces one continuous attempt with `approach`, `brake_stop`, and `release` labels.
 9. Choose the next catalog sign and repeat. Completed calibrations appear under **Saved signs**, keyed by catalog ID; opening one restores its Start, Stop, and End without recapturing them.
 10. Use **End collection** for an orderly stop, or **Hold** when motion must stop immediately.
 
-The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` preserves the captured scene exactly; later variants perturb route distance and speed within the selected bound, apply only centimeter-scale Stop jitter, and sample broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
+The seed makes expansion reproducible: the same scene, seed, variant count, and variance bound produce the same jobs. Variant `auto-001` guarantees `10 m/s`, `auto-002` guarantees `15 m/s`, and later variants sample between them. Every resolved Start is coupled to speed; later variants also apply small route perturbations, centimeter-scale Stop jitter, and broader visual conditions. See [`docs/stop-sign-collection.md`](docs/stop-sign-collection.md) for the plan contract and collection checklist.
 
 ## Scene geometry contract
 
@@ -87,7 +87,7 @@ Start  ── approach ──> braking boundary ── brake_stop ──> Stop �
 - `End` is the exact destination where the continuous attempt finishes.
 - The selected catalog prop supplies stable physical-sign identity and navigation coordinates, not a model input.
 
-The UI and backend require Start to be far enough before Stop for the selected target speed to accelerate, cruise stably, and brake; End must be beyond Stop; and all three poses must remain compatible with one approach lane. Target speed is selectable from `0.5–15 m/s`. FiveM receives explicit validated poses for every generated variant.
+The captured Start defines the approach lane and optional extra cruise buffer; it must be at least `16 m` before Stop. It does not need to be manually positioned for the fastest run. Automatic target speed spans `10–15 m/s` (`22.4–33.6 mph`): the first run guarantees the minimum, the second guarantees the maximum, and later runs sample the interval deterministically. Every job derives a Start far enough back for its exact speed and preserves any captured distance beyond the minimum-speed requirement. FiveM receives explicit validated poses for every generated variant.
 
 The raw recording still includes launch for auditability. Dataset processing discards launch-heavy anchors and begins the training index only after the desired speed has remained within 2% of the approach peak for one second. The temporal history then contains cruise before `decelerate`, without splicing or fabricating frames.
 

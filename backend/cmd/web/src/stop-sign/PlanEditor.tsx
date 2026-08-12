@@ -20,11 +20,15 @@ import {
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import {useMemo} from "react";
 import {
+    automaticTargetSpeedRange,
+    coupledVariantStartDistanceM,
     currentSceneStep,
     createStopSignSeed,
     formatSpeed,
     MAXIMUM_MOTION_VARIANCE_PCT,
     MAXIMUM_TARGET_SPEED_MPS,
+    MINIMUM_AUTO_TARGET_SPEED_MPS,
+    MINIMUM_VARIANT_COUNT,
     metersPerSecondToMph,
     poseSummary,
     requiredRollingStartDistanceM,
@@ -65,6 +69,14 @@ export function PlanEditor({
     const stats = useMemo(() => stopSignPlanStats(plan), [plan]);
     const errors = entry ? validateStopSignEntry(entry) : ["Teleport to a catalog stop sign first."];
     const step = currentSceneStep(entry);
+    const speedRange = entry ? automaticTargetSpeedRange() : null;
+    const capturedStartDistanceM = entry?.startPose && entry.egoStopPose
+        ? Math.hypot(entry.startPose.x - entry.egoStopPose.x, entry.startPose.y - entry.egoStopPose.y)
+        : null;
+    const startRange = entry && speedRange && capturedStartDistanceM !== null ? {
+        minimumM: coupledVariantStartDistanceM(capturedStartDistanceM, entry.targetSpeedMps, speedRange.minimumMps),
+        maximumM: coupledVariantStartDistanceM(capturedStartDistanceM, entry.targetSpeedMps, speedRange.maximumMps),
+    } : null;
 
     const updateEntry = (next: StopSignPlanEntry) => {
         const entries = [...plan.entries];
@@ -170,13 +182,21 @@ export function PlanEditor({
                                 <Box>
                                     <Typography sx={{fontWeight: 850}}>Automatic seeded variants</Typography>
                                     <Typography variant="body2" color="text.secondary">
-                                        Weather, clock time, and color vary broadly. Route distances and speed stay within the bound below. The visual waypoint is seeded 120–300 m ahead with up to 75 m of left/right offset; End and the Stop target stay exact.
+                                        Target speed spans 10–15 m/s (22.4–33.6 mph) across the seeded runs. Faster runs start farther back while preserving the captured cruise buffer. Weather, clock time, color, and route conditions vary too; Stop stays exact.
                                     </Typography>
                                 </Box>
-                                <Chip
-                                    color="secondary"
-                                    label={`${entry.autoVariations?.count ?? 0} continuous runs · 3 labeled stages each`}
-                                />
+                                <Stack direction="row" sx={{gap: .75, flexWrap: "wrap", justifyContent: "flex-end"}}>
+                                    <Chip color="secondary" label={`${entry.autoVariations?.count ?? 0} continuous runs · 3 labeled stages each`} />
+                                    {speedRange && <Chip
+                                        color="primary"
+                                        variant="outlined"
+                                        label={`${metersPerSecondToMph(speedRange.minimumMps).toFixed(1)}–${metersPerSecondToMph(speedRange.maximumMps).toFixed(1)} mph targets`}
+                                    />}
+                                    {startRange && <Chip
+                                        variant="outlined"
+                                        label={`${startRange.minimumM.toFixed(0)}–${startRange.maximumM.toFixed(0)} m generated Starts`}
+                                    />}
+                                </Stack>
                             </Stack>
                             <Box sx={{display: "grid", gridTemplateColumns: {xs: "1fr", sm: "1fr 1fr"}, gap: 2, alignItems: "center", mt: 1.5}}>
                                 <Box>
@@ -186,7 +206,7 @@ export function PlanEditor({
                                     </Stack>
                                     <Slider
                                         aria-label="Variant count"
-                                        min={1}
+                                        min={MINIMUM_VARIANT_COUNT}
                                         max={100}
                                         step={1}
                                         value={entry.autoVariations?.count ?? 50}
@@ -231,24 +251,15 @@ export function PlanEditor({
                                         <Button variant="outlined" onClick={() => onChange({...plan, seed: createStopSignSeed()})}>New seed</Button>
                                     </Stack>
                                     <Box sx={{px: .5}}>
-                                        <Stack direction="row" sx={{justifyContent: "space-between", alignItems: "center"}}>
-                                            <Typography variant="caption">Target speed</Typography>
-                                            <Chip size="small" color="primary" label={`${metersPerSecondToMph(entry.targetSpeedMps).toFixed(1)} mph · ${entry.targetSpeedMps.toFixed(1)} m/s`} />
+                                        <Typography variant="caption">Automatic target-speed range</Typography>
+                                        <Stack direction="row" sx={{gap: .75, mt: .75, flexWrap: "wrap"}}>
+                                            <Chip size="small" color="primary" label={`${metersPerSecondToMph(MINIMUM_AUTO_TARGET_SPEED_MPS).toFixed(1)} mph minimum`} />
+                                            <Chip size="small" color="primary" variant="outlined" label={`${metersPerSecondToMph(MAXIMUM_TARGET_SPEED_MPS).toFixed(1)} mph maximum`} />
                                         </Stack>
-                                        <Slider
-                                            aria-label="Target speed"
-                                            min={.5}
-                                            max={MAXIMUM_TARGET_SPEED_MPS}
-                                            step={.5}
-                                            value={entry.targetSpeedMps}
-                                            onChange={(_event, value) => updateEntry({...entry, targetSpeedMps: Number(value)})}
-                                            valueLabelFormat={(value) => `${metersPerSecondToMph(value).toFixed(1)} mph`}
-                                            valueLabelDisplay="auto"
-                                        />
                                     </Box>
                                 </Box>
                                 <Typography variant="caption" color="text.secondary" sx={{display: "block", mt: 1}}>
-                                    For {formatSpeed(entry.targetSpeedMps)}, Start needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m before Stop. This is the smooth expert profile, not a GTA top-speed limit. Launch frames stay raw; training begins after one stable cruise second.
+                                    The first run uses the minimum, {formatSpeed(entry.targetSpeedMps)}; the second guarantees the maximum, {formatSpeed(MAXIMUM_TARGET_SPEED_MPS)}; remaining runs sample between them. Start is recalculated from each exact speed. The minimum needs about {requiredRollingStartDistanceM(entry.targetSpeedMps).toFixed(0)} m plus your captured cruise buffer. Launch frames stay raw; training begins after one stable cruise second.
                                 </Typography>
                             </AccordionDetails>
                         </Accordion>

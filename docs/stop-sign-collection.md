@@ -8,7 +8,7 @@ The Collect area at `http://127.0.0.1:8080/` is the primary data-collection surf
 2. Confirm **API** is online, **FiveM** is linked, and **Control** is synchronized. Use **Hold** once and verify it settles before starting a batch.
 3. Search the complete 463-sign catalog and press **Teleport**. This only previews the location; browsing never changes the scene library.
 4. Inspect the location and press **Use this stop sign** when it is suitable.
-5. Drive to the exact beginning of the desired demonstration and press **Capture Start**.
+5. Drive at least `16 m` before Stop, aligned with the approach lane, and press **Capture Start**. This is a direction/cruise-buffer anchor; generated jobs derive their exact reset pose from speed.
 6. Drive to the exact vehicle-center stopping point and press **Capture Stop**.
 7. Drive beyond the sign to the desired continuation point and press **Capture End**.
 8. Review the automatic variant count and motion bound. Defaults are `50` variants and `20%`; the motion bound cannot exceed `25%`.
@@ -27,11 +27,11 @@ The operator captures:
 
 | Pose | Meaning |
 |---|---|
-| `startPose` | Exact reset pose and heading for the continuous attempt. |
+| `startPose` | Captured approach direction and optional extra cruise buffer; expansion derives each job's exact reset pose. |
 | `egoStopPose` | Exact vehicle-center pose and heading for the end of Brake + Stop. |
 | `exitPose` | Exact destination pose and heading where the attempt ends. |
 
-Start distance is speed-aware: it must cover the deterministic acceleration distance, `1.25 s` of stable cruise, and braking distance for the chosen `0.5–15 m/s` target. End must be at least `8 m` beyond Stop, and both must remain within the accepted approach-lane corridor. Invalid or incomplete scenes cannot be queued.
+Captured Start must be at least `16 m` before Stop and stay in the approach-lane corridor. Expansion derives each exact Start from deterministic acceleration distance, `1.25 s` of stable cruise, braking distance, and any extra buffer represented by the captured anchor. Automatic target speed covers `10–15 m/s`. End must be at least `8 m` beyond Stop. Invalid or incomplete scenes cannot be queued.
 
 The saved-scene collection queue can contain every ready sign or any ordered subset. The backend expands the queue in sign order and then seeded-variant order, while FiveM teleports to each saved Start automatically. The queue persists in the browser so an unattended overnight collection can be prepared once and started as one safety-fenced batch.
 
@@ -50,7 +50,7 @@ The saved-scene collection queue can contain every ready sign or any ordered sub
       "egoStopPose": {"x": -1827.0, "y": 3201.0, "z": 32.0, "heading": 320.0},
       "exitPose": {"x": -1836.0, "y": 3212.0, "z": 32.0, "heading": 320.0},
       "autoVariations": {"count": 50, "motionVariancePct": 20},
-      "targetSpeedMps": 5.0
+      "targetSpeedMps": 10.0
     }
   ]
 }
@@ -58,15 +58,15 @@ The saved-scene collection queue can contain every ready sign or any ordered sub
 
 Top-level `id` and `seed` are required. A scene library allows 1–100 signs and at most 5,000 expanded jobs. Each captured scene requires catalog identity, catalog navigation position, Start, Stop, End, and an automatic-variation specification.
 
-Expansion is deterministic. Each generated job uses seed `<plan-seed>:<entry-id>:auto-NNN`. `auto-001` is the exact captured baseline. Remaining jobs vary:
+Expansion is deterministic. Each generated job uses seed `<plan-seed>:<entry-id>:auto-NNN`. `auto-001` preserves baseline conditions and uses the `10 m/s` endpoint; its Start is still speed-coupled. Remaining jobs vary:
 
-- Start-to-Stop distance, Stop-to-End distance, and target speed within `motionVariancePct`.
+- Target speed spanning `10–15 m/s` and Stop-to-End distance within `motionVariancePct`. The captured Start supplies lane direction and any extra cruise buffer. Target speed is generated first; Start is then moved using the shared acceleration/cruise/braking profile, even when the captured anchor itself is closer than the generated distance.
 - Start/End lateral position and heading within small bounded tolerances.
 - Stop by only a small centimeter-scale longitudinal/lateral tolerance and a small heading tolerance.
 - Weather, time of day, and vehicle color broadly across their supported pools.
 - A visual route waypoint `120–300 m` beyond End with a seeded `-75–75 m` lateral offset. This marker does not move End or change the controller's completion target; its resolved pose and offsets are stored in `stopSignGoal`.
 
-The default is `50` variants with `20%` motion variance. The accepted motion range is `0–25%`. Changing the seed intentionally creates a different deterministic set; restoring the old seed reproduces the old set. Manual variation entry is not part of the normal operator workflow.
+The default is `50` variants with `20%` motion variance. The accepted range is `0–25%`. Speed is independent of that percentage: the first run uses `10 m/s`, the second guarantees `15 m/s`, and subsequent seeded runs cover the interval. Start is coupled to the generated speed, so a target is never silently reduced to fit an independently generated Start. Changing the seed intentionally creates a different deterministic set; restoring the old seed reproduces the old set. Manual variation entry is not part of the normal operator workflow.
 
 ## Temporal guarantees
 

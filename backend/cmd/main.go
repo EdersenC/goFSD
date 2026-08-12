@@ -30,7 +30,7 @@ func main() {
 }
 
 func runBackend(args []string, output io.Writer) error {
-	const backendBuildID = "2026-08-11-calibrated-speed-profile-v18"
+	const backendBuildID = "2026-08-11-speed-coupled-variants-v19"
 	handled, err := dispatchBackendCommand(args, output)
 	if err != nil {
 		return err

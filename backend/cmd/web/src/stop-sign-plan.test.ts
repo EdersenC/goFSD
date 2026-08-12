@@ -1,5 +1,7 @@
 import {
+    automaticTargetSpeedRange,
     captureScenePose,
+    coupledVariantStartDistanceM,
     createStopSignPlan,
     currentSceneStep,
     isStopSignSceneCalibrated,
@@ -76,10 +78,19 @@ assertThrows(() => planForEntries(twoScenePlan, []), "at least one");
 assertThrows(() => planForEntries(twoScenePlan, [location.id, location.id]), "duplicate");
 assert(requiredRollingStartDistanceM(15) > 80 && requiredRollingStartDistanceM(15) < 82);
 assert(metersPerSecondToMph(15) > 33.5 && metersPerSecondToMph(15) < 33.6);
-const highSpeedShort = {...plan, entries: [{...plan.entries[0]!, targetSpeedMps: 15}]};
-assert(validateStopSignPlan(highSpeedShort).some((error) => error.includes("record stable cruise")));
-const highSpeedLong = captureScenePose(highSpeedShort, 0, "startPose", {x: 0, y: -140, z: 30, heading: 0});
-assertEqual(validateStopSignPlan(highSpeedLong).length, 0);
+const variedSpeed = automaticTargetSpeedRange();
+assertEqual(variedSpeed.minimumMps, 10);
+assertEqual(variedSpeed.maximumMps, 15);
+const slowerStartM = coupledVariantStartDistanceM(70, 10, variedSpeed.minimumMps);
+const fasterStartM = coupledVariantStartDistanceM(70, 10, variedSpeed.maximumMps);
+assertEqual(slowerStartM, 70);
+assert(fasterStartM > 70);
+const shortMinimum = captureScenePose(plan, 0, "startPose", {x: 0, y: -35, z: 30, heading: 0});
+assertEqual(validateStopSignPlan(shortMinimum).length, 0);
+const tooShort = captureScenePose(shortMinimum, 0, "startPose", {x: 0, y: -15, z: 30, heading: 0});
+assert(validateStopSignPlan(tooShort).some((error) => error.includes("at least 16 m")));
+const migratedOldSpeed = parseStoredStopSignPlan(JSON.stringify({...plan, entries: [{...plan.entries[0]!, targetSpeedMps: 5}]}));
+assertEqual(migratedOldSpeed?.entries[0]?.targetSpeedMps, 10);
 
 const reopened = stageStopSignCatalogLocation(plan, {...location, x: location.x + .1});
 assertEqual(reopened.plan.entries.length, 1);
