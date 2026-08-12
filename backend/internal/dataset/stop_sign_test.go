@@ -22,6 +22,7 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 		"release",
 		"release",
 	}
+	desiredSpeeds := []float64{0.5, 1.5, 2.5, 2.4, 2.0, 0, 0, 0, 0.1, 0.2}
 	frames := make([]VideoFrame, 0, len(phases))
 	labels := make([]timedLabel, 0, len(phases))
 	for index, phase := range phases {
@@ -36,7 +37,7 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 			Label: stopSignTelemetryFixture(
 				phase,
 				float64(index),
-				float64(index)+0.5,
+				desiredSpeeds[index],
 			),
 		})
 	}
@@ -94,6 +95,54 @@ func TestBuildStopSignSamplesPreservesPhasesControlsAndFutureTargets(t *testing.
 	}
 	if current.Raw["eventCollision"] != false {
 		t.Fatalf("raw stop-sign telemetry was not retained: %+v", current.Raw)
+	}
+}
+
+func TestBuildStopSignSamplesUsesCausalAnchorAndFutureFacingTargets(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 0, Label: stopSignTelemetryFixture("cruise_approach", 5, 5)},
+		{RelativeSeconds: 0.05, Label: stopSignTelemetryFixture("decelerate", 5, 5)},
+		{RelativeSeconds: 0.10, Label: stopSignTelemetryFixture("decelerate", 4.8, 4.8)},
+	}
+	frames := []VideoFrame{{Index: 0, PTS: 0.099, ImagePath: "frames/000001.jpg"}}
+	samples, stats := buildStopSignSamplesWithImageOffsetsAndStats(
+		frames,
+		labels,
+		0,
+		[]int{0},
+		1,
+		100*time.Millisecond,
+		[]int{0},
+		[]int{1},
+		50*time.Millisecond,
+	)
+	if len(samples) != 1 || stats.GeneratedSampleCount != 1 {
+		t.Fatalf("expected one causal stop-sign sample: samples=%d stats=%+v", len(samples), stats)
+	}
+	sample := samples[0]
+	if sample.Phase != "cruise_approach" || sample.ClipStage != "approach" {
+		t.Fatalf("anchor must use the latest label at or before its frame: %+v", sample)
+	}
+	if sample.Label.Control.ExpertStopProbability != 0.0 {
+		t.Fatalf("pre-reduction stop intent must be cleared with the premature phase: %+v", sample.Label.Control)
+	}
+	if !reflect.DeepEqual(sample.Label.Aux.FutureStopSignPhases, []string{"decelerate"}) {
+		t.Fatalf("future targets must remain future-facing: %+v", sample.Label.Aux.FutureStopSignPhases)
+	}
+}
+
+func TestLatestLabelAtOrBeforeRejectsFutureAndStaleLabels(t *testing.T) {
+	labels := []timedLabel{
+		{RelativeSeconds: 1.00, Label: map[string]any{"phase": "past"}},
+		{RelativeSeconds: 1.05, Label: map[string]any{"phase": "future"}},
+	}
+	tolerance := (100 * time.Millisecond).Seconds()
+	label, index, ok := latestLabelAtOrBeforeWithIndex(labels, 1.049, tolerance)
+	if !ok || index != 0 || label.Label["phase"] != "past" {
+		t.Fatalf("expected the past label, got label=%+v index=%d ok=%t", label, index, ok)
+	}
+	if _, _, ok := latestLabelAtOrBeforeWithIndex(labels, 1.20, tolerance); ok {
+		t.Fatal("stale past labels must be rejected")
 	}
 }
 

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
-    brakingOnsetDistance,
     classifyStopSignPhase,
     planStopSignExpert,
 } from "./expert";
@@ -39,9 +38,35 @@ function testGeometryUsesGtaHeadingConvention() {
 }
 
 function testPhaseClassificationIsTemporalButNotSequenceDependent() {
-    assert.equal(classifyStopSignPhase(30, 1, 8), "accelerate");
-    assert.equal(classifyStopSignPhase(30, 8, 8), "cruise_approach");
-    assert.equal(classifyStopSignPhase(brakingOnsetDistance(8) - 0.1, 8, 8), "decelerate");
+    const common = {targetSpeedMps: 8, dtSeconds: 0.05};
+    assert.equal(classifyStopSignPhase({
+        ...common,
+        remainingDistanceM: 30,
+        measuredSpeedMps: 1,
+        previousDesiredSpeedMps: 1,
+    }), "accelerate");
+    assert.equal(classifyStopSignPhase({
+        ...common,
+        remainingDistanceM: 30,
+        measuredSpeedMps: 8,
+        previousDesiredSpeedMps: 8,
+    }), "cruise_approach");
+    const brakingInput = {
+        ...common,
+        remainingDistanceM: 5,
+        measuredSpeedMps: 8,
+        previousDesiredSpeedMps: 8,
+    };
+    const phase = classifyStopSignPhase(brakingInput);
+    const command = planStopSignExpert({
+        ...brakingInput,
+        phase,
+        lateralErrorM: 0,
+        headingErrorDeg: 0,
+    });
+    assert.equal(phase, "decelerate");
+    assert(command.desiredSpeedMps < brakingInput.previousDesiredSpeedMps);
+    assert(command.brake > 0);
 }
 
 function testApproachTransitionsFromThrottleToBrake() {

@@ -20,7 +20,7 @@ causal RGB + speed history
 
 ## Model input boundary
 
-Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero is the current sample; there are no future images in the input. Every anchor is labeled `approach`, `brake_stop`, or `release`, while its temporal context remains continuous across boundaries.
+Each sample uses five causal RGB frames and synchronized current-speed telemetry at offsets `[-20, -15, -10, -5, 0]` on the 50 ms telemetry timeline. Offset zero uses the latest telemetry row at or before the RGB anchor; neither the current label nor the image history borrows from the future. Future training targets remain future-facing. Every anchor is labeled `approach`, `brake_stop`, or `release`, while its temporal context remains continuous across boundaries.
 
 The perception boundary is RGB-only with respect to the stop sign and stopping geometry. These values may be recorded for expert generation, labels, scoring, debugging, and safety, but are not model perception inputs:
 

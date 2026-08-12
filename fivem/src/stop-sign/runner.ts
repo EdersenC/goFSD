@@ -323,8 +323,16 @@ export class StopSignRunner {
                 phase = "release";
             } else if (stoppedAtMs !== null) {
                 phase = "stop_hold";
+            } else if (brakingStartedAtMs !== null) {
+                phase = "decelerate";
             } else {
-                phase = classifyStopSignPhase(remainingStopDistanceM, speedMps, job.targetSpeedMps);
+                phase = classifyStopSignPhase({
+                    remainingDistanceM: remainingStopDistanceM,
+                    measuredSpeedMps: speedMps,
+                    targetSpeedMps: job.targetSpeedMps,
+                    previousDesiredSpeedMps,
+                    dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
+                });
                 if (phase === "decelerate" && brakingStartedAtMs === null) {
                     brakingStartedAtMs = nowMs;
                 }
@@ -424,7 +432,13 @@ export class StopSignRunner {
         } else if (frontDistanceM < -0.1) {
             this.phase = "failed";
         } else {
-            this.phase = classifyStopSignPhase(Math.max(0, -error.longitudinalM), speedMps, 8);
+            this.phase = classifyStopSignPhase({
+                remainingDistanceM: Math.max(0, -error.longitudinalM),
+                measuredSpeedMps: speedMps,
+                targetSpeedMps: 8,
+                previousDesiredSpeedMps: speedMps,
+                dtSeconds: STOP_SIGN_CONTROL_INTERVAL_MS / 1000,
+            });
         }
         this.latestTelemetry = telemetryForTarget(
             this.target,

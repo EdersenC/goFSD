@@ -45,6 +45,7 @@ func buildStopSignSamplesWithImageOffsetsAndStats(
 	telemetrySampleInterval time.Duration,
 ) ([]DatasetSample, sampleBuildStats) {
 	var stats sampleBuildStats
+	labels = normalizeStopSignPhaseTimeline(labels)
 	toleranceSeconds := tolerance.Seconds()
 	alignmentTolerance := telemetryAlignmentTolerance(tolerance, telemetrySampleInterval)
 	samples := make([]DatasetSample, 0)
@@ -59,7 +60,7 @@ func buildStopSignSamplesWithImageOffsetsAndStats(
 
 		anchorFrame := frames[anchorIndex]
 		anchorGameTime := anchorFrame.PTS - anchorPTS
-		current, labelIndex, ok := nearestLabelWithIndex(labels, anchorGameTime, toleranceSeconds)
+		current, labelIndex, ok := latestLabelAtOrBeforeWithIndex(labels, anchorGameTime, toleranceSeconds)
 		if !ok {
 			stats.MissingCurrentLabelCount++
 			continue
@@ -113,6 +114,49 @@ func buildStopSignSamplesWithImageOffsetsAndStats(
 	}
 
 	return samples, stats
+}
+
+func normalizeStopSignPhaseTimeline(labels []timedLabel) []timedLabel {
+	normalized := make([]timedLabel, len(labels))
+	lastApproachPhase := "cruise_approach"
+	previousDesiredSpeedMPS := 0.0
+	hasPreviousDesiredSpeed := false
+	decelerationStarted := false
+
+	for index, label := range labels {
+		normalized[index] = timedLabel{RelativeSeconds: label.RelativeSeconds, Label: cloneMap(label.Label)}
+		rawPhase, phaseOK := stopSignPhase(label.Label["stopSignPhase"])
+		desiredSpeedMPS, speedOK := nonNegativeNumber(label.Label["expertDesiredSpeedMps"])
+		if !phaseOK {
+			continue
+		}
+
+		phase := rawPhase
+		switch rawPhase {
+		case "accelerate", "cruise_approach", "decelerate":
+			speedReduction := speedOK && hasPreviousDesiredSpeed && desiredSpeedMPS < previousDesiredSpeedMPS-1e-6
+			if decelerationStarted || speedReduction {
+				decelerationStarted = true
+				phase = "decelerate"
+			} else if rawPhase == "decelerate" {
+				phase = lastApproachPhase
+			} else {
+				lastApproachPhase = rawPhase
+			}
+		case "stop_hold":
+			decelerationStarted = true
+		}
+
+		normalized[index].Label["stopSignPhase"] = phase
+		if rawPhase == "decelerate" && phase != "decelerate" {
+			normalized[index].Label["expertStopProbability"] = 0.0
+		}
+		if speedOK {
+			previousDesiredSpeedMPS = desiredSpeedMPS
+			hasPreviousDesiredSpeed = true
+		}
+	}
+	return normalized
 }
 
 func buildStopSignTrainingLabel(

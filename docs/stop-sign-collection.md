@@ -73,7 +73,7 @@ The default is `50` variants with `20%` motion variance. The accepted motion ran
 - Capture and synchronization happen once at Start. FiveM emits exact transition timestamps and a phase on every 50 ms telemetry row, then capture finalizes once at End.
 - The vehicle, camera, controller history, and recording stay continuous through braking, the brief zero-speed confirmation, and release.
 - Long stationary dwell footage is not collected.
-- Each sample's `clip_stage` comes from its anchor phase. Causal histories and future targets intentionally overlap stage boundaries so transition motion is preserved.
+- Each sample's `clip_stage` comes from the latest telemetry phase at or before its RGB anchor. Causal histories never borrow a future phase; future targets intentionally cross stage boundaries so transition motion is preserved.
 - Model target horizons are `100`, `250`, `500`, and `1000 ms`.
 - Fine behavior phases remain `accelerate`, `cruise_approach`, `decelerate`, `stop_hold`, and `release`; processed `clip_stage` is a logical balancing label, not a physical recording boundary.
 - Collision, timeout, early stop, stop-line crossing, invalid vehicle, and operator stop remain inspectable failures.

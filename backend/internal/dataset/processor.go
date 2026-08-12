@@ -35,7 +35,7 @@ const (
 	defaultStoppedSampleBurst       = 3
 	defaultStoppedSampleSpacing     = 2.0
 	futureTargetSmoothingRadius     = 2
-	processingConfigVersion         = 5
+	processingConfigVersion         = 6
 	processingWorkspacePrefix       = ".processing-work-"
 	processingJournalVersion        = 1
 	processingJournalFile           = "promotion.json"
@@ -1782,6 +1782,27 @@ func nearestLabel(labels []timedLabel, target float64, toleranceSeconds float64)
 
 func nearestLabelWithIndex(labels []timedLabel, target float64, toleranceSeconds float64) (timedLabel, int, bool) {
 	return nearestLabelWithIndexRange(labels, target, toleranceSeconds, 0, len(labels)-1)
+}
+
+func latestLabelAtOrBeforeWithIndex(
+	labels []timedLabel,
+	target float64,
+	toleranceSeconds float64,
+) (timedLabel, int, bool) {
+	if len(labels) == 0 || !isFiniteFloat64(target) || !isFiniteFloat64(toleranceSeconds) || toleranceSeconds < 0 {
+		return timedLabel{}, -1, false
+	}
+	index := sort.Search(len(labels), func(index int) bool {
+		return labels[index].RelativeSeconds > target
+	}) - 1
+	if index < 0 || !isFiniteFloat64(labels[index].RelativeSeconds) {
+		return timedLabel{}, -1, false
+	}
+	delta := target - labels[index].RelativeSeconds
+	if delta < 0 || delta > toleranceSeconds {
+		return timedLabel{}, -1, false
+	}
+	return labels[index], index, true
 }
 
 func nearestLabelWithIndexRange(

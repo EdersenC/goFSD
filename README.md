@@ -106,7 +106,7 @@ Fresh runs use scene `stop-sign:continuous-v2` and this layout:
     └── frames/
 ```
 
-`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, exact stage-transition timestamps, catalog/location identity, resolved variant, seed, attempt index, and synchronized telemetry. One variant produces one trip folder. `dataset.jsonl` assigns each anchor frame a logical `clip_stage` while allowing its causal history and future targets to cross a stage boundary.
+`metadata.json` and `run.jsonl` retain `stopSignGoal`, `stopSignOutcome`, exact stage-transition timestamps, catalog/location identity, resolved variant, seed, attempt index, and synchronized telemetry. One variant produces one trip folder. `dataset.jsonl` assigns each anchor frame from the latest telemetry row at or before that RGB frame; causal history never borrows a future phase, while future targets may cross a stage boundary.
 
 The current model consumes five causal RGB frames plus current-speed history. Stop-sign pose, stop-line distance, ego error, and other oracle geometry are labels/scoring metadata only; they are not perception inputs. The primary outputs are:
 
