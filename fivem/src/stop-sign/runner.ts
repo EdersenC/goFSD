@@ -39,6 +39,7 @@ import {
 import {positionVehicleAtStopSignPose} from "./vehicle-positioning";
 import {deriveStopSignRouteWaypoint, StopSignRouteWaypoint} from "./route-waypoint";
 import {cloneStopSignVariationProfile} from "./variation-profile";
+import {canReuseStopSignVehicle, spawnStopSignVehicleWithRetries} from "./vehicle-lifecycle";
 
 export const STOP_SIGN_SCENE_ID = "stop-sign";
 export const STOP_SIGN_SCENE_VARIANT = "continuous-v2";
@@ -46,6 +47,7 @@ export const STOP_SIGN_SCENE_NAME = `${STOP_SIGN_SCENE_ID}:${STOP_SIGN_SCENE_VAR
 
 const captureWarmupMs = 750;
 const maximumAttemptDurationMs = 90_000;
+const vehicleSpawnRetryDelayMs = 300;
 
 export type StopSignBatchHooks = {
     stopRequested: () => boolean
@@ -152,6 +154,7 @@ export class StopSignRunner {
         const runId = createRunId(batchId);
         let completedJobs = 0;
         let tripIndex = 0;
+        let activeEgo: Ego | null = null;
         this.running = true;
         this.localStopRequested = false;
         try {
@@ -162,20 +165,12 @@ export class StopSignRunner {
                 hooks.onJobStart?.(job, jobOffset + 1);
                 this.configureTarget(job.signPose, job.stopLinePose, job.egoStopPose, job.stopConfirmationMs, job.exitPose);
                 applyEnvironment(job);
-                const ego = buildStopSignEgo(job);
                 this.phase = "spawning";
-                await this.egoService.executeEgoAt(
-                    ego,
-                    toSpawnPoint(job.startPose),
-                    STOP_SIGN_SCENE_NAME,
-                    runId,
-                    () => this.stopWasRequested(hooks),
-                );
-                requireEgo(ego);
-                applyVehicleVariant(ego.vehicle.id, job);
-                await ensurePlayerIsDriver(ego.vehicle.id);
-                SetEntityMaxSpeed(ego.vehicle.id, Math.max(job.targetSpeedMps + 2, 12));
-                SetVehicleMaxSpeed(ego.vehicle.id, Math.max(job.targetSpeedMps + 2, 12));
+                activeEgo = await this.prepareJobEgo(activeEgo, job, runId, hooks);
+                applyVehicleVariant(activeEgo.vehicle.id, job);
+                await ensurePlayerIsDriver(activeEgo.vehicle.id);
+                SetEntityMaxSpeed(activeEgo.vehicle.id, Math.max(job.targetSpeedMps + 2, 12));
+                SetVehicleMaxSpeed(activeEgo.vehicle.id, Math.max(job.targetSpeedMps + 2, 12));
 
                 for (let attempt = 1; attempt <= job.attemptCount; attempt += 1) {
                     if (this.stopWasRequested(hooks)) {
@@ -183,7 +178,7 @@ export class StopSignRunner {
                     }
                     this.attemptIndex = attempt;
                     this.attemptCount = job.attemptCount;
-                    const outcome = await this.runAttempt(ego, job, runId, tripIndex);
+                    const outcome = await this.runAttempt(activeEgo, job, runId, tripIndex);
                     hooks.onAttemptComplete?.(job, attempt, outcome);
                     tripIndex += 1;
                     await wait(200);
@@ -204,6 +199,49 @@ export class StopSignRunner {
                 this.phase = "failed";
             }
         }
+    }
+
+    private async prepareJobEgo(
+        currentEgo: Ego | null,
+        job: StopSignJob,
+        runId: string,
+        hooks: StopSignBatchHooks,
+    ): Promise<Ego> {
+        const requestedModel = stopSignVehicleModel(job);
+        const currentVehicleIsValidAndOwned = Boolean(
+            currentEgo
+            && this.egoService.oldEgo === currentEgo
+            && isValidEntity(currentEgo.vehicle.id),
+        );
+        if (currentEgo && canReuseStopSignVehicle(currentEgo.vehicle.model, requestedModel, currentVehicleIsValidAndOwned)) {
+            currentEgo.vehicle.maxSpeed = job.targetSpeedMps;
+            currentEgo.vehicle.drivingStyle = DrivingStyle.Cautious;
+            return currentEgo;
+        }
+
+        return spawnStopSignVehicleWithRetries(
+            async (attempt) => {
+                const candidate = buildStopSignEgo(job);
+                try {
+                    await this.egoService.executeEgoAt(
+                        candidate,
+                        toSpawnPoint(job.startPose),
+                        STOP_SIGN_SCENE_NAME,
+                        runId,
+                        () => this.stopWasRequested(hooks),
+                    );
+                    requireEgo(candidate);
+                    return candidate;
+                } catch (error: any) {
+                    console.warn(
+                        `[stop-sign] vehicle spawn attempt ${attempt} failed for ${job.id}: ${error?.message ?? error}`,
+                    );
+                    throw error;
+                }
+            },
+            () => this.stopWasRequested(hooks),
+            async (failedAttempt) => wait(vehicleSpawnRetryDelayMs * failedAttempt),
+        );
     }
 
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
@@ -552,13 +590,17 @@ function buildStopSignEgo(job: StopSignJob): Ego {
     return {
         vehicle: {
             id: 0,
-            model: job.vehicle.model || VehicleModel.Sultan,
+            model: stopSignVehicleModel(job),
             color: VehicleColor.Blue,
             maxSpeed: job.targetSpeedMps,
             drivingStyle: DrivingStyle.Cautious,
         },
         waypoints: [],
     };
+}
+
+function stopSignVehicleModel(job: StopSignJob): string {
+    return job.vehicle.model || VehicleModel.Sultan;
 }
 
 function applyEnvironment(job: StopSignJob) {
@@ -570,6 +612,9 @@ function applyEnvironment(job: StopSignJob) {
 function applyVehicleVariant(vehicle: number, job: StopSignJob) {
     const color = job.vehicle.color;
     if (!color) {
+        ClearVehicleCustomPrimaryColour(vehicle);
+        ClearVehicleCustomSecondaryColour(vehicle);
+        SetVehicleColours(vehicle, VehicleColor.Blue, VehicleColor.Blue);
         return;
     }
     SetVehicleCustomPrimaryColour(vehicle, color.r, color.g, color.b);

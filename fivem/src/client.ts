@@ -32,7 +32,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-safe-launch-v22";
+const CLIENT_BUILD_ID = "2026-08-12-ego-reuse-v23";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 

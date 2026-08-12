@@ -17,6 +17,7 @@ import {
     STOP_SIGN_ROUTE_WAYPOINT_MAX_LATERAL_M,
     STOP_SIGN_ROUTE_WAYPOINT_MIN_FORWARD_M,
 } from "./route-waypoint";
+import {canReuseStopSignVehicle, spawnStopSignVehicleWithRetries} from "./vehicle-lifecycle";
 
 function testGeometryUsesGtaHeadingConvention() {
     const north = gtaForwardVector(0);
@@ -51,6 +52,43 @@ function testApproachTrackingStartsOnCapturedTangent() {
     assert.equal(joinedError.blend, 1);
     assert.equal(joinedError.lateralErrorM, 0);
     assert.equal(joinedError.headingErrorDeg, 0);
+}
+
+async function testStopSignVehicleLifecycleReusesAndBoundsRecovery() {
+    assert.equal(canReuseStopSignVehicle("sultan", "SULTAN", true), true);
+    assert.equal(canReuseStopSignVehicle("sultan", "sultan", false), false);
+    assert.equal(canReuseStopSignVehicle("sultan", "futo", true), false);
+
+    let attempts = 0;
+    const retryWaits: number[] = [];
+    const result = await spawnStopSignVehicleWithRetries(
+        async (attempt) => {
+            attempts += 1;
+            if (attempt < 3) {
+                throw new Error(`transient spawn failure ${attempt}`);
+            }
+            return 77;
+        },
+        () => false,
+        async (failedAttempt) => { retryWaits.push(failedAttempt); },
+    );
+    assert.equal(result, 77);
+    assert.equal(attempts, 3);
+    assert.deepEqual(retryWaits, [1, 2]);
+
+    attempts = 0;
+    await assert.rejects(
+        spawnStopSignVehicleWithRetries(
+            async () => {
+                attempts += 1;
+                throw new Error("spawn canceled");
+            },
+            () => true,
+            async () => undefined,
+        ),
+        /spawn canceled/,
+    );
+    assert.equal(attempts, 1);
 }
 
 function testPhaseClassificationIsTemporalButNotSequenceDependent() {
@@ -428,18 +466,23 @@ function baselineVariationProfile(configuredMotionVariancePct = 0) {
     };
 }
 
-testGeometryUsesGtaHeadingConvention();
-testApproachTrackingStartsOnCapturedTangent();
-testPhaseClassificationIsTemporalButNotSequenceDependent();
-testApproachTransitionsFromThrottleToBrake();
-testStopAndGoLabelsAreExplicit();
-testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile();
-testLaunchSteeringIsBoundedAndRateLimited();
-testEarlyStopScoringWaitsForActualDeparture();
-testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
-testAttemptPreflightRejectsUnsafeStarts();
-testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
-testCapturedSceneJobsPreserveExactStartStopEndGeometry();
-testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture();
-testRouteWaypointVariesReproduciblyBeyondEnd();
-console.log("stop-sign expert tests passed");
+async function main() {
+    testGeometryUsesGtaHeadingConvention();
+    testApproachTrackingStartsOnCapturedTangent();
+    await testStopSignVehicleLifecycleReusesAndBoundsRecovery();
+    testPhaseClassificationIsTemporalButNotSequenceDependent();
+    testApproachTransitionsFromThrottleToBrake();
+    testStopAndGoLabelsAreExplicit();
+    testBoundedBehaviorDynamicsChangeThePhysicalSpeedProfile();
+    testLaunchSteeringIsBoundedAndRateLimited();
+    testEarlyStopScoringWaitsForActualDeparture();
+    testFixedIntervalSchedulerDoesNotAccumulateWorkTime();
+    testAttemptPreflightRejectsUnsafeStarts();
+    testExpandedJobsKeepBackendAndFiveMGeometryCoherent();
+    testCapturedSceneJobsPreserveExactStartStopEndGeometry();
+    testLogicalClipPlanLabelsAnchorsWithoutSplittingPhysicalCapture();
+    testRouteWaypointVariesReproduciblyBeyondEnd();
+    console.log("stop-sign expert tests passed");
+}
+
+void main();

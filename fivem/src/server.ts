@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-safe-launch-v22";
+const SERVER_BUILD_ID = "2026-08-12-ego-reuse-v23";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
