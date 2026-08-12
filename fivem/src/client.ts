@@ -31,7 +31,7 @@ import {
     type WaypointTeleportOperations,
 } from "./waypoint-teleport";
 
-const CLIENT_BUILD_ID = "2026-08-11-stop-sign-continuous-v8";
+const CLIENT_BUILD_ID = "2026-08-11-stop-sign-route-waypoint-v11";
 log(`[client] loaded build=${CLIENT_BUILD_ID}`);
 
 
@@ -66,6 +66,7 @@ type ControlCommandType =
     | "clearStopSignTarget"
     | "setStopSignCatalogWaypoint"
     | "probeStopSignTarget"
+    | "teleportStopSignStart"
     | "startStopSignBatch";
 type ControlRuntimeStatus = "idle" | "runningScene" | "runningAllScenes" | "stopping" | "error";
 type ControlStopSignBatchProgress = {
@@ -94,6 +95,7 @@ type ControlCommand = {
     stopSignJobs?: unknown
     stopSignCatalogPosition?: unknown
     stopSignProbe?: unknown
+    stopSignStartPose?: unknown
 }
 
 type AvailableScene = {
@@ -341,6 +343,21 @@ async function executeStopSignProbe(command: ControlCommand, safetyStart: Safety
         + `nodeDistance=${result.probe.distanceFromCatalogM.toFixed(2)}m `
         + `pose=(${result.target.signPose.x.toFixed(2)}, ${result.target.signPose.y.toFixed(2)}, `
         + `${result.target.signPose.z.toFixed(2)}, h=${result.target.signPose.heading.toFixed(1)})`,
+    );
+}
+
+async function executeStopSignStartTeleport(command: ControlCommand, safetyStart: SafetyStartLease) {
+    safetyStart.throwIfStale();
+    reportControlStatus("runningScene", "saved-stop-sign-start");
+    const pose = await sceneManager.teleportStopSignStart(
+        command.stopSignStartPose,
+        () => safetyStart.throwIfStale(),
+    );
+    safetyStart.throwIfStale();
+    reportControlStatus("runningScene", "ego-control");
+    log(
+        `[stop-sign] setup car moved to saved Start `
+        + `(${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${pose.z.toFixed(2)}, h=${pose.heading.toFixed(1)})`,
     );
 }
 
@@ -719,6 +736,9 @@ onNet("control:executeCommand", async (command: ControlCommand) => {
             }
             case "probeStopSignTarget":
                 await executeGuardedControlStart(command, (safetyStart) => executeStopSignProbe(command, safetyStart));
+                break;
+            case "teleportStopSignStart":
+                await executeGuardedControlStart(command, (safetyStart) => executeStopSignStartTeleport(command, safetyStart));
                 break;
             case "startStopSignBatch":
                 await executeGuardedControlStart(command, (safetyStart) => (

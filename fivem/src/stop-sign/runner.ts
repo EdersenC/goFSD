@@ -22,8 +22,8 @@ import {
 } from "./expert";
 import {gtaForwardVector, poseAhead, poseBehind, relativeStopLinePose} from "./geometry";
 import {
+    advanceEarlyStopProgress,
     nextFixedIntervalDeadlineMs,
-    shouldReportStoppedTooEarly,
     validateStopSignAttemptVehicleState,
 } from "./attempt-progress";
 import {
@@ -35,6 +35,7 @@ import {
     StopSignRuntimePhase,
     StopSignTelemetry,
 } from "./types";
+import {positionVehicleAtStopSignPose} from "./vehicle-positioning";
 
 export const STOP_SIGN_SCENE_ID = "stop-sign";
 export const STOP_SIGN_SCENE_VARIANT = "continuous-v2";
@@ -42,7 +43,7 @@ export const STOP_SIGN_SCENE_NAME = `${STOP_SIGN_SCENE_ID}:${STOP_SIGN_SCENE_VAR
 
 const captureWarmupMs = 750;
 const maximumAttemptDurationMs = 90_000;
-const spawnSettleMs = 1000;
+const exitWaypointLeadM = 8;
 
 export type StopSignBatchHooks = {
     stopRequested: () => boolean
@@ -204,7 +205,8 @@ export class StopSignRunner {
     }
 
     private async runAttempt(ego: Ego, job: StopSignJob, runId: string, tripIndex: number): Promise<StopSignOutcome> {
-        SetNewWaypoint(job.exitPose.x, job.exitPose.y);
+        const routeWaypoint = poseAhead(job.exitPose, exitWaypointLeadM);
+        SetNewWaypoint(routeWaypoint.x, routeWaypoint.y);
         await prepareAttemptVehicle(this.egoService, ego, job.startPose);
         return this.recordContinuousAttempt(ego, job, runId, tripIndex);
     }
@@ -271,6 +273,7 @@ export class StopSignRunner {
         let stopConfirmedAtMs: number | null = null;
         let releaseStartedAtMs: number | null = null;
         let stoppedAtDistanceM: number | null = null;
+        let departureObserved = false;
         let previousDesiredSpeedMps = 0;
         let nextControlDeadlineMs = startedAtMs;
         while (true) {
@@ -281,12 +284,22 @@ export class StopSignRunner {
             if (!pose) return outcome(false, "invalid_vehicle", "Vehicle pose is unavailable", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
             const speedMps = Math.max(0, GetEntitySpeed(ego.vehicle.id));
             const centerError = relativeStopLinePose(pose, job.egoStopPose);
+            const startError = relativeStopLinePose(pose, job.startPose);
             const exitError = relativeStopLinePose(pose, job.exitPose);
+            const remainingStopDistanceM = Math.max(0, -centerError.longitudinalM);
             const frontDistanceM = signedFrontBumperDistance(ego.vehicle.id, pose, job.stopLinePose);
             if (releaseStartedAtMs === null && stoppedAtMs === null && frontDistanceM < -0.1) {
                 return outcome(false, "crossed_without_stop", "Front bumper crossed the stop line", startedAtMs, nowMs, null, null, job.stopConfirmationMs, true);
             }
-            if (releaseStartedAtMs === null && stoppedAtMs === null && shouldReportStoppedTooEarly(true, null, speedMps, -centerError.longitudinalM)) {
+            const earlyStopProgress = advanceEarlyStopProgress({
+                departureObserved,
+                speedMps,
+                distanceFromStartM: startError.distanceM,
+                stopStartedAtMs: stoppedAtMs,
+                remainingDistanceM: remainingStopDistanceM,
+            });
+            departureObserved = earlyStopProgress.departureObserved;
+            if (releaseStartedAtMs === null && earlyStopProgress.stoppedTooEarly) {
                 return outcome(false, "stopped_too_early", "Vehicle stopped more than 3 m before Stop", startedAtMs, nowMs, null, null, job.stopConfirmationMs, false);
             }
             const withinStopPose = Math.abs(centerError.longitudinalM) <= STOP_SIGN_STOP_POSITION_TOLERANCE_M
@@ -307,7 +320,7 @@ export class StopSignRunner {
             } else if (stoppedAtMs !== null) {
                 phase = "stop_hold";
             } else {
-                phase = classifyStopSignPhase(Math.max(0, -centerError.longitudinalM), speedMps, job.targetSpeedMps);
+                phase = classifyStopSignPhase(remainingStopDistanceM, speedMps, job.targetSpeedMps);
                 if (phase === "decelerate" && brakingStartedAtMs === null) {
                     brakingStartedAtMs = nowMs;
                 }
@@ -465,30 +478,8 @@ function applyExpertControl(vehicle: number, supervision: {
     SetVehicleForwardSpeed(vehicle, supervision.desiredSpeedMps);
 }
 
-async function resetVehicleAtPose(vehicle: number, pose: StopSignPose) {
-    if (!isValidEntity(vehicle)) {
-        throw new Error("Cannot reset an invalid stop-sign vehicle");
-    }
-    SetEntityRecordsCollisions(vehicle, false);
-    FreezeEntityPosition(vehicle, true);
-    holdVehicle(vehicle);
-    RequestCollisionAtCoord(pose.x, pose.y, pose.z);
-    SetEntityCoordsNoOffset(vehicle, pose.x, pose.y, pose.z + 0.75, false, false, true);
-    SetEntityHeading(vehicle, pose.heading);
-    SetEntityVelocity(vehicle, 0, 0, 0);
-    SetVehicleEngineOn(vehicle, true, true, false);
-    SetVehicleUndriveable(vehicle, false);
-    SetVehicleOnGroundProperly(vehicle);
-    await wait(spawnSettleMs);
-    SetVehicleOnGroundProperly(vehicle);
-    SetEntityRecordsCollisions(vehicle, true);
-    FreezeEntityPosition(vehicle, false);
-    SetVehicleHandbrake(vehicle, false);
-    await wait(150);
-}
-
 async function prepareAttemptVehicle(egoService: EgoService, ego: Ego, pose: StopSignPose) {
-    await resetVehicleAtPose(ego.vehicle.id, pose);
+    await positionVehicleAtStopSignPose(ego.vehicle.id, pose);
     await ensurePlayerIsDriver(ego.vehicle.id);
     SetVehicleEngineOn(ego.vehicle.id, true, true, false);
     SetVehicleUndriveable(ego.vehicle.id, false);

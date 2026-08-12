@@ -69,7 +69,7 @@ export function StopSignCatalog({connected, busyId, activeCatalogId, candidate, 
                     <Chip size="small" label={locations.length > 0 ? `${locations.length} total` : "loading"} />
                 </Stack>
                 {error && <Alert severity="error" sx={{mt: 1.5}}>{error}</Alert>}
-                <SavedStopSignScenes scenes={savedScenes} activeCatalogId={activeCatalogId} onOpen={onOpenSaved} />
+                <SavedStopSignScenes scenes={savedScenes} activeCatalogId={activeCatalogId} busyCatalogId={busyId} onOpen={onOpenSaved} />
                 <TextField
                     label="Search all signs"
                     placeholder="ID, coordinates, type, or map"

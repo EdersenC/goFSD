@@ -9,6 +9,7 @@ export type ControlDispatchCommandType =
     | "clearStopSignTarget"
     | "setStopSignCatalogWaypoint"
     | "probeStopSignTarget"
+    | "teleportStopSignStart"
     | "startStopSignBatch";
 
 export type ControlDispatchCommand = {
@@ -105,6 +106,7 @@ const commandTypes = new Set<ControlDispatchCommandType>([
     "clearStopSignTarget",
     "setStopSignCatalogWaypoint",
     "probeStopSignTarget",
+    "teleportStopSignStart",
     "startStopSignBatch",
 ]);
 

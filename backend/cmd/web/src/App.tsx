@@ -251,16 +251,45 @@ export function App() {
         });
     };
 
-    const openSavedScene = (catalogId: string) => {
+    const openSavedScene = (catalogId: string) => operate(`open-saved:${catalogId}`, async () => {
         const entryIndex = plan.entries.findIndex((entry) => entry.catalogId === catalogId);
         if (entryIndex < 0) {
             setNotice({message: `${catalogId} is no longer in the saved scene library.`, severity: "warning"});
             return;
         }
+        const scene = plan.entries[entryIndex];
+        if (!scene || !isStopSignSceneCalibrated(scene)) {
+            throw new Error(`${catalogId} needs saved Start, Stop, and End positions before it can be opened.`);
+        }
+        if (!fivemControlReady) {
+            throw new Error("FiveM control is not synchronized. Run restart FSD in the server console.");
+        }
+        if (collectionActive || inference.status.data?.active) {
+            throw new Error("Stop collection or inference before opening a saved scene.");
+        }
         setActiveEntryIndex(entryIndex);
         setCandidateLocation(null);
-        setNotice({message: `${catalogId} loaded. Its saved Start, Stop, and End will be reused.`, severity: "success"});
-    };
+        setTeleportingCatalogId(catalogId);
+        try {
+            let state = await fetchControlState();
+            if (!state.telemetry?.isInVehicle || !state.telemetry.vehicleExists) {
+                await runControlStart((safetyEpoch, signal) => sendControlCommand("startEgo", {safetyEpoch}, signal));
+                state = await waitForSetupCar();
+            }
+            await runControlStart((safetyEpoch, signal) => sendControlCommand("teleportStopSignStart", {
+                safetyEpoch,
+                stopSignStartPose: scene.startPose,
+            }, signal));
+            await waitForSavedStart(scene.startPose, catalogId);
+            await sendControlCommand("setStopSignCatalogWaypoint", {
+                stopSignCatalogPosition: waypointAheadOfPose(scene.exitPose),
+            });
+            setNotice({message: `${catalogId} opened. The setup car and player are at its saved Start position.`, severity: "success"});
+            await control.refresh();
+        } finally {
+            setTeleportingCatalogId("");
+        }
+    });
 
     const capturePoint = (field: ScenePoseField) => operate("capture-point", async () => {
         const state = await fetchControlState();
@@ -736,6 +765,37 @@ async function waitForCatalogTeleport(location: StopSignCatalogLocation, timeout
         );
         return distanceM <= 30 ? state : null;
     });
+}
+
+async function waitForSavedStart(pose: Pose, catalogId: string, timeoutMs = 20_000): Promise<ControlState> {
+    return waitForControlState(`saved Start for ${catalogId}`, timeoutMs, (state) => {
+        if (state.runtime.status === "error") {
+            throw new Error(state.runtime.lastError || `FiveM could not open ${catalogId}`);
+        }
+        const telemetry = state.telemetry;
+        if (!telemetry?.vehicleExists || !telemetry.isInVehicle) {
+            return null;
+        }
+        const coordinates = [telemetry.positionX, telemetry.positionY, telemetry.positionZ];
+        if (!coordinates.every((value) => typeof value === "number" && Number.isFinite(value))) {
+            return null;
+        }
+        const horizontalErrorM = Math.hypot(
+            Number(telemetry.positionX) - pose.x,
+            Number(telemetry.positionY) - pose.y,
+        );
+        const headingErrorDeg = Math.abs((((telemetry.currentYaw - pose.heading) + 540) % 360) - 180);
+        return horizontalErrorM <= 1.5 && headingErrorDeg <= 10 ? state : null;
+    });
+}
+
+function waypointAheadOfPose(pose: Pose, distanceM = 8): {x: number, y: number, z: number} {
+    const headingRadians = pose.heading * Math.PI / 180;
+    return {
+        x: pose.x - Math.sin(headingRadians) * distanceM,
+        y: pose.y + Math.cos(headingRadians) * distanceM,
+        z: pose.z,
+    };
 }
 
 async function waitForControlState(

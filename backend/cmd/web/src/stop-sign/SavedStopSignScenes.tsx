@@ -15,10 +15,11 @@ import type {Pose, StopSignPlanEntry} from "../types";
 type Props = {
     scenes: readonly StopSignPlanEntry[]
     activeCatalogId?: string
+    busyCatalogId?: string
     onOpen: (catalogId: string) => void
 };
 
-export function SavedStopSignScenes({scenes, activeCatalogId, onOpen}: Props) {
+export function SavedStopSignScenes({scenes, activeCatalogId, busyCatalogId, onOpen}: Props) {
     const calibrated = scenes.filter(isStopSignSceneCalibrated);
     const draftCount = scenes.length - calibrated.length;
 
@@ -46,6 +47,7 @@ export function SavedStopSignScenes({scenes, activeCatalogId, onOpen}: Props) {
                                 selected={catalogId === activeCatalogId}
                                 data-saved-catalog-id={catalogId}
                                 onClick={() => onOpen(catalogId)}
+                                disabled={Boolean(busyCatalogId)}
                                 sx={{display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 1.5, borderBottom: "1px solid", borderColor: "divider"}}
                             >
                                 <Box sx={{minWidth: 0}}>
@@ -59,7 +61,9 @@ export function SavedStopSignScenes({scenes, activeCatalogId, onOpen}: Props) {
                                         <SavedPose label="End" pose={scene.exitPose} />
                                     </Box>
                                 </Box>
-                                <Button size="small" variant="outlined" onClick={(event) => { event.stopPropagation(); onOpen(catalogId); }}>Open</Button>
+                                <Button size="small" variant="outlined" disabled={Boolean(busyCatalogId)} onClick={(event) => { event.stopPropagation(); onOpen(catalogId); }}>
+                                    {busyCatalogId === catalogId ? "Going…" : "Open + go"}
+                                </Button>
                             </ListItemButton>
                         );
                     })}

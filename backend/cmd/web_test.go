@@ -84,6 +84,8 @@ func TestMUIWorkspaceExposesStopSignTemporalWorkbench(t *testing.T) {
 		"/training/jobs",
 		"/inference/start",
 		"probeStopSignTarget",
+		"teleportStopSignStart",
+		"Open + go",
 		"/stop-sign-locations.csv",
 		"Use this stop sign",
 		"stop-sign-plan.v4",

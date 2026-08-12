@@ -19,6 +19,8 @@ import {
 } from "./stop-sign/location-probe";
 import {StopSignBatchHooks, StopSignRunner, STOP_SIGN_SCENE_NAME} from "./stop-sign/runner";
 import {StopSignJob, StopSignPose, StopSignTelemetry} from "./stop-sign/types";
+import {parseStopSignPose} from "./stop-sign/batch";
+import {positionVehicleAtStopSignPose} from "./stop-sign/vehicle-positioning";
 import {WorldIsolation} from "./world-isolation";
 
 export {syncFlash} from "./syncFlash";
@@ -473,6 +475,27 @@ export class SceneManager {
         egoService.startCaptureCamera(ego);
         const target = stopSignRunner.calibrateTargetFromCurrentEgo();
         return {probe, target};
+    }
+
+    public async teleportStopSignStart(rawPose: unknown, assertCurrent: () => void) {
+        if (!this.egoControlActive || this.activeSceneName !== "ego-control") {
+            throw new Error("Saved Start teleport requires the active setup car");
+        }
+        const ego = egoService.oldEgo;
+        if (!ego || !DoesEntityExist(ego.vehicle.id)) {
+            throw new Error("Saved Start teleport requires a valid managed setup car");
+        }
+        if (GetPedInVehicleSeat(ego.vehicle.id, -1) !== PlayerPedId()) {
+            throw new Error("Saved Start teleport requires the player in the managed driver seat");
+        }
+
+        const pose = parseStopSignPose(rawPose, "stopSignStartPose");
+        await positionVehicleAtStopSignPose(ego.vehicle.id, pose, assertCurrent);
+        assertCurrent();
+        SetVehicleEngineOn(ego.vehicle.id, true, true, false);
+        SetVehicleUndriveable(ego.vehicle.id, false);
+        egoService.startCaptureCamera(ego);
+        return pose;
     }
 
     public async startStopSignBatch(

@@ -3,15 +3,31 @@ import {STOP_SIGN_STOP_SPEED_MPS} from "./expert";
 const MAX_ATTEMPT_ROAD_GRADE_DEG = 15;
 const MAX_ATTEMPT_ROLL_DEG = 5;
 
-export function updateDepartureObserved(
-    alreadyObserved: boolean,
-    speedMps: number,
-    longitudinalFromStartM: number,
-    lateralFromStartM: number,
-): boolean {
-    return alreadyObserved
-        || speedMps >= 0.5
-        || Math.hypot(longitudinalFromStartM, lateralFromStartM) >= 1;
+export type EarlyStopProgressInput = {
+    departureObserved: boolean
+    speedMps: number
+    distanceFromStartM: number
+    stopStartedAtMs: number | null
+    remainingDistanceM: number
+};
+
+export type EarlyStopProgress = {
+    departureObserved: boolean
+    stoppedTooEarly: boolean
+};
+
+/** Keeps the stationary reset frame from being mistaken for a failed early stop. */
+export function advanceEarlyStopProgress(input: EarlyStopProgressInput): EarlyStopProgress {
+    const departureObserved = input.departureObserved
+        || input.speedMps >= 0.5
+        || input.distanceFromStartM >= 1;
+    return {
+        departureObserved,
+        stoppedTooEarly: departureObserved
+            && input.stopStartedAtMs === null
+            && input.speedMps <= STOP_SIGN_STOP_SPEED_MPS
+            && input.remainingDistanceM > 3,
+    };
 }
 
 /** Maintains a fixed-period loop without accumulating work-time drift. */
@@ -21,18 +37,6 @@ export function nextFixedIntervalDeadlineMs(previousDeadlineMs: number, nowMs: n
     }
     const scheduled = previousDeadlineMs + intervalMs;
     return scheduled > nowMs ? scheduled : nowMs + intervalMs;
-}
-
-export function shouldReportStoppedTooEarly(
-    departureObserved: boolean,
-    stopStartedAtMs: number | null,
-    speedMps: number,
-    remainingDistanceM: number,
-): boolean {
-    return departureObserved
-        && stopStartedAtMs === null
-        && speedMps <= STOP_SIGN_STOP_SPEED_MPS
-        && remainingDistanceM > 3;
 }
 
 export type StopSignAttemptVehicleState = {

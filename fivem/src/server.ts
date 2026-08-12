@@ -19,7 +19,7 @@ import {
     runWithAbortTimeout,
 } from "./control-dispatch";
 
-const SERVER_BUILD_ID = "2026-08-11-stop-sign-continuous-v8";
+const SERVER_BUILD_ID = "2026-08-11-stop-sign-route-waypoint-v11";
 const CAPTURE_SOURCE_ID = (process.env.CAPTURE_SOURCE_ID || "monitor-2").trim();
 console.log(`[server] loaded build=${SERVER_BUILD_ID}`);
 
@@ -132,6 +132,7 @@ type ControlCommandType =
     | "clearStopSignTarget"
     | "setStopSignCatalogWaypoint"
     | "probeStopSignTarget"
+    | "teleportStopSignStart"
     | "startStopSignBatch";
 type InferenceCommandType = "startEgo" | "stopEgo";
 
@@ -145,6 +146,7 @@ type ControlCommand = {
     stopSignJobs?: StopSignJob[]
     stopSignCatalogPosition?: {x: number, y: number, z: number}
     stopSignProbe?: unknown
+    stopSignStartPose?: StopSignPose
     createdAt?: string
 }
 

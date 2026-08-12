@@ -51,7 +51,7 @@ const catalogMarkup = render(<StopSignCatalog
     onUseCandidate={() => undefined}
     onOpenSaved={() => undefined}
 />);
-for (const label of ["Choose a stop sign", "Saved signs", "gta-v-sign-0023", "Start", "Stop", "End", "Search all signs", "Teleport", "only previews", "Open saved scene", "has not been added"]) {
+for (const label of ["Choose a stop sign", "Saved signs", "gta-v-sign-0023", "Start", "Stop", "End", "Search all signs", "Teleport", "only previews", "Open saved scene", "Open + go", "has not been added"]) {
     assert(catalogMarkup.includes(label), `stop-sign catalog missing ${label}`);
 }
 

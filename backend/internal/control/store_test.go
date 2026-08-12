@@ -124,6 +124,47 @@ func TestEnqueueStopSignProbeValidatesClonesAndRequiresSafetyEpoch(t *testing.T)
 	}
 }
 
+func TestEnqueueTeleportStopSignStartValidatesClonesAndRequiresSafetyEpoch(t *testing.T) {
+	store := NewStore()
+	pose := &StopSignPose{X: -1618.7, Y: -412.4, Z: 40.3, Heading: 140.24}
+	if _, err := store.Enqueue(CommandRequest{Type: CommandTeleportStopSignStart, StopSignStartPose: pose}); !errors.Is(err, ErrSafetyEpochRequired) {
+		t.Fatalf("teleport without safety epoch: got=%v", err)
+	}
+
+	command, err := store.Enqueue(CommandRequest{
+		Type:              CommandTeleportStopSignStart,
+		SafetyEpoch:       currentSafetyEpochPtr(store),
+		StopSignStartPose: pose,
+	})
+	if err != nil {
+		t.Fatalf("enqueue start teleport: %v", err)
+	}
+	pose.X = 0
+	if command.StopSignStartPose == nil || command.StopSignStartPose.X != -1618.7 {
+		t.Fatalf("enqueue retained caller-owned start pose: %+v", command.StopSignStartPose)
+	}
+	state := store.State()
+	state.PendingCommands[0].StopSignStartPose.Y = 0
+	if got := store.State().PendingCommands[0].StopSignStartPose.Y; got != -412.4 {
+		t.Fatalf("state returned aliased start pose: got=%f", got)
+	}
+
+	for name, invalid := range map[string]*StopSignPose{
+		"missing":          nil,
+		"non-finite":       {X: math.Inf(1)},
+		"out-of-bounds":    {X: 20_000},
+		"bad heading low":  {Heading: -1},
+		"bad heading high": {Heading: 360},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.Enqueue(CommandRequest{Type: CommandTeleportStopSignStart, SafetyEpoch: currentSafetyEpochPtr(store), StopSignStartPose: invalid})
+			if !errors.Is(err, ErrInvalidCommand) {
+				t.Fatalf("expected invalid command, got=%v", err)
+			}
+		})
+	}
+}
+
 func TestEnqueueStartStopSignBatchValidatesIdentityAndAttempts(t *testing.T) {
 	tests := []struct {
 		name string
@@ -988,6 +1029,7 @@ func guardedStartCommandRequests(safetyEpoch *uint64) []CommandRequest {
 		{Type: CommandStartScene, SafetyEpoch: safetyEpoch, SceneName: "inner-city-driving:default"},
 		{Type: CommandRunAllScenes, SafetyEpoch: safetyEpoch},
 		{Type: CommandStartEgo, SafetyEpoch: safetyEpoch},
+		{Type: CommandTeleportStopSignStart, SafetyEpoch: safetyEpoch, StopSignStartPose: &StopSignPose{X: 1, Y: 2, Z: 3, Heading: 90}},
 		validStopSignProbeCommandRequest(safetyEpoch),
 		validStopSignBatchCommandRequest(safetyEpoch),
 	}

@@ -44,11 +44,11 @@ function parseJob(raw: unknown, index: number, ids: Set<string>): StopSignJob {
         catalogPosition: catalogId
             ? parseCatalogPosition(raw.catalogPosition, `stopSignJobs[${index}].catalogPosition`)
             : undefined,
-        signPose: parsePose(raw.signPose, `stopSignJobs[${index}].signPose`),
-        stopLinePose: parsePose(raw.stopLinePose, `stopSignJobs[${index}].stopLinePose`),
-        egoStopPose: parsePose(raw.egoStopPose, `stopSignJobs[${index}].egoStopPose`),
-        startPose: parsePose(raw.startPose, `stopSignJobs[${index}].startPose`),
-        exitPose: parsePose(raw.exitPose, `stopSignJobs[${index}].exitPose`),
+        signPose: parseStopSignPose(raw.signPose, `stopSignJobs[${index}].signPose`),
+        stopLinePose: parseStopSignPose(raw.stopLinePose, `stopSignJobs[${index}].stopLinePose`),
+        egoStopPose: parseStopSignPose(raw.egoStopPose, `stopSignJobs[${index}].egoStopPose`),
+        startPose: parseStopSignPose(raw.startPose, `stopSignJobs[${index}].startPose`),
+        exitPose: parseStopSignPose(raw.exitPose, `stopSignJobs[${index}].exitPose`),
         stopDistanceM,
         egoCenterOffsetM,
         startDistanceM,
@@ -139,7 +139,7 @@ function requireMatchingPose(actual: StopSignPose, expected: StopSignPose, label
     }
 }
 
-function parsePose(raw: unknown, label: string): StopSignPose {
+export function parseStopSignPose(raw: unknown, label = "stop-sign pose"): StopSignPose {
     if (!isRecord(raw)) {
         throw new Error(`${label} must be an object`);
     }

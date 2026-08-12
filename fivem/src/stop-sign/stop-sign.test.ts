@@ -8,9 +8,8 @@ import {
 import {parseStopSignJobs} from "./batch";
 import {logicalClipStageForPhase, STOP_SIGN_LOGICAL_CLIP_STAGES} from "./clip-plan";
 import {
+    advanceEarlyStopProgress,
     nextFixedIntervalDeadlineMs,
-    shouldReportStoppedTooEarly,
-    updateDepartureObserved,
     validateStopSignAttemptVehicleState,
 } from "./attempt-progress";
 
@@ -84,14 +83,41 @@ function testStopAndGoLabelsAreExplicit() {
 }
 
 function testEarlyStopScoringWaitsForActualDeparture() {
-    assert.equal(updateDepartureObserved(false, 0, 0, 0), false);
-    assert.equal(updateDepartureObserved(false, 0, 0.8, 0.4), false);
-    assert.equal(updateDepartureObserved(false, 0, 1, 0), true);
-    assert.equal(updateDepartureObserved(false, 0.5, 0, 0), true);
-    assert.equal(shouldReportStoppedTooEarly(false, null, 0, 40), false);
-    assert.equal(shouldReportStoppedTooEarly(true, null, 0, 40), true);
-    assert.equal(shouldReportStoppedTooEarly(true, null, 1, 40), false);
-    assert.equal(shouldReportStoppedTooEarly(true, 1000, 0, 40), false);
+    const resetFrame = advanceEarlyStopProgress({
+        departureObserved: false,
+        speedMps: 0,
+        distanceFromStartM: 0,
+        stopStartedAtMs: null,
+        remainingDistanceM: 40,
+    });
+    assert.deepEqual(resetFrame, {departureObserved: false, stoppedTooEarly: false});
+
+    const launchFrame = advanceEarlyStopProgress({
+        ...resetFrame,
+        speedMps: 0.5,
+        distanceFromStartM: 0.8,
+        stopStartedAtMs: null,
+        remainingDistanceM: 39.2,
+    });
+    assert.deepEqual(launchFrame, {departureObserved: true, stoppedTooEarly: false});
+
+    const actualEarlyStop = advanceEarlyStopProgress({
+        departureObserved: launchFrame.departureObserved,
+        speedMps: 0,
+        distanceFromStartM: 8,
+        stopStartedAtMs: null,
+        remainingDistanceM: 32,
+    });
+    assert.deepEqual(actualEarlyStop, {departureObserved: true, stoppedTooEarly: true});
+
+    const validStop = advanceEarlyStopProgress({
+        departureObserved: true,
+        speedMps: 0,
+        distanceFromStartM: 40,
+        stopStartedAtMs: 1000,
+        remainingDistanceM: 0,
+    });
+    assert.deepEqual(validStop, {departureObserved: true, stoppedTooEarly: false});
 }
 
 function testFixedIntervalSchedulerDoesNotAccumulateWorkTime() {
